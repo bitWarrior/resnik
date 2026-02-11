@@ -1,0 +1,4 @@
+name: injection_mitigation
+  env:
+    TITLE: ${{ github.event.issue.title }}
+  run: echo "$TITLE"

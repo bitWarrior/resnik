@@ -1,0 +1,14 @@
+name: Fix For Script Injection PR Workflow
+
+on:
+  pull_request:
+
+jobs:
+  vulnerability-fix:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Echo Pull Request Title
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          echo "Pull Request Title: $PR_TITLE"
