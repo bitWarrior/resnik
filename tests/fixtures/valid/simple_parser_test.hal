@@ -1,0 +1,5 @@
+C Simple HAL/S program to test the parser
+C This is a minimal valid program
+
+PROGRAM SIMPLE_TEST;
+CLOSE SIMPLE_TEST;

@@ -1,0 +1,344 @@
+C ========================================================================
+C HAL/S Comprehensive Test File
+C Tests all lexer features and tokenization capabilities
+C ========================================================================
+
+PROGRAM COMPREHENSIVE_TEST;
+   
+   C ====================================================================
+   C Section 1: Data Type Declarations
+   C ====================================================================
+   
+   /* Integer declarations */
+   DECLARE COUNTER INTEGER INITIAL(0);
+   DECLARE MAX_COUNT INTEGER INITIAL(1000);
+   
+   /* Scalar declarations with precision */
+   DECLARE ALTITUDE SCALAR SINGLE INITIAL(10000.0);
+   DECLARE TEMPERATURE SCALAR DOUBLE INITIAL(273.15E+2);
+   DECLARE PRESSURE SCALAR;
+   
+   /* Vector declarations */
+   DECLARE VELOCITY VECTOR(3) SINGLE;
+   DECLARE ACCELERATION VECTOR(3) DOUBLE INITIAL(0.0, 0.0, -9.81);
+   DECLARE POSITION VECTOR(3);
+   
+   /* Matrix declarations */
+   DECLARE ROTATION_MATRIX MATRIX(3,3) DOUBLE;
+   DECLARE TRANSFORM MATRIX(4,4) SINGLE;
+   
+   /* Bit type declarations */
+   DECLARE STATUS_FLAGS BIT(8) INITIAL(BIN '11110000');
+   DECLARE ERROR_CODE BIT(16) INITIAL(HEX 'ABCD');
+   DECLARE OCTAL_VALUE BIT(12) INITIAL(OCT '7777');
+   DECLARE BOOLEAN_FLAG BOOLEAN INITIAL(TRUE);
+   
+   /* Character declarations */
+   DECLARE MISSION_NAME CHARACTER(32) INITIAL('APOLLO_17');
+   DECLARE STATUS_MSG CHARACTER(*);
+   
+   /* Event declarations */
+   DECLARE ABORT_EVENT EVENT;
+   
+   /* Structure declaration */
+   DECLARE TELEMETRY STRUCTURE:
+      1 TIME SCALAR DOUBLE,
+      1 ALTITUDE SCALAR SINGLE,
+      1 VELOCITY VECTOR(3),
+      1 STATUS BIT(8);
+   
+   C ====================================================================
+   C Section 2: Arithmetic Operations and Expressions
+   C ====================================================================
+   
+   /* Basic arithmetic */
+   ALTITUDE = ALTITUDE + 100.0;
+   ALTITUDE = ALTITUDE - 50.25;
+   ALTITUDE = ALTITUDE * 2.0;
+   ALTITUDE = ALTITUDE / 3.5;
+   
+   /* Exponentiation */
+   ALTITUDE = ALTITUDE ** 2;
+   TEMPERATURE = 2.5 ** 3.0;
+   
+   /* Scientific notation */
+   PRESSURE = 1.013E+5;
+   TEMPERATURE = 2.73E-1;
+   COUNTER = 1E3;
+   
+   /* Vector operations */
+   VELOCITY(1) = 500.0;
+   VELOCITY(2) = 300.5E+2;
+   VELOCITY(3) = -150.25E-1;
+   
+   /* Vector arithmetic */
+   POSITION = VELOCITY * 2.0;
+   ACCELERATION = VELOCITY + ACCELERATION;
+   
+   /* Dot product */
+   PRESSURE = VELOCITY . ACCELERATION;
+   
+   /* Matrix operations */
+   ROTATION_MATRIX(1,1) = 1.0;
+   ROTATION_MATRIX(#,#) = 0.0;
+   
+   C ====================================================================
+   C Section 3: Relational and Boolean Operations
+   C ====================================================================
+   
+   /* Relational operators */
+   IF ALTITUDE > 5000.0 THEN
+      STATUS_FLAGS = BIN '00000001';
+      
+   IF TEMPERATURE < 300.0 THEN
+      STATUS_FLAGS = HEX 'FF';
+      
+   IF COUNTER = 100 THEN
+      COUNTER = 0;
+      
+   IF ALTITUDE >= 10000.0 THEN
+      DO;
+         STATUS_MSG = 'HIGH_ALTITUDE';
+      END;
+      
+   IF TEMPERATURE <= 273.15 THEN
+      STATUS_MSG = 'FREEZING';
+      
+   IF COUNTER ¬= 0 THEN
+      COUNTER = COUNTER - 1;
+   
+   /* Boolean operations */
+   IF ALTITUDE > 5000.0 AND TEMPERATURE < 300.0 THEN
+      STATUS_FLAGS = BIN '11111111';
+      
+   IF COUNTER = 0 OR ALTITUDE < 1000.0 THEN
+      CALL EMERGENCY_PROCEDURE;
+      
+   IF NOT BOOLEAN_FLAG THEN
+      BOOLEAN_FLAG = TRUE;
+   
+   C ====================================================================
+   C Section 4: Control Flow Structures
+   C ====================================================================
+   
+   /* Simple IF statement */
+   IF ALTITUDE > 10000.0 THEN
+      COUNTER = COUNTER + 1;
+   
+   /* IF-THEN-ELSE */
+   IF TEMPERATURE > 273.15 THEN
+      STATUS_MSG = 'ABOVE_FREEZING';
+   ELSE
+      STATUS_MSG = 'BELOW_FREEZING';
+   
+   /* Nested IF */
+   IF ALTITUDE > 5000.0 THEN
+      IF TEMPERATURE < 250.0 THEN
+         STATUS_FLAGS = HEX 'A0';
+   
+   /* DO block */
+   DO;
+      COUNTER = COUNTER + 1;
+      ALTITUDE = ALTITUDE + 10.0;
+   END;
+   
+   /* DO FOR loop */
+   DO FOR COUNTER = 1 TO 100;
+      ALTITUDE = ALTITUDE + 1.0;
+   END;
+   
+   /* DO FOR with BY clause */
+   DO FOR COUNTER = 0 TO 100 BY 5;
+      VELOCITY(1) = COUNTER;
+   END;
+   
+   /* DO FOR with DOWNTO */
+   DO FOR COUNTER = 100 DOWNTO 0 BY 10;
+      PRESSURE = PRESSURE - 0.1;
+   END;
+   
+   /* DO WHILE */
+   DO WHILE COUNTER < 1000;
+      COUNTER = COUNTER + 1;
+   END;
+   
+   /* DO UNTIL */
+   DO UNTIL COUNTER = 0;
+      COUNTER = COUNTER - 1;
+   END;
+   
+   /* DO CASE */
+   DO CASE COUNTER;
+      ALTITUDE = 1000.0;
+      ALTITUDE = 2000.0;
+      ALTITUDE = 3000.0;
+   END;
+   
+   C ====================================================================
+   C Section 5: Procedure and Function Calls
+   C ====================================================================
+   
+   /* Simple procedure call */
+   CALL UPDATE_TELEMETRY;
+   
+   /* Procedure call with parameters */
+   CALL COMPUTE_TRAJECTORY(ALTITUDE, VELOCITY);
+   
+   /* Procedure call with ASSIGN */
+   CALL GET_POSITION ASSIGN(POSITION);
+   
+   /* Function call in expression */
+   ALTITUDE = COMPUTE_ALTITUDE(PRESSURE, TEMPERATURE);
+   
+   C ====================================================================
+   C Section 6: Real-time Control Features
+   C ====================================================================
+   
+   /* Schedule statement */
+   SCHEDULE NAVIGATION_TASK PRIORITY(10);
+   
+   /* Schedule with timing */
+   SCHEDULE TELEMETRY_UPDATE ON ABORT_EVENT;
+   
+   /* Schedule with EVERY */
+   SCHEDULE SENSOR_READ REPEAT EVERY 100;
+   
+   /* Schedule with AFTER */
+   SCHEDULE DELAYED_TASK AFTER 5000;
+   
+   /* Wait statement */
+   WAIT UNTIL ABORT_EVENT;
+   
+   /* Terminate statement */
+   TERMINATE NAVIGATION_TASK;
+   
+   /* Cancel statement */
+   CANCEL TELEMETRY_UPDATE;
+   
+   /* Event operations */
+   SET ABORT_EVENT;
+   RESET ABORT_EVENT;
+   SIGNAL ABORT_EVENT;
+   
+   C ====================================================================
+   C Section 7: Special HAL/S Features
+   C ====================================================================
+   
+   /* At symbol for addressing */
+   DECLARE MEMORY_ADDR @ HEX '1000';
+   
+   /* Vector subscripting */
+   VELOCITY(*) = 0.0;  /* All elements */
+   
+   /* Matrix subscripting */
+   ROTATION_MATRIX(*,*) = 0.0;
+   
+   /* Name variables */
+   DECLARE PTR NAME;
+   PTR = NAME(ALTITUDE);
+   
+   /* Lock for concurrency */
+   DECLARE SHARED_DATA SCALAR LOCK;
+   
+   /* Remote data */
+   DECLARE REMOTE_SENSOR SCALAR REMOTE;
+   
+   C ====================================================================
+   C Section 8: String Operations
+   C ====================================================================
+   
+   /* String assignment */
+   MISSION_NAME = 'GEMINI_12';
+   
+   /* String with quotes */
+   STATUS_MSG = 'IT''S OPERATIONAL';
+   
+   /* Character array */
+   DECLARE MSG_BUFFER CHARACTER(80);
+   
+   C ====================================================================
+   C Section 9: Exit and Return Statements
+   C ====================================================================
+   
+   /* Exit from loop */
+   DO WHILE TRUE;
+      IF COUNTER > 1000 THEN
+         EXIT;
+      COUNTER = COUNTER + 1;
+   END;
+   
+   /* Repeat statement */
+   REPEAT;
+   
+   /* Go to statement */
+   GOTO LABEL_100;
+   
+LABEL_100:
+   COUNTER = 0;
+   
+CLOSE COMPREHENSIVE_TEST;
+
+C ========================================================================
+C Procedure Definition
+C ========================================================================
+
+PROCEDURE UPDATE_TELEMETRY;
+   DECLARE LOCAL_TIME SCALAR DOUBLE;
+   
+   LOCAL_TIME = 0.0;
+   
+   RETURN;
+CLOSE UPDATE_TELEMETRY;
+
+C ========================================================================
+C Procedure with Parameters
+C ========================================================================
+
+PROCEDURE COMPUTE_TRAJECTORY(ALT, VEL) ASSIGN(RESULT);
+   DECLARE ALT SCALAR;
+   DECLARE VEL VECTOR(3);
+   DECLARE RESULT SCALAR;
+   
+   RESULT = ALT + VEL(1);
+   
+   RETURN;
+CLOSE COMPUTE_TRAJECTORY;
+
+C ========================================================================
+C Function Definition
+C ========================================================================
+
+FUNCTION COMPUTE_ALTITUDE(PRESS, TEMP) SCALAR;
+   DECLARE PRESS SCALAR;
+   DECLARE TEMP SCALAR;
+   
+   RETURN PRESS / TEMP;
+CLOSE COMPUTE_ALTITUDE;
+
+C ========================================================================
+C Task Definition
+C ========================================================================
+
+TASK NAVIGATION_TASK PRIORITY(10);
+   DECLARE NAV_DATA VECTOR(3);
+   
+   /* Task processing */
+   DO WHILE TRUE;
+      NAV_DATA(*) = 0.0;
+      WAIT FOR 100;
+   END;
+   
+CLOSE NAVIGATION_TASK;
+
+C ========================================================================
+C Compool Definition
+C ========================================================================
+
+COMPOOL SHARED_DATA;
+   DECLARE GLOBAL_COUNTER INTEGER;
+   DECLARE GLOBAL_STATUS BIT(8);
+CLOSE SHARED_DATA;
+
+C ========================================================================
+C End of Test File
+C ========================================================================
