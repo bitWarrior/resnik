@@ -17,6 +17,10 @@ This project is licensed under the GPL v3 license - see the [LICENSE](LICENSE) f
 git clone https://github.com/bitWarrior/resnik
 cd resnik
 
+# Create and activate the python venv
+python3 -m venv resnik-venv
+. resnik-venv/bin/activate
+
 # Install with development dependencies
 pip install -e ".[dev]"
 

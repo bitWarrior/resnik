@@ -19,6 +19,7 @@ from rich.tree import Tree
 from resnik import __version__
 from resnik.lexer import Lexer
 from resnik.parser import Parser
+from resnik.backend.codegen import RustCodeGenerator
 from resnik.exceptions import ResnikError
 
 console = Console()
@@ -196,12 +197,41 @@ def parse(
 @click.argument("input_file", type=click.Path(exists=True, path_type=Path))
 @click.option("--tokens", type=click.Path(path_type=Path), help="Export tokens to file")
 @click.option("--ast", type=click.Path(path_type=Path), help="Export AST to file")
-@click.option("--rust", type=click.Path(path_type=Path), help="Output Rust file (future)")
+@click.option(
+    "--rust",
+    type=click.Path(path_type=Path),
+    help="Output Rust file (default: <input>.rs)",
+)
+@click.option(
+    "--emit-exe",
+    is_flag=True,
+    help="Compile the generated Rust to a native executable (requires rustc)",
+)
+@click.option(
+    "--opt-level",
+    default="2",
+    show_default=True,
+    help="rustc optimization level for --emit-exe (0-3, s, z)",
+)
+@click.option(
+    "--emit-cargo",
+    type=click.Path(path_type=Path),
+    help="Scaffold a Cargo project at this directory",
+)
+@click.option(
+    "--build",
+    is_flag=True,
+    help="With --emit-cargo, run 'cargo build --release' on the project",
+)
 def compile(
     input_file: Path,
     tokens: Optional[Path],
     ast: Optional[Path],
     rust: Optional[Path],
+    emit_exe: bool,
+    opt_level: str,
+    emit_cargo: Optional[Path],
+    build: bool,
 ) -> None:
     """Run the complete compilation pipeline."""
     console.print(
@@ -266,9 +296,91 @@ def compile(
             print_error("Failed to generate AST")
             sys.exit(1)
 
-        # Phase 3: Backend (Future)
-        if rust:
-            print_info("Backend code generation is planned for future release")
+        # Phase 3: Code Generation
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            console=console,
+        ) as progress:
+            task = progress.add_task("[cyan]Phase 3: Code Generation", total=None)
+
+            generator = RustCodeGenerator()
+            rust_code = generator.generate(ast_result)
+            rust_path = rust if rust else input_file.with_suffix(".rs")
+            generator.write_to_file(str(rust_path), rust_code)
+
+            progress.update(task, completed=True)
+
+        print_success(f"Generated Rust source: {rust_path}")
+
+        # Phase 4: Cargo project (optional)
+        if emit_cargo:
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                console=console,
+            ) as progress:
+                task = progress.add_task(
+                    "[cyan]Phase 4: Cargo Project", total=None
+                )
+
+                try:
+                    cargo_result = generator.emit_cargo_project(
+                        rust_code,
+                        str(emit_cargo),
+                        opt_level=opt_level,
+                        build=build,
+                    )
+                except RuntimeError as exc:
+                    progress.update(task, completed=True)
+                    print_error(str(exc))
+                    sys.exit(1)
+
+                progress.update(task, completed=True)
+
+            print_success(f"Scaffolded Cargo project: {cargo_result.project_dir}")
+            print_info(f"Cargo.toml:  {cargo_result.cargo_toml}")
+            print_info(f"src/main.rs: {cargo_result.main_rs}")
+            if cargo_result.built:
+                if cargo_result.success:
+                    print_success(f"Built executable: {cargo_result.executable}")
+                else:
+                    print_error("cargo build failed")
+                    if cargo_result.stderr:
+                        console.print(cargo_result.stderr)
+                    sys.exit(1)
+
+        # Phase 4: Native compilation (optional)
+        if emit_exe:
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                console=console,
+            ) as progress:
+                task = progress.add_task(
+                    "[cyan]Phase 4: Native Compilation", total=None
+                )
+
+                try:
+                    result = generator.compile_to_executable(
+                        rust_code,
+                        str(rust_path.with_suffix("")),
+                        opt_level=opt_level,
+                    )
+                except RuntimeError as exc:
+                    progress.update(task, completed=True)
+                    print_error(str(exc))
+                    sys.exit(1)
+
+                progress.update(task, completed=True)
+
+            if result.success:
+                print_success(f"Built executable: {result.executable}")
+            else:
+                print_error("rustc failed to compile the generated code")
+                if result.stderr:
+                    console.print(result.stderr)
+                sys.exit(1)
 
         console.print("\n[bold green]✓ Compilation completed successfully![/bold green]")
 

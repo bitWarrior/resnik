@@ -27,21 +27,17 @@ X = 5;
         assert any("Unclosed block comment" in e.message for e in lexer.errors)
 
     def test_unclosed_string(self, lexer) -> None:
-        """Test unclosed string literal detection."""
-        # Note: This is hard to trigger with rply patterns
-        # The pattern 'STRING' in lexer matches '([^']|'')*'
-        # But we can test the validation method directly
-        from resnik.lexer.lexer import Lexer
-        
-        test_lexer = Lexer()
-        test_lexer.source_file = "<test>"
-        
-        # Test unclosed string validation
-        result = test_lexer._validate_string("'unclosed", 1, 1)
-        
-        assert result is False
-        assert len(test_lexer.errors) > 0
-        assert "Unclosed string literal" in test_lexer.errors[0].message
+        """An unterminated string literal should surface as a lexer error.
+
+        The STRING rule ('([^']|'')*') requires a closing quote, so a lone
+        opening quote fails to tokenize and is reported as a lexical error
+        through normal tokenization (no separate validation hook needed).
+        """
+        code = "X = 'unclosed"
+        lexer.tokenize(code, "<test>")
+
+        assert len(lexer.errors) > 0
+        assert any("Lexical error" in e.message for e in lexer.errors)
 
     def test_invalid_file_extension(self, lexer) -> None:
         """Test that invalid file extensions are rejected."""
@@ -177,14 +173,26 @@ CLOSE TEST;"""
         assert len(lexer.errors) == 0
 
     def test_only_comments(self, lexer) -> None:
-        """Test file with only comments."""
-        code = """C This is a comment
+        """Test file with only (block) comments produces no tokens."""
+        code = """/* This is a comment */
 /* Another comment */
-C More comments"""
+/* More comments */"""
         tokens = lexer.tokenize(code, "<test>")
-        
-        # Should have no tokens (all comments removed)
+
+        # Should have no tokens (all block comments removed)
         assert len(tokens) == 0
+        assert len(lexer.errors) == 0
+
+    def test_c_prefixed_line_is_not_comment(self, lexer) -> None:
+        """Regression: lines starting with 'C' must not be treated as comments.
+
+        HAL/S has no Fortran-style column-1 'C' comment. Earlier preprocessing
+        blanked any line whose first non-blank character was 'C', which silently
+        deleted CLOSE/CALL/CASE/CHARACTER lines. They must tokenize normally.
+        """
+        tokens = lexer.tokenize("CLOSE TEST", "<test>")
+
+        assert [t.type for t in tokens] == ["KEYWORD_CLOSE", "IDENTIFIER"]
         assert len(lexer.errors) == 0
 
     def test_tokenize_file_with_valid_extension_hs(self, lexer) -> None:

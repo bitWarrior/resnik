@@ -74,13 +74,18 @@ class TestOperators:
 class TestComments:
     """Test comment handling."""
 
-    def test_full_line_comment(self, lexer) -> None:
-        """Test full-line comments are ignored."""
-        code = """C This is a comment
-PROGRAM TEST"""
+    def test_c_prefixed_line_not_comment(self, lexer) -> None:
+        """Regression: a leading 'C' does not start a comment.
+
+        Earlier preprocessing blanked any line whose first non-blank character
+        was 'C', silently deleting CLOSE/CALL/CASE lines. Only block comments
+        (/* */) are stripped now.
+        """
+        code = "CLOSE TEST"
         tokens = lexer.tokenize(code, "<test>")
-        # Should only get PROGRAM and TEST tokens
         assert len(tokens) == 2
+        assert tokens[0].type == "KEYWORD_CLOSE"
+        assert tokens[1].type == "IDENTIFIER"  # TEST is an identifier
 
     def test_block_comment(self, lexer) -> None:
         """Test block comments are removed."""
@@ -117,6 +122,18 @@ class TestErrorDetection:
         assert len(lexer.errors) == 0
         assert len(tokens) == 1
         assert tokens[0].type == "BITSTRING"
+
+    def test_case_insensitive_number_strings(self, lexer) -> None:
+        """Lowercase bin/hex/oct prefixes tokenize like their uppercase forms."""
+        for code, expected in [
+            ("bin '1010'", "BITSTRING"),
+            ("Hex 'ABCD'", "HEXSTRING"),
+            ("oct '1234567'", "OCTSTRING"),
+        ]:
+            lx_tokens = lexer.tokenize(code, "<test>")
+            assert len(lexer.errors) == 0, code
+            assert len(lx_tokens) == 1, code
+            assert lx_tokens[0].type == expected, code
 
     def test_valid_hex_string(self, lexer) -> None:
         """Test valid hex string is accepted."""

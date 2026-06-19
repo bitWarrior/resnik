@@ -3,7 +3,7 @@ Type mapping from HAL/S to Rust types.
 """
 
 from typing import Optional
-from resnik.types import DataType, TypeSpec
+from resnik.types import DataType, Precision, TypeSpec
 
 
 class TypeMapper:
@@ -30,10 +30,15 @@ class TypeMapper:
     TYPE_MAP = {
         DataType.INTEGER: "i32",
         DataType.SCALAR: "f32",  # Default to single precision
-        DataType.BIT: "bool",
+        DataType.BIT: "u32",   # bit string -> unsigned register
+        DataType.BOOLEAN: "bool",
         DataType.CHARACTER: "String",
     }
     
+    def _scalar_type(self, precision: Optional[Precision]) -> str:
+        """Resolve SCALAR element type from precision (f32 single, f64 double)."""
+        return "f64" if precision == Precision.DOUBLE else "f32"
+
     def map_type(self, type_spec: Optional[TypeSpec]) -> str:
         """
         Map a HAL/S type specification to Rust type.
@@ -50,28 +55,25 @@ class TypeMapper:
         
         # Handle array types
         if type_spec.data_type == DataType.VECTOR:
-            # VECTOR uses dimensions[0] for size
+            # VECTOR(n) -> hal_rt Vector<n> (element type is f32)
             size = type_spec.dimensions[0] if type_spec.dimensions else 3
-            return f"[f32; {size}]"
+            return f"Vector<{size}>"
         
         if type_spec.data_type == DataType.MATRIX:
-            # MATRIX uses dimensions[0]=rows, dimensions[1]=cols
+            # MATRIX(r,c) -> hal_rt Matrix<r, c> (element type is f32)
             if type_spec.dimensions and len(type_spec.dimensions) >= 2:
                 rows = type_spec.dimensions[0]
                 cols = type_spec.dimensions[1]
             else:
                 rows, cols = 3, 3
-            return f"[[f32; {cols}]; {rows}]"
+            return f"Matrix<{rows}, {cols}>"
         
         # Get base type
         base_type = self.TYPE_MAP.get(type_spec.data_type, "i32")
         
-        # For SCALAR, check precision (if specified)
+        # For SCALAR, single precision -> f32, double precision -> f64
         if type_spec.data_type == DataType.SCALAR:
-            # Check if precision is specified (would be in a precision field)
-            # Default to f32 (single precision)
-            # If double precision is needed, would return f64
-            base_type = "f32"
+            base_type = self._scalar_type(type_spec.precision)
         
         return base_type
     
@@ -89,7 +91,7 @@ class TypeMapper:
             "INTEGER": "i32",
             "SCALAR": "f32",
             "STRING": "String",
-            "BIT": "bool",
+            "BIT": "u32",
         }
         return type_map.get(literal_type.upper(), "i32")
     
@@ -109,13 +111,13 @@ class TypeMapper:
         defaults = {
             DataType.INTEGER: "0",
             DataType.SCALAR: "0.0",
-            DataType.BIT: "false",
+            DataType.BIT: "0",
             DataType.CHARACTER: 'String::new()',
         }
         
         if type_spec.data_type == DataType.VECTOR:
             size = type_spec.dimensions[0] if type_spec.dimensions else 3
-            return f"[0.0; {size}]"
+            return f"Vector::<{size}>::zero()"
         
         if type_spec.data_type == DataType.MATRIX:
             if type_spec.dimensions and len(type_spec.dimensions) >= 2:
@@ -123,6 +125,6 @@ class TypeMapper:
                 cols = type_spec.dimensions[1]
             else:
                 rows, cols = 3, 3
-            return f"[[0.0; {cols}]; {rows}]"
+            return f"Matrix::<{rows}, {cols}>::zero()"
         
         return defaults.get(type_spec.data_type, "0")

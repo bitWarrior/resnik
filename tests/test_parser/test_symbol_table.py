@@ -148,6 +148,20 @@ class TestSymbolTableScopes:
         table.exit_scope()
         assert len(table.scopes) == 1
 
+    def test_exit_scope_restores_name(self) -> None:
+        """exit_scope should restore the parent scope's name, not leave it stale."""
+        table = SymbolTable()
+
+        table.enter_scope("procedure")
+        table.enter_scope("block")
+        assert table.current_scope_name == "block"
+
+        table.exit_scope()
+        assert table.current_scope_name == "procedure"
+
+        table.exit_scope()
+        assert table.current_scope_name == "global"
+
     def test_exit_global_scope(self) -> None:
         """Test that exiting global scope doesn't break."""
         table = SymbolTable()

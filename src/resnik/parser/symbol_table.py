@@ -35,6 +35,7 @@ class SymbolTable:
     def __init__(self) -> None:
         """Initialize symbol table with global scope."""
         self.scopes: List[Dict[str, Symbol]] = [{}]
+        self._scope_names: List[str] = ["global"]
         self.current_scope_name = "global"
 
     def enter_scope(self, scope_name: str) -> None:
@@ -45,12 +46,15 @@ class SymbolTable:
             scope_name: Name of the new scope
         """
         self.scopes.append({})
+        self._scope_names.append(scope_name)
         self.current_scope_name = scope_name
 
     def exit_scope(self) -> None:
         """Exit current scope and return to parent."""
         if len(self.scopes) > 1:
             self.scopes.pop()
+            self._scope_names.pop()
+            self.current_scope_name = self._scope_names[-1]
 
     def declare(self, symbol: Symbol) -> None:
         """

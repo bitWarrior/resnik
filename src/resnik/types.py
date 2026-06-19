@@ -4,7 +4,7 @@ Type definitions and enums for the Resnik compiler.
 
 from enum import Enum, auto
 from typing import Any, Dict, List, Optional, Union
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 class DataType(Enum):
@@ -35,6 +35,7 @@ class NodeType(Enum):
     # Program structure
     PROGRAM = "Program"
     COMPOOL = "Compool"
+    COMPILATION = "Compilation"
     PROCEDURE = "Procedure"
     FUNCTION = "Function"
     TASK = "Task"
@@ -57,6 +58,7 @@ class NodeType(Enum):
     EXIT = "Exit"
     GOTO = "Goto"
     REPEAT = "Repeat"
+    WRITE = "Write"
 
     # Real-time control
     SCHEDULE = "Schedule"
@@ -85,12 +87,8 @@ class TypeSpec:
 
     data_type: DataType
     precision: Optional[Precision] = None
-    dimensions: List[int] = None
+    dimensions: List[int] = field(default_factory=list)
     length: Optional[int] = None
-
-    def __post_init__(self) -> None:
-        if self.dimensions is None:
-            self.dimensions = []
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization."""

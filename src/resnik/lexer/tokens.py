@@ -132,6 +132,7 @@ KEYWORDS = {
     "AND",
     "OR",
     "NOT",
+    "XOR",
     # Name operations
     "NAME",
     # Number formats

@@ -12,8 +12,21 @@ from resnik.parser.ast_nodes import (
     ProcedureNode,
     AssignmentNode,
     BinaryOpNode,
+    UnaryOpNode,
+    SubscriptNode,
+    ForNode,
     LiteralNode,
     IdentifierNode,
+    TaskNode,
+    CompoolNode,
+    CompilationNode,
+    FunctionCallNode,
+    CallNode,
+    DoBlockNode,
+    WhileNode,
+    IfNode,
+    ScheduleNode,
+    TerminateNode,
 )
 from resnik.types import TypeSpec, DataType
 
@@ -80,7 +93,7 @@ class TestDeclarationGeneration:
         
         code = generator.generate(program)
         
-        assert "let mut x: i32;" in code
+        assert "let mut x: i32 = 0;" in code
 
     def test_scalar_declaration(self) -> None:
         """Test SCALAR declaration."""
@@ -91,7 +104,7 @@ class TestDeclarationGeneration:
         
         code = generator.generate(program)
         
-        assert "let mut y: f32;" in code
+        assert "let mut y: f32 = 0.0;" in code
 
     def test_multiple_identifiers(self) -> None:
         """Test declaration with multiple identifiers."""
@@ -102,9 +115,9 @@ class TestDeclarationGeneration:
         
         code = generator.generate(program)
         
-        assert "let mut a: i32;" in code
-        assert "let mut b: i32;" in code
-        assert "let mut c: i32;" in code
+        assert "let mut a: i32 = 0;" in code
+        assert "let mut b: i32 = 0;" in code
+        assert "let mut c: i32 = 0;" in code
 
     def test_constant_declaration(self) -> None:
         """Test constant declaration."""
@@ -120,7 +133,7 @@ class TestDeclarationGeneration:
         code = generator.generate(program)
         
         # Should not have 'mut'
-        assert "let pi: f32;" in code
+        assert "let pi: f32 = 0.0;" in code
         assert "let mut pi" not in code
 
 
@@ -196,7 +209,7 @@ class TestBinaryOperations:
         binop = BinaryOpNode(operator="+", left=left, right=right, line=1, column=1)
         
         result = generator._generate_expression(binop)
-        assert result == "(5 + 3)"
+        assert result == "5 + 3"
 
     def test_subtraction(self) -> None:
         """Test subtraction operation."""
@@ -206,7 +219,7 @@ class TestBinaryOperations:
         binop = BinaryOpNode(operator="-", left=left, right=right, line=1, column=1)
         
         result = generator._generate_expression(binop)
-        assert result == "(10 - 3)"
+        assert result == "10 - 3"
 
     def test_multiplication(self) -> None:
         """Test multiplication operation."""
@@ -216,7 +229,7 @@ class TestBinaryOperations:
         binop = BinaryOpNode(operator="*", left=left, right=right, line=1, column=1)
         
         result = generator._generate_expression(binop)
-        assert result == "(4 * 5)"
+        assert result == "4 * 5"
 
     def test_division(self) -> None:
         """Test division operation."""
@@ -226,7 +239,7 @@ class TestBinaryOperations:
         binop = BinaryOpNode(operator="/", left=left, right=right, line=1, column=1)
         
         result = generator._generate_expression(binop)
-        assert result == "(20 / 4)"
+        assert result == "20 / 4"
 
     def test_power_operation(self) -> None:
         """Test power operation converts to pow()."""
@@ -285,7 +298,7 @@ class TestAssignmentGeneration:
         program = ProgramNode(name="Test", statements=[assign])
         code = generator.generate(program)
         
-        assert "result = (x + y);" in code
+        assert "result = x + y;" in code
 
 
 class TestProcedureGeneration:
@@ -375,6 +388,594 @@ class TestCompleteProgram:
         
         # Verify structure
         assert "fn main()" in code
-        assert "let mut x: i32;" in code
+        assert "let mut x: i32 = 0;" in code
         assert "x = 5;" in code
         assert "// HAL/S Program: Test" in code
+
+
+class TestRuntimePrelude:
+    """Test the dependency-free runtime prelude and vector/matrix declarations."""
+
+    def test_vector_declaration_uses_prelude_type(self) -> None:
+        """VECTOR(3) declares a Vector<3> initialized to zero."""
+        generator = RustCodeGenerator()
+        decl = DeclareNode(
+            identifiers=["V"],
+            type_spec=TypeSpec(data_type=DataType.VECTOR, dimensions=[3]),
+        )
+        program = ProgramNode(name="Test", declarations=[decl])
+
+        code = generator.generate(program)
+
+        assert "let mut v: Vector<3> = Vector::<3>::zero();" in code
+        assert "mod hal_rt" in code  # prelude is emitted when needed
+
+    def test_matrix_declaration_uses_prelude_type(self) -> None:
+        """MATRIX(3,3) declares a Matrix<3, 3> initialized to zero."""
+        generator = RustCodeGenerator()
+        decl = DeclareNode(
+            identifiers=["M"],
+            type_spec=TypeSpec(data_type=DataType.MATRIX, dimensions=[3, 3]),
+        )
+        program = ProgramNode(name="Test", declarations=[decl])
+
+        code = generator.generate(program)
+
+        assert "let mut m: Matrix<3, 3> = Matrix::<3, 3>::zero();" in code
+
+    def test_no_prelude_when_unused(self) -> None:
+        """Scalar-only programs do not pull in the runtime prelude."""
+        generator = RustCodeGenerator()
+        decl = DeclareNode(
+            identifiers=["X"], type_spec=TypeSpec(data_type=DataType.INTEGER)
+        )
+        program = ProgramNode(name="Test", declarations=[decl])
+
+        code = generator.generate(program)
+
+        assert "mod hal_rt" not in code
+
+
+class TestControlFlowGeneration:
+    """Test IF / DO generation."""
+
+    def test_if_else_generation(self) -> None:
+        """IF/THEN/ELSE with DO blocks becomes a Rust if/else."""
+        generator = RustCodeGenerator()
+        cond = BinaryOpNode(
+            operator=">",
+            left=IdentifierNode(name="X"),
+            right=LiteralNode(value=0, literal_type="INTEGER"),
+        )
+        then_stmt = AssignmentNode(
+            target=IdentifierNode(name="X"),
+            value=LiteralNode(value=1, literal_type="INTEGER"),
+        )
+        else_stmt = AssignmentNode(
+            target=IdentifierNode(name="X"),
+            value=LiteralNode(value=2, literal_type="INTEGER"),
+        )
+        node = IfNode(
+            condition=cond,
+            then_block=DoBlockNode(statements=[then_stmt]),
+            else_block=DoBlockNode(statements=[else_stmt]),
+        )
+        program = ProgramNode(name="Test", statements=[node])
+
+        code = generator.generate(program)
+
+        assert "if x > 0 {" in code
+        assert "} else {" in code
+        assert "x = 1;" in code
+        assert "x = 2;" in code
+
+    def test_if_without_else(self) -> None:
+        """IF without ELSE omits the else arm."""
+        generator = RustCodeGenerator()
+        cond = BinaryOpNode(
+            operator=">",
+            left=IdentifierNode(name="X"),
+            right=LiteralNode(value=0, literal_type="INTEGER"),
+        )
+        node = IfNode(
+            condition=cond,
+            then_block=DoBlockNode(
+                statements=[
+                    AssignmentNode(
+                        target=IdentifierNode(name="X"),
+                        value=LiteralNode(value=1, literal_type="INTEGER"),
+                    )
+                ]
+            ),
+            else_block=None,
+        )
+        program = ProgramNode(name="Test", statements=[node])
+
+        code = generator.generate(program)
+
+        assert "if x > 0 {" in code
+        assert "} else {" not in code
+
+
+class TestRealtimeGeneration:
+    """Test SCHEDULE / TERMINATE host stubs."""
+
+    def test_schedule_generation(self) -> None:
+        """SCHEDULE maps to a hal_rt::schedule call and pulls in the prelude."""
+        generator = RustCodeGenerator()
+        node = ScheduleNode(
+            task_name="MANEUVER_TASK",
+            priority=LiteralNode(value=15, literal_type="INTEGER"),
+        )
+        program = ProgramNode(name="Test", statements=[node])
+
+        code = generator.generate(program)
+
+        # MANEUVER_TASK is not defined in this unit -> logged no-op, not a spawn
+        assert 'schedule_pending("MANEUVER_TASK", 15);' in code
+        assert "mod hal_rt" in code
+
+    def test_terminate_generation(self) -> None:
+        """TERMINATE maps to a hal_rt::terminate call."""
+        generator = RustCodeGenerator()
+        program = ProgramNode(name="Test", statements=[TerminateNode()])
+
+        code = generator.generate(program)
+
+        # bare TERMINATE ends the current thread/process
+        assert "return;" in code
+
+
+class TestFunctionCallGeneration:
+    """Test built-in / function call expressions."""
+
+    def test_function_call_lowercased(self) -> None:
+        """ABVAL(V) becomes abval(v)."""
+        generator = RustCodeGenerator()
+        call = FunctionCallNode(
+            name="ABVAL", arguments=[IdentifierNode(name="V")]
+        )
+
+        result = generator._generate_expression(call)
+
+        assert result == "abval(v)"
+
+    def test_function_call_multiple_args(self) -> None:
+        """Multiple arguments are comma-separated."""
+        generator = RustCodeGenerator()
+        call = FunctionCallNode(
+            name="MAX",
+            arguments=[IdentifierNode(name="A"), IdentifierNode(name="B")],
+        )
+
+        result = generator._generate_expression(call)
+
+        assert result == "max(a, b)"
+
+
+class TestPrecedenceParenthesization:
+    """Test minimal, correct parenthesization."""
+
+    def test_higher_precedence_child_no_parens(self) -> None:
+        """A * B + C needs no parens around A * B."""
+        generator = RustCodeGenerator()
+        mul = BinaryOpNode(
+            operator="*",
+            left=IdentifierNode(name="A"),
+            right=IdentifierNode(name="B"),
+        )
+        expr = BinaryOpNode(
+            operator="+", left=mul, right=IdentifierNode(name="C")
+        )
+
+        assert generator._generate_expression(expr) == "a * b + c"
+
+    def test_lower_precedence_child_parenthesized(self) -> None:
+        """(A + B) * C parenthesizes the lower-precedence child."""
+        generator = RustCodeGenerator()
+        add = BinaryOpNode(
+            operator="+",
+            left=IdentifierNode(name="A"),
+            right=IdentifierNode(name="B"),
+        )
+        expr = BinaryOpNode(
+            operator="*", left=add, right=IdentifierNode(name="C")
+        )
+
+        assert generator._generate_expression(expr) == "(a + b) * c"
+
+
+class TestTaskGeneration:
+    """Test TASK block generation (sequential stand-in, not concurrency)."""
+
+    def test_task_generates_sequential_main(self) -> None:
+        """A TASK block compiles to a main that runs its body once."""
+        generator = RustCodeGenerator()
+        task = TaskNode(
+            name="ATTITUDE_CTRL",
+            statements=[
+                AssignmentNode(
+                    target=IdentifierNode(name="X"),
+                    value=LiteralNode(value=1, literal_type="INTEGER"),
+                )
+            ],
+        )
+
+        code = generator.generate(task)
+
+        assert "fn main()" in code
+        assert "HAL/S Task: ATTITUDE_CTRL" in code
+        assert "sequential stand-in" in code  # clearly marked as not concurrent
+        assert "x = 1;" in code
+
+
+class TestInitialValues:
+    """Test INITIAL(...) declaration initializers."""
+
+    def test_vector_initial(self) -> None:
+        """VECTOR with INITIAL builds the vector from the listed components."""
+        generator = RustCodeGenerator()
+        decl = DeclareNode(
+            identifiers=["V"],
+            type_spec=TypeSpec(data_type=DataType.VECTOR, dimensions=[3]),
+            initial_values=[
+                LiteralNode(value=0.0, literal_type="SCALAR") for _ in range(3)
+            ],
+        )
+        program = ProgramNode(name="Test", declarations=[decl])
+
+        code = generator.generate(program)
+
+        assert "let mut v: Vector<3> = Vector([0.0, 0.0, 0.0]);" in code
+
+    def test_scalar_initial(self) -> None:
+        """SCALAR with a single INITIAL value uses that value."""
+        generator = RustCodeGenerator()
+        decl = DeclareNode(
+            identifiers=["GAIN"],
+            type_spec=TypeSpec(data_type=DataType.SCALAR),
+            initial_value=LiteralNode(value=3.14, literal_type="SCALAR"),
+        )
+        program = ProgramNode(name="Test", declarations=[decl])
+
+        code = generator.generate(program)
+
+        assert "let mut gain: f32 = 3.14;" in code
+
+
+class TestNestedTaskThreads:
+    """Test nested TASK -> OS-thread spawn/join (Option 1 model)."""
+
+    def test_nested_task_spawned_and_joined(self) -> None:
+        """A nested task is emitted as a fn, spawned by SCHEDULE, and joined."""
+        generator = RustCodeGenerator()
+        worker = TaskNode(
+            name="WORKER",
+            statements=[
+                AssignmentNode(
+                    target=IdentifierNode(name="X"),
+                    value=LiteralNode(value=1, literal_type="INTEGER"),
+                )
+            ],
+        )
+        sched = ScheduleNode(
+            task_name="WORKER",
+            priority=LiteralNode(value=5, literal_type="INTEGER"),
+        )
+        program = ProgramNode(name="Guidance", statements=[sched], tasks=[worker])
+
+        code = generator.generate(program)
+
+        assert "fn worker()" in code                       # task body as a function
+        assert '__tasks.push(schedule("WORKER", 5, worker));' in code  # spawned
+        assert "for __h in __tasks { let _ = __h.join(); }" in code    # joined
+
+
+class TestProceduresAndLoops:
+    """Procedures with params, CALL, DO WHILE, and = equality."""
+
+    def test_procedure_param_typed_from_body_declare(self) -> None:
+        """A parameter is typed by its body DECLARE and not re-emitted as a local."""
+        generator = RustCodeGenerator()
+        proc = ProcedureNode(
+            name="PROCESS_SPW",
+            parameters=["PACKET_ID"],
+            statements=[
+                DeclareNode(
+                    identifiers=["PACKET_ID"],
+                    type_spec=TypeSpec(data_type=DataType.INTEGER),
+                ),
+                DeclareNode(
+                    identifiers=["KILROY"],
+                    type_spec=TypeSpec(data_type=DataType.SCALAR),
+                ),
+            ],
+        )
+        program = ProgramNode(name="P", procedures=[proc])
+        code = generator.generate(program)
+
+        assert "fn process_spw(packet_id: i32)" in code   # typed from body declare
+        assert "let mut packet_id" not in code            # not shadowed as a local
+        assert "let mut kilroy: f32" in code              # real local stays
+
+    def test_call_statement(self) -> None:
+        """CALL p(x) becomes a Rust call statement."""
+        generator = RustCodeGenerator()
+        call = CallNode(name="PROCESS_SPW", arguments=[IdentifierNode(name="I")])
+        program = ProgramNode(name="P", statements=[call])
+        code = generator.generate(program)
+        assert "process_spw(i);" in code
+
+    def test_do_while_loop(self) -> None:
+        """DO WHILE <cond>; ... END; becomes a Rust while loop."""
+        generator = RustCodeGenerator()
+        cond = BinaryOpNode(
+            operator="<",
+            left=IdentifierNode(name="I"),
+            right=LiteralNode(value=10, literal_type="INTEGER"),
+        )
+        body = AssignmentNode(
+            target=IdentifierNode(name="I"),
+            value=BinaryOpNode(
+                operator="+",
+                left=IdentifierNode(name="I"),
+                right=LiteralNode(value=1, literal_type="INTEGER"),
+            ),
+        )
+        loop = WhileNode(condition=cond, statements=[body])
+        program = ProgramNode(name="P", statements=[loop])
+        code = generator.generate(program)
+        assert "while i < 10 {" in code
+        assert "i = i + 1;" in code
+
+    def test_equals_is_equality_in_expression(self) -> None:
+        """`=` inside an expression maps to Rust `==`."""
+        generator = RustCodeGenerator()
+        cond = BinaryOpNode(
+            operator="=",
+            left=IdentifierNode(name="PACKET_ID"),
+            right=LiteralNode(value=255, literal_type="INTEGER"),
+        )
+        node = IfNode(condition=cond, then_block=DoBlockNode(statements=[]))
+        program = ProgramNode(name="P", statements=[node])
+        code = generator.generate(program)
+        assert "if packet_id == 255 {" in code
+
+
+class TestBitOperations:
+    """BIT registers, $ subscripting, hex/bit literals, and bitwise ops."""
+
+    def test_bit_width_declares_u32(self) -> None:
+        generator = RustCodeGenerator()
+        decl = DeclareNode(
+            identifiers=["REG"],
+            type_spec=TypeSpec(data_type=DataType.BIT, dimensions=[16]),
+        )
+        code = generator.generate(ProgramNode(name="P", declarations=[decl]))
+        assert "let mut reg: u32" in code
+
+    def test_subscript_msb_first(self) -> None:
+        """REG$1 is the MSB: (reg >> (width-1)) & 1 for a 16-bit register."""
+        generator = RustCodeGenerator()
+        decl = DeclareNode(
+            identifiers=["REG"],
+            type_spec=TypeSpec(data_type=DataType.BIT, dimensions=[16]),
+        )
+        assign = AssignmentNode(
+            target=IdentifierNode(name="B"),
+            value=SubscriptNode(operand=IdentifierNode(name="REG"), index=1),
+        )
+        code = generator.generate(
+            ProgramNode(name="P", declarations=[decl], statements=[assign])
+        )
+        assert "(reg >> 15) & 1" in code
+
+    def test_hex_literal(self) -> None:
+        generator = RustCodeGenerator()
+        assign = AssignmentNode(
+            target=IdentifierNode(name="X"),
+            value=LiteralNode(value=0x00FF, literal_type="HEX"),
+        )
+        code = generator.generate(ProgramNode(name="P", statements=[assign]))
+        assert "0xFF" in code
+
+    def test_xor_maps_to_caret(self) -> None:
+        generator = RustCodeGenerator()
+        expr = BinaryOpNode(
+            operator="XOR",
+            left=IdentifierNode(name="A"),
+            right=LiteralNode(value=2, literal_type="HEX"),
+        )
+        assign = AssignmentNode(target=IdentifierNode(name="A"), value=expr)
+        code = generator.generate(ProgramNode(name="P", statements=[assign]))
+        assert "a ^ 0x2" in code
+
+    def test_and_parenthesizes_comparisons(self) -> None:
+        """`&` binds tighter than `==` in Rust, so comparison operands keep parens."""
+        generator = RustCodeGenerator()
+        left = BinaryOpNode(operator="=", left=IdentifierNode(name="A"),
+                            right=LiteralNode(value=1, literal_type="INTEGER"))
+        right = BinaryOpNode(operator="=", left=IdentifierNode(name="B"),
+                             right=LiteralNode(value=0, literal_type="INTEGER"))
+        cond = BinaryOpNode(operator="AND", left=left, right=right)
+        node = IfNode(condition=cond, then_block=DoBlockNode(statements=[]))
+        code = generator.generate(ProgramNode(name="P", statements=[node]))
+        assert "(a == 1) & (b == 0)" in code
+
+
+class TestCompool:
+    """COMPOOL shared globals and cross-unit symbol resolution."""
+
+    def _compool(self):
+        return CompoolNode(
+            name="SHARED",
+            declarations=[
+                DeclareNode(
+                    identifiers=["SYS_CLOCK"],
+                    type_spec=TypeSpec(data_type=DataType.SCALAR),
+                    attributes={"static": True},
+                    initial_value=LiteralNode(value=0.0, literal_type="SCALAR"),
+                ),
+                DeclareNode(
+                    identifiers=["VEHICLE_MASS"],
+                    type_spec=TypeSpec(data_type=DataType.SCALAR),
+                    is_constant=True,
+                    initial_value=LiteralNode(value=105000.0, literal_type="SCALAR"),
+                ),
+            ],
+        )
+
+    def test_constant_is_const_mutable_is_mutex(self) -> None:
+        generator = RustCodeGenerator()
+        code = generator.generate(self._compool())
+        assert "const VEHICLE_MASS: f32 = 105000.0;" in code
+        assert "static SYS_CLOCK: std::sync::Mutex<f32> = std::sync::Mutex::new(0.0);" in code
+
+    def test_global_read_uses_lock(self) -> None:
+        generator = RustCodeGenerator()
+        task = TaskNode(
+            name="T",
+            statements=[
+                AssignmentNode(
+                    target=IdentifierNode(name="X"),
+                    value=IdentifierNode(name="SYS_CLOCK"),
+                )
+            ],
+        )
+        code = generator.generate(CompilationNode(units=[self._compool(), task]))
+        assert "x = (*SYS_CLOCK.lock().unwrap());" in code
+
+    def test_global_write_is_deadlock_safe(self) -> None:
+        """Writing a mutable global evaluates the RHS before taking the lock."""
+        generator = RustCodeGenerator()
+        rmw = AssignmentNode(
+            target=IdentifierNode(name="SYS_CLOCK"),
+            value=BinaryOpNode(
+                operator="+",
+                left=IdentifierNode(name="SYS_CLOCK"),
+                right=LiteralNode(value=0.125, literal_type="SCALAR"),
+            ),
+        )
+        task = TaskNode(name="T", statements=[rmw])
+        code = generator.generate(CompilationNode(units=[self._compool(), task]))
+        assert "let __v = (*SYS_CLOCK.lock().unwrap()) + 0.125;" in code
+        assert "*SYS_CLOCK.lock().unwrap() = __v;" in code
+
+    def test_single_unit_unwraps(self) -> None:
+        """A one-unit file parses to the unit itself, not a CompilationNode."""
+        from resnik import Lexer, Parser
+        src = "P: PROGRAM;\n  DECLARE X INTEGER;\nCLOSE P;\n"
+        ast = Parser().parse(Lexer().tokenize(src, "p.hal"))
+        assert ast.node_type.value == "Program"
+
+    def test_two_units_make_compilation(self) -> None:
+        from resnik import Lexer, Parser
+        src = ("S: COMPOOL;\n  DECLARE G INTEGER;\nCLOSE S;\n"
+               "T: TASK;\n  DECLARE X INTEGER;\nCLOSE T;\n")
+        ast = Parser().parse(Lexer().tokenize(src, "m.hal"))
+        assert ast.node_type.value == "Compilation"
+        assert [type(u).__name__ for u in ast.units] == ["CompoolNode", "TaskNode"]
+
+
+class TestForAndVectorSubscript:
+    """DO FOR loops, vector element subscripting, dynamic indices, NOT =."""
+
+    def test_for_loop_inclusive_range(self) -> None:
+        generator = RustCodeGenerator()
+        loop = ForNode(
+            var="IDX",
+            start=LiteralNode(value=1, literal_type="INTEGER"),
+            end=LiteralNode(value=3, literal_type="INTEGER"),
+            statements=[],
+        )
+        code = generator.generate(ProgramNode(name="P", statements=[loop]))
+        assert "for idx in 1..=3 {" in code
+
+    def test_vector_element_lvalue_one_indexed(self) -> None:
+        """VEC$IDX is a 1-indexed element place expression."""
+        generator = RustCodeGenerator()
+        decl = DeclareNode(
+            identifiers=["VEC"],
+            type_spec=TypeSpec(data_type=DataType.VECTOR, dimensions=[3]),
+        )
+        assign = AssignmentNode(
+            target=SubscriptNode(
+                operand=IdentifierNode(name="VEC"),
+                index=IdentifierNode(name="IDX"),
+            ),
+            value=LiteralNode(value=1.0, literal_type="SCALAR"),
+        )
+        code = generator.generate(
+            ProgramNode(name="P", declarations=[decl], statements=[assign])
+        )
+        assert "vec.0[(idx - 1) as usize] = 1.0;" in code
+
+    def test_vector_element_constant_index(self) -> None:
+        generator = RustCodeGenerator()
+        decl = DeclareNode(
+            identifiers=["VEC"],
+            type_spec=TypeSpec(data_type=DataType.VECTOR, dimensions=[3]),
+        )
+        sub = SubscriptNode(operand=IdentifierNode(name="VEC"),
+                            index=LiteralNode(value=2, literal_type="INTEGER"))
+        assign = AssignmentNode(target=IdentifierNode(name="X"), value=sub)
+        code = generator.generate(
+            ProgramNode(name="P", declarations=[decl], statements=[assign])
+        )
+        assert "vec.0[1]" in code   # 1-indexed 2 -> 0-indexed 1
+
+    def test_not_equals_operator(self) -> None:
+        generator = RustCodeGenerator()
+        cond = BinaryOpNode(
+            operator="¬=",
+            left=IdentifierNode(name="X"),
+            right=LiteralNode(value=1.0, literal_type="SCALAR"),
+        )
+        node = IfNode(condition=cond, then_block=DoBlockNode(statements=[]))
+        code = generator.generate(ProgramNode(name="P", statements=[node]))
+        assert "x != 1.0" in code
+
+
+class TestStrings:
+    """CHARACTER strings: concatenation, LENGTH, sized type, comparison."""
+
+    def test_character_initial_to_string(self) -> None:
+        generator = RustCodeGenerator()
+        decl = DeclareNode(
+            identifiers=["MSG"],
+            type_spec=TypeSpec(data_type=DataType.CHARACTER, dimensions=[10]),
+            initial_value=LiteralNode(value="HI", literal_type="STRING"),
+        )
+        code = generator.generate(ProgramNode(name="P", declarations=[decl]))
+        assert 'let mut msg: String = "HI".to_string();' in code
+
+    def test_concatenation_uses_format(self) -> None:
+        generator = RustCodeGenerator()
+        expr = BinaryOpNode(
+            operator="||",
+            left=IdentifierNode(name="A"),
+            right=LiteralNode(value="!", literal_type="STRING"),
+        )
+        assign = AssignmentNode(target=IdentifierNode(name="A"), value=expr)
+        code = generator.generate(ProgramNode(name="P", statements=[assign]))
+        assert 'format!("{}{}", a, "!")' in code
+
+    def test_length_intrinsic(self) -> None:
+        generator = RustCodeGenerator()
+        call = FunctionCallNode(name="LENGTH", arguments=[IdentifierNode(name="S")])
+        assign = AssignmentNode(target=IdentifierNode(name="N"), value=call)
+        code = generator.generate(ProgramNode(name="P", statements=[assign]))
+        assert "s.len() as i32" in code
+        # LENGTH alone must not pull in the hal_rt prelude
+        assert "mod hal_rt" not in code
+
+    def test_string_equality(self) -> None:
+        generator = RustCodeGenerator()
+        cond = BinaryOpNode(
+            operator="=",
+            left=IdentifierNode(name="S"),
+            right=LiteralNode(value="OK", literal_type="STRING"),
+        )
+        node = IfNode(condition=cond, then_block=DoBlockNode(statements=[]))
+        code = generator.generate(ProgramNode(name="P", statements=[node]))
+        assert 'if s == "OK" {' in code

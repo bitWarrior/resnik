@@ -29,7 +29,7 @@ class Lexer:
         >>> lexer = Lexer()
         >>> tokens = lexer.tokenize("PROGRAM TEST; CLOSE TEST;")
         >>> print(len(tokens))
-        5
+        6
     """
 
     def __init__(self) -> None:
@@ -52,6 +52,7 @@ class Lexer:
 
         # Multi-character operators (must come before single-char)
         self.lg.add("POWER", r"\*\*")
+        self.lg.add("CONCAT", r"\|\|")
         self.lg.add("LE", r"<=")
         self.lg.add("GE", r">=")
         self.lg.add("NE", r"¬=|~=")
@@ -69,6 +70,7 @@ class Lexer:
         self.lg.add("DOT", r"\.")
         self.lg.add("HASH", r"#")
         self.lg.add("AT", r"@")
+        self.lg.add("DOLLAR", r"\$")
 
         # Delimiters
         self.lg.add("LPAREN", r"\(")
@@ -84,9 +86,14 @@ class Lexer:
         self.lg.add("NUMBER", r"\d+\.?\d*([Ee][+-]?\d+)?")
 
         # Bit/Hex/Oct strings - match any content, validate later
-        self.lg.add("BITSTRING", r"BIN\s*'[^']*'")
-        self.lg.add("HEXSTRING", r"HEX\s*'[^']*'")
-        self.lg.add("OCTSTRING", r"OCT\s*'[^']*'")
+        # (?i) so bin'..'/Hex'..' tokenize consistently with HAL/S case-insensitivity
+        self.lg.add("BITSTRING", r"(?i)BIN\s*'[^']*'")
+        self.lg.add("HEXSTRING", r"(?i)HEX\s*'[^']*'")
+        self.lg.add("OCTSTRING", r"(?i)OCT\s*'[^']*'")
+
+        # Suffix form bit/hex/oct literals: '1010'B, 'FF'H, '777'O.
+        # Must precede STRING so '1'B does not split into STRING + 'B'.
+        self.lg.add("BITLITERAL", r"'[0-9A-Fa-f]+'[BHObho]")
 
         # Character strings
         self.lg.add("STRING", r"'([^']|'')*'")
@@ -118,12 +125,6 @@ class Lexer:
 
         for line in lines:
             line_num += 1
-
-            # Full-line comment: 'C' as first non-blank character
-            stripped = line.lstrip(" \t")
-            if stripped and stripped[0] == "C":
-                processed_lines.append("")
-                continue
 
             # Block comments /* */
             processed_line = []
@@ -200,22 +201,6 @@ class Lexer:
                     )
                 )
                 return False
-        return True
-
-    def _validate_string(
-        self, token_value: str, line: int, column: int
-    ) -> bool:
-        """Validate character string is properly closed."""
-        if not token_value.endswith("'"):
-            self.errors.append(
-                LexerError(
-                    message=f"Unclosed string literal: {token_value}",
-                    line=line,
-                    column=column,
-                    filename=self.source_file,
-                )
-            )
-            return False
         return True
 
     def _validate_octstring(
@@ -316,8 +301,6 @@ class Lexer:
                     self._validate_hexstring(token.value, line, column)
                 elif token_type == "OCTSTRING":
                     self._validate_octstring(token.value, line, column)
-                elif token_type == "STRING":
-                    self._validate_string(token.value, line, column)
 
                 # Get actual token type
                 actual_type = self._get_token_type(token)

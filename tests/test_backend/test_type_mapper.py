@@ -25,11 +25,11 @@ class TestTypeMapperBasic:
         assert mapper.map_type(type_spec) == "f32"
 
     def test_bit_type(self) -> None:
-        """Test BIT maps to bool."""
+        """BIT maps to u32 (a bit string is an unsigned register)."""
         mapper = TypeMapper()
         type_spec = TypeSpec(data_type=DataType.BIT)
         
-        assert mapper.map_type(type_spec) == "bool"
+        assert mapper.map_type(type_spec) == "u32"
 
     def test_character_type(self) -> None:
         """Test CHARACTER maps to String."""
@@ -54,7 +54,7 @@ class TestTypeMapperArrays:
         type_spec = TypeSpec(data_type=DataType.VECTOR)
         
         result = mapper.map_type(type_spec)
-        assert result == "[f32; 3]"
+        assert result == "Vector<3>"
 
     def test_vector_custom_size(self) -> None:
         """Test VECTOR with custom size."""
@@ -62,7 +62,7 @@ class TestTypeMapperArrays:
         type_spec = TypeSpec(data_type=DataType.VECTOR, dimensions=[5])
         
         result = mapper.map_type(type_spec)
-        assert result == "[f32; 5]"
+        assert result == "Vector<5>"
 
     def test_matrix_default_size(self) -> None:
         """Test MATRIX with default size."""
@@ -70,7 +70,7 @@ class TestTypeMapperArrays:
         type_spec = TypeSpec(data_type=DataType.MATRIX)
         
         result = mapper.map_type(type_spec)
-        assert result == "[[f32; 3]; 3]"
+        assert result == "Matrix<3, 3>"
 
     def test_matrix_custom_size(self) -> None:
         """Test MATRIX with custom dimensions."""
@@ -81,7 +81,7 @@ class TestTypeMapperArrays:
         )
         
         result = mapper.map_type(type_spec)
-        assert result == "[[f32; 5]; 4]"
+        assert result == "Matrix<4, 5>"
 
 
 class TestLiteralTypeMapping:
@@ -105,7 +105,7 @@ class TestLiteralTypeMapping:
     def test_literal_bit(self) -> None:
         """Test BIT literal type."""
         mapper = TypeMapper()
-        assert mapper.map_literal_type("BIT") == "bool"
+        assert mapper.map_literal_type("BIT") == "u32"
 
     def test_literal_case_insensitive(self) -> None:
         """Test literal type mapping is case-insensitive."""
@@ -141,7 +141,7 @@ class TestDefaultValues:
         mapper = TypeMapper()
         type_spec = TypeSpec(data_type=DataType.BIT)
         
-        assert mapper.get_default_value(type_spec) == "false"
+        assert mapper.get_default_value(type_spec) == "0"
 
     def test_character_default(self) -> None:
         """Test CHARACTER default value."""
@@ -155,17 +155,24 @@ class TestDefaultValues:
         mapper = TypeMapper()
         type_spec = TypeSpec(data_type=DataType.VECTOR, dimensions=[3])
         
-        assert mapper.get_default_value(type_spec) == "[0.0; 3]"
+        assert mapper.get_default_value(type_spec) == "Vector::<3>::zero()"
 
     def test_matrix_default(self) -> None:
         """Test MATRIX default value."""
         mapper = TypeMapper()
         type_spec = TypeSpec(data_type=DataType.MATRIX, dimensions=[2, 3])
         
-        assert mapper.get_default_value(type_spec) == "[[0.0; 3]; 2]"
+        assert mapper.get_default_value(type_spec) == "Matrix::<2, 3>::zero()"
 
     def test_none_default(self) -> None:
         """Test None type spec default value."""
         mapper = TypeMapper()
         
         assert mapper.get_default_value(None) == "0"
+
+
+class TestBooleanMapping:
+    def test_boolean_maps_to_bool(self) -> None:
+        from resnik.backend.type_mapper import TypeMapper
+        from resnik.types import TypeSpec, DataType
+        assert TypeMapper().map_type(TypeSpec(data_type=DataType.BOOLEAN)) == "bool"

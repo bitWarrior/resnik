@@ -33,6 +33,7 @@ class ProgramNode(ASTNode):
     declarations: List[ASTNode] = field(default_factory=list)
     statements: List[ASTNode] = field(default_factory=list)
     procedures: List[ASTNode] = field(default_factory=list)
+    tasks: List[ASTNode] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         self.node_type = NodeType.PROGRAM
@@ -45,8 +46,72 @@ class ProgramNode(ASTNode):
                 "declarations": [d.to_dict() for d in self.declarations],
                 "statements": [s.to_dict() for s in self.statements],
                 "procedures": [p.to_dict() for p in self.procedures],
+                "tasks": [t.to_dict() for t in self.tasks],
             }
         )
+        return result
+
+
+@dataclass
+class TaskNode(ASTNode):
+    """TASK block node (a schedulable real-time process)."""
+
+    name: str = ""
+    declarations: List[ASTNode] = field(default_factory=list)
+    statements: List[ASTNode] = field(default_factory=list)
+    procedures: List[ASTNode] = field(default_factory=list)
+    tasks: List[ASTNode] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        self.node_type = NodeType.TASK
+
+    def to_dict(self) -> Dict[str, Any]:
+        result = super().to_dict()
+        result.update(
+            {
+                "name": self.name,
+                "declarations": [d.to_dict() for d in self.declarations],
+                "statements": [s.to_dict() for s in self.statements],
+                "procedures": [p.to_dict() for p in self.procedures],
+                "tasks": [t.to_dict() for t in self.tasks],
+            }
+        )
+        return result
+
+
+@dataclass
+class CompoolNode(ASTNode):
+    """COMPOOL block: a named pool of shared (global) declarations."""
+
+    name: str = ""
+    declarations: List[ASTNode] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        self.node_type = NodeType.COMPOOL
+
+    def to_dict(self) -> Dict[str, Any]:
+        result = super().to_dict()
+        result.update(
+            {
+                "name": self.name,
+                "declarations": [d.to_dict() for d in self.declarations],
+            }
+        )
+        return result
+
+
+@dataclass
+class CompilationNode(ASTNode):
+    """A compilation: a sequence of top-level units (COMPOOL/PROGRAM/TASK)."""
+
+    units: List[ASTNode] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        self.node_type = NodeType.COMPILATION
+
+    def to_dict(self) -> Dict[str, Any]:
+        result = super().to_dict()
+        result.update({"units": [u.to_dict() for u in self.units]})
         return result
 
 
@@ -58,6 +123,7 @@ class DeclareNode(ASTNode):
     type_spec: Optional[TypeSpec] = None
     attributes: Dict[str, Any] = field(default_factory=dict)
     initial_value: Optional[ASTNode] = None
+    initial_values: List[ASTNode] = field(default_factory=list)
     is_constant: bool = False
 
     def __post_init__(self) -> None:
@@ -73,6 +139,7 @@ class DeclareNode(ASTNode):
                 "initial_value": (
                     self.initial_value.to_dict() if self.initial_value else None
                 ),
+                "initial_values": [v.to_dict() for v in self.initial_values],
                 "is_constant": self.is_constant,
             }
         )
@@ -149,6 +216,82 @@ class BinaryOpNode(ASTNode):
 
 
 @dataclass
+class UnaryOpNode(ASTNode):
+    """Unary operation node (e.g. NOT x)."""
+
+    operator: str = ""
+    operand: Optional[ASTNode] = None
+
+    def __post_init__(self) -> None:
+        self.node_type = NodeType.UNARY_OP
+
+    def to_dict(self) -> Dict[str, Any]:
+        result = super().to_dict()
+        result.update(
+            {
+                "operator": self.operator,
+                "operand": self.operand.to_dict() if self.operand else None,
+            }
+        )
+        return result
+
+
+@dataclass
+class SubscriptNode(ASTNode):
+    """Bit/element subscript: <operand>$<index> (1-indexed, MSB-first for bits).
+
+    `index` may be a literal int (back-compat) or an expression node for
+    dynamic subscripting (e.g. VEC$IDX).
+    """
+
+    operand: Optional[ASTNode] = None
+    index: Any = 0
+
+    def __post_init__(self) -> None:
+        self.node_type = NodeType.SUBSCRIPT
+
+    def to_dict(self) -> Dict[str, Any]:
+        result = super().to_dict()
+        result.update(
+            {
+                "operand": self.operand.to_dict() if self.operand else None,
+                "index": (
+                    self.index.to_dict()
+                    if hasattr(self.index, "to_dict") else self.index
+                ),
+            }
+        )
+        return result
+
+
+@dataclass
+class ForNode(ASTNode):
+    """DO FOR <var> = <start> TO <end> [BY <step>]; ... END; counted loop."""
+
+    var: str = ""
+    start: Optional[ASTNode] = None
+    end: Optional[ASTNode] = None
+    step: Optional[ASTNode] = None
+    statements: List[ASTNode] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        self.node_type = NodeType.DO_FOR
+
+    def to_dict(self) -> Dict[str, Any]:
+        result = super().to_dict()
+        result.update(
+            {
+                "var": self.var,
+                "start": self.start.to_dict() if self.start else None,
+                "end": self.end.to_dict() if self.end else None,
+                "step": self.step.to_dict() if self.step else None,
+                "statements": [s.to_dict() for s in self.statements],
+            }
+        )
+        return result
+
+
+@dataclass
 class LiteralNode(ASTNode):
     """Literal value node."""
 
@@ -176,4 +319,166 @@ class IdentifierNode(ASTNode):
     def to_dict(self) -> Dict[str, Any]:
         result = super().to_dict()
         result.update({"name": self.name})
+        return result
+
+
+@dataclass
+class WriteNode(ASTNode):
+    """WRITE statement node: WRITE(channel) item, item, ...;"""
+
+    channel: int = 6
+    items: List[ASTNode] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        self.node_type = NodeType.WRITE
+
+    def to_dict(self) -> Dict[str, Any]:
+        result = super().to_dict()
+        result.update(
+            {
+                "channel": self.channel,
+                "items": [i.to_dict() for i in self.items],
+            }
+        )
+        return result
+
+
+@dataclass
+class FunctionCallNode(ASTNode):
+    """Function/built-in call used as an expression, e.g. ABVAL(V)."""
+
+    name: str = ""
+    arguments: List[ASTNode] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        self.node_type = NodeType.FUNCTION_CALL
+
+    def to_dict(self) -> Dict[str, Any]:
+        result = super().to_dict()
+        result.update(
+            {
+                "name": self.name,
+                "arguments": [a.to_dict() for a in self.arguments],
+            }
+        )
+        return result
+
+
+@dataclass
+class DoBlockNode(ASTNode):
+    """DO; ... END; statement group."""
+
+    statements: List[ASTNode] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        self.node_type = NodeType.DO_BLOCK
+
+    def to_dict(self) -> Dict[str, Any]:
+        result = super().to_dict()
+        result.update({"statements": [s.to_dict() for s in self.statements]})
+        return result
+
+
+@dataclass
+class WhileNode(ASTNode):
+    """DO WHILE <condition>; ... END; loop."""
+
+    condition: Optional[ASTNode] = None
+    statements: List[ASTNode] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        self.node_type = NodeType.DO_WHILE
+
+    def to_dict(self) -> Dict[str, Any]:
+        result = super().to_dict()
+        result.update(
+            {
+                "condition": self.condition.to_dict() if self.condition else None,
+                "statements": [s.to_dict() for s in self.statements],
+            }
+        )
+        return result
+
+
+@dataclass
+class CallNode(ASTNode):
+    """CALL <procedure>(<args>); procedure invocation."""
+
+    name: str = ""
+    arguments: List[ASTNode] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        self.node_type = NodeType.CALL
+
+    def to_dict(self) -> Dict[str, Any]:
+        result = super().to_dict()
+        result.update(
+            {
+                "name": self.name,
+                "arguments": [a.to_dict() for a in self.arguments],
+            }
+        )
+        return result
+
+
+@dataclass
+class IfNode(ASTNode):
+    """IF condition THEN <then> [ELSE <else>]."""
+
+    condition: Optional[ASTNode] = None
+    then_block: Optional[ASTNode] = None
+    else_block: Optional[ASTNode] = None
+
+    def __post_init__(self) -> None:
+        self.node_type = NodeType.IF_STATEMENT
+
+    def to_dict(self) -> Dict[str, Any]:
+        result = super().to_dict()
+        result.update(
+            {
+                "condition": self.condition.to_dict() if self.condition else None,
+                "then_block": (
+                    self.then_block.to_dict() if self.then_block else None
+                ),
+                "else_block": (
+                    self.else_block.to_dict() if self.else_block else None
+                ),
+            }
+        )
+        return result
+
+
+@dataclass
+class ScheduleNode(ASTNode):
+    """SCHEDULE <task> PRIORITY(<expr>); real-time dispatch."""
+
+    task_name: str = ""
+    priority: Optional[ASTNode] = None
+
+    def __post_init__(self) -> None:
+        self.node_type = NodeType.SCHEDULE
+
+    def to_dict(self) -> Dict[str, Any]:
+        result = super().to_dict()
+        result.update(
+            {
+                "task_name": self.task_name,
+                "priority": self.priority.to_dict() if self.priority else None,
+            }
+        )
+        return result
+
+
+@dataclass
+class TerminateNode(ASTNode):
+    """TERMINATE [<task>]; (no task name terminates the current process)."""
+
+    task_name: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        self.node_type = NodeType.TERMINATE
+
+    def to_dict(self) -> Dict[str, Any]:
+        result = super().to_dict()
+        result.update({"task_name": self.task_name})
         return result
