@@ -265,6 +265,206 @@ class SubscriptNode(ASTNode):
 
 
 @dataclass
+class StructureDefNode(ASTNode):
+    """STRUCTURE <name>: <field declares> CLOSE <name>; template definition."""
+
+    name: str = ""
+    fields: List[ASTNode] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        self.node_type = NodeType.STRUCTURE
+
+    def to_dict(self) -> Dict[str, Any]:
+        result = super().to_dict()
+        result.update(
+            {
+                "name": self.name,
+                "fields": [f.to_dict() for f in self.fields],
+            }
+        )
+        return result
+
+
+@dataclass
+class FieldAccessNode(ASTNode):
+    """Structure field access: <operand>.<field>."""
+
+    operand: Optional[ASTNode] = None
+    field_name: str = ""
+
+    def __post_init__(self) -> None:
+        self.node_type = NodeType.FIELD_ACCESS
+
+    def to_dict(self) -> Dict[str, Any]:
+        result = super().to_dict()
+        result.update(
+            {
+                "operand": self.operand.to_dict() if self.operand else None,
+                "field_name": self.field_name,
+            }
+        )
+        return result
+
+
+@dataclass
+class VectorLiteralNode(ASTNode):
+    """VECTOR(v1, v2, ...) constructor."""
+
+    values: List[ASTNode] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        self.node_type = NodeType.VECTOR_LITERAL
+
+    def to_dict(self) -> Dict[str, Any]:
+        result = super().to_dict()
+        result.update({"values": [v.to_dict() for v in self.values]})
+        return result
+
+
+@dataclass
+class OnErrorNode(ASTNode):
+    """ON ERROR(code): <handler>  — resumable fault handler (approximated)."""
+
+    code: int = 0
+    body: Optional[ASTNode] = None
+
+    def __post_init__(self) -> None:
+        self.node_type = NodeType.ON_ERROR
+
+    def to_dict(self) -> Dict[str, Any]:
+        result = super().to_dict()
+        result.update(
+            {"code": self.code,
+             "body": self.body.to_dict() if self.body else None}
+        )
+        return result
+
+
+@dataclass
+class ResumeNode(ASTNode):
+    """RESUME; — return control to the statement after the faulting one."""
+
+    def __post_init__(self) -> None:
+        self.node_type = NodeType.RESUME
+
+
+@dataclass
+class OnErrorNode(ASTNode):
+    """ON ERROR(code): <handler> — a registered fault handler (callback)."""
+
+    code: int = 0
+    body: Optional[ASTNode] = None
+
+    def __post_init__(self) -> None:
+        self.node_type = NodeType.ON_ERROR
+
+    def to_dict(self) -> Dict[str, Any]:
+        result = super().to_dict()
+        result.update(
+            {
+                "code": self.code,
+                "body": self.body.to_dict() if self.body else None,
+            }
+        )
+        return result
+
+
+@dataclass
+class ResumeNode(ASTNode):
+    """RESUME — return control to the statement after the faulting one."""
+
+    def __post_init__(self) -> None:
+        self.node_type = NodeType.RESUME
+
+
+@dataclass
+class MultiAssignNode(ASTNode):
+    """Multiple assignment: A, B, ... = <expr> (one RHS, several lvalues)."""
+
+    targets: List[ASTNode] = field(default_factory=list)
+    value: Optional[ASTNode] = None
+
+    def __post_init__(self) -> None:
+        self.node_type = NodeType.MULTI_ASSIGN
+
+    def to_dict(self) -> Dict[str, Any]:
+        result = super().to_dict()
+        result.update(
+            {
+                "targets": [t.to_dict() for t in self.targets],
+                "value": self.value.to_dict() if self.value else None,
+            }
+        )
+        return result
+
+
+@dataclass
+class StarNode(ASTNode):
+    """Wildcard `*` in a matrix subscript (all rows or all columns)."""
+
+    def __post_init__(self) -> None:
+        self.node_type = NodeType.STAR
+
+
+@dataclass
+class RangeNode(ASTNode):
+    """An index range `lo TO hi` in a matrix subscript."""
+
+    lo: Optional[ASTNode] = None
+    hi: Optional[ASTNode] = None
+
+    def __post_init__(self) -> None:
+        self.node_type = NodeType.RANGE
+
+    def to_dict(self) -> Dict[str, Any]:
+        result = super().to_dict()
+        result.update(
+            {
+                "lo": self.lo.to_dict() if self.lo else None,
+                "hi": self.hi.to_dict() if self.hi else None,
+            }
+        )
+        return result
+
+
+@dataclass
+class MatrixLiteralNode(ASTNode):
+    """MATRIX(v1, v2, ...) constructor; values are row-major."""
+
+    values: List[ASTNode] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        self.node_type = NodeType.MATRIX_LITERAL
+
+    def to_dict(self) -> Dict[str, Any]:
+        result = super().to_dict()
+        result.update({"values": [v.to_dict() for v in self.values]})
+        return result
+
+
+@dataclass
+class MatrixSubscriptNode(ASTNode):
+    """Matrix subscript M(<row>, <col>) where each spec is an index, a range,
+    or `*` (all)."""
+
+    name: str = ""
+    args: List[ASTNode] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        self.node_type = NodeType.MATRIX_SUBSCRIPT
+
+    def to_dict(self) -> Dict[str, Any]:
+        result = super().to_dict()
+        result.update(
+            {
+                "name": self.name,
+                "args": [a.to_dict() for a in self.args],
+            }
+        )
+        return result
+
+
+@dataclass
 class ForNode(ASTNode):
     """DO FOR <var> = <start> TO <end> [BY <step>]; ... END; counted loop."""
 
@@ -395,6 +595,30 @@ class WhileNode(ASTNode):
             {
                 "condition": self.condition.to_dict() if self.condition else None,
                 "statements": [s.to_dict() for s in self.statements],
+            }
+        )
+        return result
+
+
+@dataclass
+class CaseNode(ASTNode):
+    """DO CASE <selector>; <branch1> <branch2> ... END; computed case.
+
+    The selector's integer value (1-indexed) selects which branch runs.
+    """
+
+    selector: Optional[ASTNode] = None
+    branches: List[ASTNode] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        self.node_type = NodeType.DO_CASE
+
+    def to_dict(self) -> Dict[str, Any]:
+        result = super().to_dict()
+        result.update(
+            {
+                "selector": self.selector.to_dict() if self.selector else None,
+                "branches": [b.to_dict() for b in self.branches],
             }
         )
         return result

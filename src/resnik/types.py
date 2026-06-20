@@ -75,6 +75,15 @@ class NodeType(Enum):
     LITERAL = "Literal"
     IDENTIFIER = "Identifier"
     SUBSCRIPT = "Subscript"
+    MATRIX_LITERAL = "MatrixLiteral"
+    MATRIX_SUBSCRIPT = "MatrixSubscript"
+    VECTOR_LITERAL = "VectorLiteral"
+    FIELD_ACCESS = "FieldAccess"
+    ON_ERROR = "OnError"
+    RESUME = "Resume"
+    MULTI_ASSIGN = "MultiAssign"
+    RANGE = "Range"
+    STAR = "Star"
     FUNCTION_CALL = "FunctionCall"
 
     # Types
@@ -89,6 +98,8 @@ class TypeSpec:
     precision: Optional[Precision] = None
     dimensions: List[int] = field(default_factory=list)
     length: Optional[int] = None
+    type_name: Optional[str] = None  # structure template name, when STRUCTURE
+    array_size: Optional[int] = None  # element count, when an ARRAY(n) OF ...
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
@@ -97,6 +108,8 @@ class TypeSpec:
             "precision": self.precision.value if self.precision else None,
             "dimensions": self.dimensions,
             "length": self.length,
+            "type_name": self.type_name,
+            "array_size": self.array_size,
         }
 
 

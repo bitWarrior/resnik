@@ -112,6 +112,7 @@ class TypeMapper:
             DataType.INTEGER: "0",
             DataType.SCALAR: "0.0",
             DataType.BIT: "0",
+            DataType.BOOLEAN: "false",
             DataType.CHARACTER: 'String::new()',
         }
         

@@ -127,6 +127,7 @@ KEYWORDS = {
     "IGNORE",
     # Error handling
     "ERROR",
+    "RESUME",
     "OFF",
     # Boolean operators
     "AND",

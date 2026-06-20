@@ -22,6 +22,16 @@ from resnik.parser.ast_nodes import (
     UnaryOpNode,
     SubscriptNode,
     ForNode,
+    StarNode,
+    RangeNode,
+    MatrixLiteralNode,
+    MatrixSubscriptNode,
+    VectorLiteralNode,
+    StructureDefNode,
+    FieldAccessNode,
+    OnErrorNode,
+    ResumeNode,
+    MultiAssignNode,
     LiteralNode,
     IdentifierNode,
     WriteNode,
@@ -29,6 +39,7 @@ from resnik.parser.ast_nodes import (
     CallNode,
     DoBlockNode,
     WhileNode,
+    CaseNode,
     IfNode,
     ScheduleNode,
     TerminateNode,
@@ -89,6 +100,9 @@ class RustCodeGenerator:
         self._bit_widths: dict = {}
         self._var_info: dict = {}
         self._globals: dict = {}
+        self._structs: dict = {}
+        self._error_handlers: dict = {}
+        self._panic_hook_emitted: bool = False
     
     def generate(self, ast: Optional[ASTNode]) -> str:
         """
@@ -132,6 +146,14 @@ class RustCodeGenerator:
                     kind = "const" if decl.is_constant else "mut"
                     for ident in decl.identifiers:
                         self._globals[ident.upper()] = (kind, rust_type)
+
+        # Pre-pass: structure templates, by upper-cased name.
+        self._structs = {}
+        self._error_handlers = {}
+        self._panic_hook_emitted = False
+        for node in self._walk(ast):
+            if isinstance(node, StructureDefNode):
+                self._structs[node.name.upper()] = node
 
         # Emit file header
         self._emit_file_header()
@@ -198,6 +220,15 @@ class RustCodeGenerator:
 
     impl<const R: usize, const C: usize> Matrix<R, C> {
         pub fn zero() -> Self { Matrix([[0.0; C]; R]) }
+        /// 1-indexed row i as a Vector<C>.
+        pub fn row(&self, i: usize) -> Vector<C> { Vector(self.0[i - 1]) }
+        /// 1-indexed column j as a Vector<R>.
+        pub fn col(&self, j: usize) -> Vector<R> {
+            let mut v = [0.0; R];
+            let mut i = 0;
+            while i < R { v[i] = self.0[i][j - 1]; i += 1; }
+            Vector(v)
+        }
     }
 
     impl<const R: usize, const C: usize> Mul<Vector<C>> for Matrix<R, C> {
@@ -217,6 +248,14 @@ class RustCodeGenerator:
         let mut acc = 0.0f32;
         for i in 0..N { acc += v.0[i] * v.0[i]; }
         acc.sqrt()
+    }
+
+    pub fn cross(a: Vector<3>, b: Vector<3>) -> Vector<3> {
+        Vector([
+            a.0[1] * b.0[2] - a.0[2] * b.0[1],
+            a.0[2] * b.0[0] - a.0[0] * b.0[2],
+            a.0[0] * b.0[1] - a.0[1] * b.0[0],
+        ])
     }
 
     pub fn schedule(task: &str, priority: i32, body: fn()) -> std::thread::JoinHandle<()> {
@@ -256,6 +295,9 @@ use hal_rt::*;
                     return True
             elif isinstance(n, (ScheduleNode, TerminateNode)):
                 return True
+            elif isinstance(n, (VectorLiteralNode, MatrixLiteralNode,
+                                MatrixSubscriptNode)):
+                return True
             if (
                 isinstance(n, DeclareNode)
                 and n.type_spec is not None
@@ -269,7 +311,7 @@ use hal_rt::*;
         yield node
         list_attrs = (
             "statements", "declarations", "procedures", "tasks", "units",
-            "items", "arguments"
+            "items", "arguments", "values", "args", "fields", "targets"
         )
         for attr in list_attrs:
             for child in getattr(node, attr, None) or []:
@@ -326,6 +368,16 @@ use hal_rt::*;
             self._generate_do_block(node)
         elif isinstance(node, WhileNode):
             self._generate_while(node)
+        elif isinstance(node, CaseNode):
+            self._generate_case(node)
+        elif isinstance(node, OnErrorNode):
+            self._generate_on_error(node)
+        elif isinstance(node, ResumeNode):
+            self.emitter.emit_comment(
+                "RESUME: control returns to the statement after the fault"
+            )
+        elif isinstance(node, MultiAssignNode):
+            self._generate_multi_assign(node)
         elif isinstance(node, ForNode):
             self._generate_for(node)
         elif isinstance(node, CallNode):
@@ -401,6 +453,15 @@ use hal_rt::*;
         self.emitter.emit_comment(f"HAL/S Program: {node.name}")
         self._task_names = {t.name.lower() for t in node.tasks}
 
+        # Structure templates -> module-level Rust structs.
+        structures = [s for s in node.statements
+                      if isinstance(s, StructureDefNode)]
+        body = [s for s in node.statements
+                if not isinstance(s, StructureDefNode)]
+        for st in structures:
+            self._generate_structure_def(st)
+            self.emitter.emit_line()
+
         # Nested TASK blocks -> standalone functions (each runs on its own thread)
         for task in node.tasks:
             self._generate_task_function(task)
@@ -414,7 +475,7 @@ use hal_rt::*;
         # Generate main function
         self.emitter.emit_function_header("main", [], None, is_public=False)
         self.in_main = True
-        self._generate_unit_body(node.declarations, node.statements)
+        self._generate_unit_body(node.declarations, body)
         self.in_main = False
         self.emitter.emit_block_end()
 
@@ -512,7 +573,26 @@ use hal_rt::*;
             node: DeclareNode to generate
         """
         rust_type = self.type_mapper.map_type(node.type_spec)
-        
+
+        # STRUCTURE-typed variable: `let mut v: Struct = Struct::new();`
+        if (node.type_spec is not None
+                and node.type_spec.data_type == DataType.STRUCTURE):
+            sname = self._struct_name(node.type_spec.type_name or "")
+            # ARRAY(n) OF <template> STRUCTURE -> [Struct; n] of zero-inits.
+            if node.type_spec.array_size is not None:
+                n = node.type_spec.array_size
+                for identifier in node.identifiers:
+                    self.emitter.emit_variable_declaration(
+                        identifier.lower(), f"[{sname}; {n}]",
+                        f"[{sname}::new(); {n}]", True
+                    )
+                return
+            for identifier in node.identifiers:
+                self.emitter.emit_variable_declaration(
+                    identifier.lower(), sname, f"{sname}::new()", True
+                )
+            return
+
         for identifier in node.identifiers:
             # Convert to snake_case for Rust conventions
             rust_name = identifier.lower()
@@ -641,6 +721,111 @@ use hal_rt::*;
         self.emitter.dedent()
         self.emitter.emit_line("}")
 
+    def _generate_case(self, node: CaseNode) -> None:
+        """Generate a DO CASE as a Rust match. Branches are 1-indexed: the
+        Nth statement runs when the selector evaluates to N."""
+        selector = self._generate_expression(node.selector)
+        self.emitter.emit_line(f"match {selector} {{")
+        self.emitter.indent()
+        for i, branch in enumerate(node.branches, start=1):
+            self.emitter.emit_line(f"{i} => {{")
+            self.emitter.indent()
+            if isinstance(branch, DoBlockNode):
+                for stmt in branch.statements:
+                    self._generate_node(stmt)
+            else:
+                self._generate_node(branch)
+            self.emitter.dedent()
+            self.emitter.emit_line("}")
+        # HAL/S: an out-of-range selector falls through (no-op here).
+        self.emitter.emit_line("_ => {}")
+        self.emitter.dedent()
+        self.emitter.emit_line("}")
+
+    def _generate_multi_assign(self, node: MultiAssignNode) -> None:
+        """A, B, ... = <expr>;  Evaluate the RHS once into a temp, then assign
+        it to each target (aggregates like Vector are Copy, so this is a real
+        independent copy to each)."""
+        value = self._generate_expression(node.value)
+        self.emitter.emit_line("{")
+        self.emitter.indent()
+        self.emitter.emit_line(f"let __t = {value};")
+        for target in node.targets:
+            self.emitter.emit_line(f"{self._generate_expression(target)} = __t;")
+        self.emitter.dedent()
+        self.emitter.emit_line("}")
+
+    def _generate_on_error(self, node: OnErrorNode) -> None:
+        """Register an ON ERROR(code) handler. The body is NOT emitted here;
+        it is invoked from the catch_unwind trap around a faulting operation."""
+        if not self._panic_hook_emitted:
+            # Suppress the default panic stderr output; the trap routes faults
+            # to the registered handler instead of crashing/printing.
+            self.emitter.emit_line("std::panic::set_hook(Box::new(|_| {}));")
+            self._panic_hook_emitted = True
+        self._error_handlers[node.code] = node.body
+        self.emitter.emit_comment(
+            f"ON ERROR({node.code}): fault handler registered (callback)"
+        )
+
+    def _generate_handler_body(self, body: ASTNode) -> None:
+        """Emit a registered handler's statements (a DO; ... END; group),
+        skipping RESUME (which is modeled by falling through the trap)."""
+        stmts = body.statements if isinstance(body, DoBlockNode) else [body]
+        for stmt in stmts:
+            self._generate_node(stmt)
+
+    def _generate_trapped_division(self, target: ASTNode,
+                                   binop: BinaryOpNode) -> None:
+        """Lower `target = left / right` under an active ON ERROR handler into a
+        catch_unwind trap that carries the HAL/S fault code as the panic payload.
+
+        Integer divide-by-zero panics directly; float divide-by-zero yields a
+        non-finite value, so an explicit is_finite() check raises the same trap.
+        The handler whose code matches runs; any other code is re-raised.
+        """
+        code = 5 if 5 in self._error_handlers else next(iter(self._error_handlers))
+        body = self._error_handlers[code]
+        tname = target.name.lower()
+        ts = self._var_info.get(tname)
+        rust_t = self.type_mapper.map_type(ts) if ts is not None else "f32"
+        left = self._generate_expression(binop.left)
+        right = self._generate_expression(binop.right)
+
+        self.emitter.emit_line("{")
+        self.emitter.indent()
+        self.emitter.emit_line(
+            "let __r = std::panic::catch_unwind("
+            "std::panic::AssertUnwindSafe(|| {"
+        )
+        self.emitter.indent()
+        self.emitter.emit_line(f"let __v = {left} / ({right} as {rust_t});")
+        self.emitter.emit_line(
+            f"if !(__v as f64).is_finite() {{ std::panic::panic_any({code}i32); }}"
+        )
+        self.emitter.emit_line("__v")
+        self.emitter.dedent()
+        self.emitter.emit_line("}));")
+        self.emitter.emit_line("match __r {")
+        self.emitter.indent()
+        self.emitter.emit_line(f"Ok(__v) => {{ {tname} = __v; }}")
+        self.emitter.emit_line("Err(__e) => {")
+        self.emitter.indent()
+        self.emitter.emit_line(
+            "let __code = *__e.downcast_ref::<i32>().unwrap_or(&-1);"
+        )
+        self.emitter.emit_line(f"if __code == {code} {{")
+        self.emitter.indent()
+        self._generate_handler_body(body)
+        self.emitter.dedent()
+        self.emitter.emit_line("} else { std::panic::resume_unwind(__e); }")
+        self.emitter.dedent()
+        self.emitter.emit_line("}")
+        self.emitter.dedent()
+        self.emitter.emit_line("}")
+        self.emitter.dedent()
+        self.emitter.emit_line("}")
+
     def _generate_call(self, node: CallNode) -> None:
         """Generate a CALL statement as a Rust function call statement."""
         args = ", ".join(self._generate_expression(a) for a in node.arguments)
@@ -660,7 +845,26 @@ use hal_rt::*;
             node: AssignmentNode to generate
         """
         if node.target and node.value:
-            value = self._generate_expression(node.value)
+            # If a fault handler is registered and this assignment performs a
+            # division, route it through a catch_unwind trap (see
+            # _generate_trapped_division) so a divide-by-zero invokes the
+            # registered ON ERROR handler instead of producing inf/panicking.
+            if (
+                self._error_handlers
+                and isinstance(node.value, BinaryOpNode)
+                and node.value.operator == "/"
+                and isinstance(node.target, IdentifierNode)
+            ):
+                self._generate_trapped_division(node.target, node.value)
+                return
+            # A MATRIX(...) constructor needs the target's dimensions.
+            if isinstance(node.value, MatrixLiteralNode) \
+                    and isinstance(node.target, IdentifierNode):
+                ts = self._var_info.get(node.target.name.lower())
+                dims = ts.dimensions if ts is not None else None
+                value = self._generate_matrix_literal(node.value, dims)
+            else:
+                value = self._generate_expression(node.value)
             # Assigning a mutable COMPOOL global: evaluate the RHS first (which
             # releases any read locks it takes) and only then acquire the write
             # lock, so a read-modify-write of the same global can't deadlock.
@@ -734,6 +938,14 @@ use hal_rt::*;
             return self._generate_unary_op(node)
         elif isinstance(node, SubscriptNode):
             return self._generate_subscript(node)
+        elif isinstance(node, MatrixLiteralNode):
+            return self._generate_matrix_literal(node)
+        elif isinstance(node, MatrixSubscriptNode):
+            return self._generate_matrix_subscript(node)
+        elif isinstance(node, VectorLiteralNode):
+            return self._generate_vector_literal(node)
+        elif isinstance(node, FieldAccessNode):
+            return self._generate_field_access(node)
         elif isinstance(node, FunctionCallNode):
             return self._generate_function_call(node)
         else:
@@ -863,10 +1075,17 @@ use hal_rt::*;
             idx_src, idx_const = self._generate_expression(idx), None
 
         data_type = None
+        ts = None
         if isinstance(node.operand, IdentifierNode):
             ts = self._var_info.get(node.operand.name.lower())
             if ts is not None:
                 data_type = ts.data_type
+
+        # ARRAY(n) OF ... element access, 1-indexed -> 0-indexed.
+        if ts is not None and ts.array_size is not None:
+            if idx_const is not None:
+                return f"{operand}[{idx_const - 1}]"
+            return f"{operand}[({idx_src} - 1) as usize]"
 
         if data_type == DataType.VECTOR:
             # 1-indexed element access into the underlying [f32; N] array.
@@ -881,6 +1100,112 @@ use hal_rt::*;
         if idx_const is not None:
             return f"(({operand} >> {width - idx_const}) & 1)"
         return f"(({operand} >> ({width} - {idx_src})) & 1)"
+
+    def _struct_name(self, name: str) -> str:
+        """HAL/S template name -> Rust PascalCase struct name (NODE -> Node)."""
+        return "".join(w.capitalize() for w in name.split("_"))
+
+    def _generate_structure_def(self, node: StructureDefNode) -> None:
+        """Emit a STRUCTURE template as a Rust struct plus a zero-init new()."""
+        sname = self._struct_name(node.name)
+        self.emitter.emit_comment(f"HAL/S Structure template: {node.name}")
+        self.emitter.emit_line("#[derive(Clone, Copy, Debug)]")
+        self.emitter.emit_line(f"struct {sname} {{")
+        self.emitter.indent()
+        for decl in node.fields:
+            rust_type = self.type_mapper.map_type(decl.type_spec)
+            for ident in decl.identifiers:
+                self.emitter.emit_line(f"{ident.lower()}: {rust_type},")
+        self.emitter.dedent()
+        self.emitter.emit_line("}")
+        # constructor: zero-initialize every field
+        self.emitter.emit_line(f"impl {sname} {{")
+        self.emitter.indent()
+        self.emitter.emit_line("fn new() -> Self {")
+        self.emitter.indent()
+        inits = []
+        for decl in node.fields:
+            default = self.type_mapper.get_default_value(decl.type_spec)
+            for ident in decl.identifiers:
+                inits.append(f"{ident.lower()}: {default}")
+        self.emitter.emit_line(f"{sname} {{ {', '.join(inits)} }}")
+        self.emitter.dedent()
+        self.emitter.emit_line("}")
+        self.emitter.dedent()
+        self.emitter.emit_line("}")
+
+    def _generate_field_access(self, node: FieldAccessNode) -> str:
+        """Structure field access: operand.field."""
+        operand = self._generate_expression(node.operand)
+        return f"{operand}.{node.field_name.lower()}"
+
+    def _generate_vector_literal(self, node: VectorLiteralNode) -> str:
+        """VECTOR(v1, v2, ...) -> Vector([v1, v2, ...])."""
+        vals = ", ".join(self._generate_expression(v) for v in node.values)
+        return f"Vector([{vals}])"
+
+    def _generate_matrix_literal(self, node: MatrixLiteralNode,
+                                 dims=None) -> str:
+        """MATRIX(v1..vn) -> Matrix([[..],[..],..]). Dimensions come from the
+        assignment/declaration target when known, else a square is inferred."""
+        vals = [self._generate_expression(v) for v in node.values]
+        n = len(vals)
+        if dims and len(dims) >= 2:
+            rows, cols = dims[0], dims[1]
+        else:
+            import math
+            side = int(math.isqrt(n))
+            rows = cols = side if side * side == n else 1
+            if rows == 1:
+                cols = n
+        chunks = [vals[i * cols:(i + 1) * cols] for i in range(rows)]
+        body = ", ".join("[" + ", ".join(row) + "]" for row in chunks)
+        return f"Matrix([{body}])"
+
+    def _generate_matrix_subscript(self, node: MatrixSubscriptNode) -> str:
+        """M(<row>, <col>) -> row/column (Vector), element (f32), or submatrix
+        (Matrix, constant ranges only)."""
+        operand = node.name.lower()
+        if len(node.args) != 2:
+            return f"/* unsupported matrix subscript arity {len(node.args)} */"
+        row_spec, col_spec = node.args
+
+        def is_star(a): return isinstance(a, StarNode)
+        def is_range(a): return isinstance(a, RangeNode)
+
+        # Row r, all columns -> row vector (1-indexed).
+        if not is_star(row_spec) and not is_range(row_spec) and is_star(col_spec):
+            r = self._generate_expression(row_spec)
+            return f"{operand}.row({r})"
+        # All rows, column c -> column vector.
+        if is_star(row_spec) and not is_star(col_spec) and not is_range(col_spec):
+            c = self._generate_expression(col_spec)
+            return f"{operand}.col({c})"
+        # Constant ranges -> submatrix built inline.
+        if is_range(row_spec) and is_range(col_spec):
+            r1 = self._const_int(row_spec.lo); r2 = self._const_int(row_spec.hi)
+            c1 = self._const_int(col_spec.lo); c2 = self._const_int(col_spec.hi)
+            if None not in (r1, r2, c1, c2):
+                rows = []
+                for i in range(r1, r2 + 1):
+                    cells = [f"{operand}.0[{i - 1}][{j - 1}]"
+                             for j in range(c1, c2 + 1)]
+                    rows.append("[" + ", ".join(cells) + "]")
+                return f"Matrix([{', '.join(rows)}])"
+            return "/* submatrix requires constant ranges */"
+        # Element access M(r, c).
+        if not is_star(row_spec) and not is_range(row_spec) \
+                and not is_star(col_spec) and not is_range(col_spec):
+            r = self._generate_expression(row_spec)
+            c = self._generate_expression(col_spec)
+            return f"{operand}.0[({r}) as usize - 1][({c}) as usize - 1]"
+        return "/* unsupported matrix subscript form */"
+
+    def _const_int(self, node):
+        """Return a Python int if node is a constant integer literal, else None."""
+        if isinstance(node, LiteralNode) and isinstance(node.value, (int, float)):
+            return int(node.value)
+        return None
 
     def _generate_for(self, node: ForNode) -> None:
         """Generate a DO FOR loop as an inclusive Rust range loop."""
@@ -921,6 +1246,18 @@ use hal_rt::*;
         if node.name.upper() == "LENGTH" and len(node.arguments) == 1:
             arg = self._generate_expression(node.arguments[0])
             return f"({arg}.len() as i32)"
+        # If the name is a declared MATRIX/VECTOR, parenthesized indices are
+        # element access (1-indexed), not a function call.
+        ts = self._var_info.get(node.name.lower())
+        if ts is not None:
+            if ts.data_type == DataType.MATRIX and len(node.arguments) == 2:
+                r = self._generate_expression(node.arguments[0])
+                c = self._generate_expression(node.arguments[1])
+                return (f"{node.name.lower()}.0[({r}) as usize - 1]"
+                        f"[({c}) as usize - 1]")
+            if ts.data_type == DataType.VECTOR and len(node.arguments) == 1:
+                i = self._generate_expression(node.arguments[0])
+                return f"{node.name.lower()}.0[({i}) as usize - 1]"
         args = ", ".join(self._generate_expression(a) for a in node.arguments)
         return f"{node.name.lower()}({args})"
 

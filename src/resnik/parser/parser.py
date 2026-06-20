@@ -24,11 +24,22 @@ from resnik.parser.ast_nodes import (
     UnaryOpNode,
     SubscriptNode,
     ForNode,
+    StarNode,
+    RangeNode,
+    MatrixLiteralNode,
+    MatrixSubscriptNode,
+    VectorLiteralNode,
+    StructureDefNode,
+    FieldAccessNode,
+    OnErrorNode,
+    ResumeNode,
+    MultiAssignNode,
     WriteNode,
     FunctionCallNode,
     CallNode,
     DoBlockNode,
     WhileNode,
+    CaseNode,
     IfNode,
     ScheduleNode,
     TerminateNode,
@@ -61,8 +72,14 @@ class Parser:
                 "KEYWORD_COMPOOL",
                 "KEYWORD_STATIC",
                 "KEYWORD_CONSTANT",
+                "KEYWORD_STRUCTURE",
+                "KEYWORD_RESUME",
+                "KEYWORD_ARRAY",
+                "KEYWORD_OF",
+                "DOT",
                 "KEYWORD_CALL",
                 "KEYWORD_WHILE",
+                "KEYWORD_CASE",
                 "KEYWORD_FOR",
                 "KEYWORD_TO",
                 "KEYWORD_BY",
@@ -84,6 +101,9 @@ class Parser:
                 "KEYWORD_SCHEDULE",
                 "KEYWORD_PRIORITY",
                 "KEYWORD_TERMINATE",
+                "KEYWORD_ON",
+                "KEYWORD_ERROR",
+                "KEYWORD_RESUME",
                 "IDENTIFIER",
                 "NUMBER",
                 "STRING",
@@ -129,7 +149,7 @@ class Parser:
                 ("left", ["MULTIPLY", "DIVIDE"]),
                 ("right", ["POWER"]),
                 ("right", ["KEYWORD_NOT"]),     # unary NOT binds tightly
-                ("left", ["DOLLAR"]),           # subscript binds tightest
+                ("left", ["DOLLAR", "DOT"]),    # postfix subscript/field, left-to-right
             ],
         )
 
@@ -352,6 +372,9 @@ class Parser:
         # into the unit's `tasks` collection by _build_unit.
         @self.pg.production("statement : task_block")
         @self.pg.production("statement : procedure_block")
+        @self.pg.production("statement : structure_def")
+        @self.pg.production("statement : on_error_block")
+        @self.pg.production("statement : resume_statement")
         @self.pg.production("statement : declare_statement")
         @self.pg.production("statement : assignment_statement")
         @self.pg.production("statement : call_statement")
@@ -374,6 +397,46 @@ class Parser:
                 line=getattr(p[0], "line", 0),
                 column=getattr(p[0], "column", 0),
             )
+
+        # Array of structures: DECLARE C ARRAY(5) OF STAR_DATA STRUCTURE;
+        @self.pg.production(
+            "declare_statement : KEYWORD_DECLARE IDENTIFIER KEYWORD_ARRAY "
+            "LPAREN NUMBER RPAREN KEYWORD_OF IDENTIFIER KEYWORD_STRUCTURE "
+            "SEMICOLON"
+        )
+        def declare_array_struct(p: List[Any]) -> DeclareNode:
+            return DeclareNode(
+                identifiers=[p[1].value],
+                type_spec=TypeSpec(
+                    data_type=DataType.STRUCTURE,
+                    type_name=p[7].value,
+                    array_size=int(p[4].value),
+                ),
+                line=getattr(p[0], "line", 0),
+                column=getattr(p[0], "column", 0),
+            )
+
+        # Multiple variables sharing one type: DECLARE A, B, C VECTOR(3);
+        @self.pg.production(
+            "declare_statement : KEYWORD_DECLARE IDENTIFIER COMMA "
+            "id_comma_list type_spec SEMICOLON"
+        )
+        def declare_multi(p: List[Any]) -> DeclareNode:
+            return DeclareNode(
+                identifiers=[p[1].value] + p[3],
+                type_spec=p[4],
+                line=getattr(p[0], "line", 0),
+                column=getattr(p[0], "column", 0),
+            )
+
+        # Comma-separated identifier list (shared by multi-declare/assign).
+        @self.pg.production("id_comma_list : IDENTIFIER")
+        def id_comma_single(p: List[Any]) -> List[str]:
+            return [p[0].value]
+
+        @self.pg.production("id_comma_list : id_comma_list COMMA IDENTIFIER")
+        def id_comma_more(p: List[Any]) -> List[str]:
+            return p[0] + [p[2].value]
 
         @self.pg.production(
             "declare_statement : KEYWORD_DECLARE IDENTIFIER type_spec "
@@ -443,6 +506,67 @@ class Parser:
                 node.initial_value = values[0]
             return node
 
+        # ON ERROR(code): <handler statement>  (registers a fault handler)
+        @self.pg.production(
+            "on_error_block : KEYWORD_ON KEYWORD_ERROR LPAREN NUMBER "
+            "RPAREN COLON do_block"
+        )
+        def on_error_block(p: List[Any]) -> OnErrorNode:
+            return OnErrorNode(
+                code=int(p[3].value),
+                body=p[6],
+                line=getattr(p[0], "line", 0),
+                column=getattr(p[0], "column", 0),
+            )
+
+        # RESUME;  (return control to the statement after the fault)
+        @self.pg.production("resume_statement : KEYWORD_RESUME SEMICOLON")
+        def resume_statement(p: List[Any]) -> ResumeNode:
+            return ResumeNode(
+                line=getattr(p[0], "line", 0),
+                column=getattr(p[0], "column", 0),
+            )
+
+        # STRUCTURE <name>: <field declares> CLOSE <name>;
+        @self.pg.production(
+            "structure_def : KEYWORD_STRUCTURE IDENTIFIER COLON "
+            "statement_list KEYWORD_CLOSE IDENTIFIER SEMICOLON"
+        )
+        def structure_def(p: List[Any]) -> StructureDefNode:
+            name = p[1].value
+            close_name = p[5].value
+            if name.upper() != close_name.upper():
+                self.errors.append(
+                    SemanticError(
+                        f"CLOSE name '{close_name}' does not match "
+                        f"STRUCTURE name '{name}'",
+                        getattr(p[5], "line", 0),
+                        getattr(p[5], "column", 0),
+                    )
+                )
+            fields = [s for s in p[3] if isinstance(s, DeclareNode)]
+            return StructureDefNode(
+                name=name,
+                fields=fields,
+                line=getattr(p[0], "line", 0),
+                column=getattr(p[0], "column", 0),
+            )
+
+        # DECLARE <var> <template> STRUCTURE;  (instantiate a structure)
+        @self.pg.production(
+            "declare_statement : KEYWORD_DECLARE IDENTIFIER IDENTIFIER "
+            "KEYWORD_STRUCTURE SEMICOLON"
+        )
+        def declare_structure(p: List[Any]) -> DeclareNode:
+            return DeclareNode(
+                identifiers=[p[1].value],
+                type_spec=TypeSpec(
+                    data_type=DataType.STRUCTURE, type_name=p[2].value
+                ),
+                line=getattr(p[0], "line", 0),
+                column=getattr(p[0], "column", 0),
+            )
+
         @self.pg.production("type_spec : KEYWORD_INTEGER")
         def type_integer(p: List[Any]) -> TypeSpec:
             return TypeSpec(data_type=DataType.INTEGER)
@@ -511,6 +635,49 @@ class Parser:
                 column=getattr(p[0], "column", 0),
             )
 
+        # Multiple assignment: A, B, ... = <expr>;  (one RHS to several targets)
+        @self.pg.production(
+            "assignment_statement : IDENTIFIER COMMA id_comma_list "
+            "ASSIGN expression SEMICOLON"
+        )
+        def multi_assignment(p: List[Any]) -> MultiAssignNode:
+            names = [p[0].value] + p[2]
+            targets = [
+                IdentifierNode(name=n, line=getattr(p[0], "line", 0),
+                               column=getattr(p[0], "column", 0))
+                for n in names
+            ]
+            return MultiAssignNode(
+                targets=targets,
+                value=p[4],
+                line=getattr(p[0], "line", 0),
+                column=getattr(p[0], "column", 0),
+            )
+
+        # Structure field lvalue: VAR.FIELD = expr;
+        @self.pg.production(
+            "assignment_statement : IDENTIFIER DOT IDENTIFIER "
+            "ASSIGN expression SEMICOLON"
+        )
+        def field_assignment(p: List[Any]) -> AssignmentNode:
+            operand = IdentifierNode(
+                name=p[0].value,
+                line=getattr(p[0], "line", 0),
+                column=getattr(p[0], "column", 0),
+            )
+            target = FieldAccessNode(
+                operand=operand,
+                field_name=p[2].value,
+                line=getattr(p[1], "line", 0),
+                column=getattr(p[1], "column", 0),
+            )
+            return AssignmentNode(
+                target=target,
+                value=p[4],
+                line=getattr(p[0], "line", 0),
+                column=getattr(p[0], "column", 0),
+            )
+
         # Subscripted lvalue: VEC$IDX = expr;  (bit or vector element)
         @self.pg.production(
             "assignment_statement : IDENTIFIER DOLLAR subscript_index "
@@ -535,6 +702,36 @@ class Parser:
                 column=getattr(p[0], "column", 0),
             )
 
+        # Chained lvalue: ARRAY$IDX.FIELD = expr;  (struct-array element field)
+        @self.pg.production(
+            "assignment_statement : IDENTIFIER DOLLAR subscript_index DOT "
+            "IDENTIFIER ASSIGN expression SEMICOLON"
+        )
+        def subscript_field_assignment(p: List[Any]) -> AssignmentNode:
+            operand = IdentifierNode(
+                name=p[0].value,
+                line=getattr(p[0], "line", 0),
+                column=getattr(p[0], "column", 0),
+            )
+            sub = SubscriptNode(
+                operand=operand,
+                index=p[2],
+                line=getattr(p[1], "line", 0),
+                column=getattr(p[1], "column", 0),
+            )
+            target = FieldAccessNode(
+                operand=sub,
+                field_name=p[4].value,
+                line=getattr(p[3], "line", 0),
+                column=getattr(p[3], "column", 0),
+            )
+            return AssignmentNode(
+                target=target,
+                value=p[6],
+                line=getattr(p[0], "line", 0),
+                column=getattr(p[0], "column", 0),
+            )
+
         # ---- DO; ... END; ----------------------------------------------
         @self.pg.production(
             "do_block : KEYWORD_DO SEMICOLON statement_list KEYWORD_END SEMICOLON"
@@ -542,6 +739,19 @@ class Parser:
         def do_block(p: List[Any]) -> DoBlockNode:
             return DoBlockNode(
                 statements=p[2],
+                line=getattr(p[0], "line", 0),
+                column=getattr(p[0], "column", 0),
+            )
+
+        # ---- DO CASE <selector>; <branch> <branch> ... END; ------------
+        @self.pg.production(
+            "do_block : KEYWORD_DO KEYWORD_CASE expression SEMICOLON "
+            "statement_list KEYWORD_END SEMICOLON"
+        )
+        def do_case_block(p: List[Any]) -> CaseNode:
+            return CaseNode(
+                selector=p[2],
+                branches=p[4],
                 line=getattr(p[0], "line", 0),
                 column=getattr(p[0], "column", 0),
             )
@@ -801,11 +1011,88 @@ class Parser:
         def expr_group(p: List[Any]) -> ASTNode:
             return p[1]
 
-        @self.pg.production("expression : IDENTIFIER LPAREN arg_list RPAREN")
-        def expr_call(p: List[Any]) -> FunctionCallNode:
+        # IDENTIFIER ( ... ) is either a function call or a matrix subscript.
+        # If any argument is `*` or a range, it's a matrix subscript; otherwise
+        # a function call (codegen may still treat it as matrix element access
+        # when the name is a known matrix).
+        @self.pg.production(
+            "expression : IDENTIFIER LPAREN subscript_arg_list RPAREN"
+        )
+        def expr_call_or_subscript(p: List[Any]) -> ASTNode:
+            name = p[0].value
+            args = p[2]
+            line = getattr(p[0], "line", 0)
+            col = getattr(p[0], "column", 0)
+            if any(isinstance(a, (StarNode, RangeNode)) for a in args):
+                return MatrixSubscriptNode(
+                    name=name, args=args, line=line, column=col
+                )
             return FunctionCallNode(
-                name=p[0].value,
-                arguments=p[2],
+                name=name, arguments=args, line=line, column=col
+            )
+
+        @self.pg.production("subscript_arg_list : subscript_arg_list COMMA subscript_arg")
+        def subscript_arg_list(p: List[Any]) -> list:
+            return p[0] + [p[2]]
+
+        @self.pg.production("subscript_arg_list : subscript_arg")
+        def subscript_arg_list_single(p: List[Any]) -> list:
+            return [p[0]]
+
+        @self.pg.production("subscript_arg : expression")
+        def subscript_arg_expr(p: List[Any]) -> ASTNode:
+            return p[0]
+
+        @self.pg.production("subscript_arg : MULTIPLY")
+        def subscript_arg_star(p: List[Any]) -> StarNode:
+            return StarNode(
+                line=getattr(p[0], "line", 0),
+                column=getattr(p[0], "column", 0),
+            )
+
+        @self.pg.production("subscript_arg : expression KEYWORD_TO expression")
+        def subscript_arg_range(p: List[Any]) -> RangeNode:
+            return RangeNode(
+                lo=p[0],
+                hi=p[2],
+                line=getattr(p[1], "line", 0),
+                column=getattr(p[1], "column", 0),
+            )
+
+        # MATRIX(v1, v2, ...) constructor (row-major values).
+        @self.pg.production("expression : KEYWORD_MATRIX LPAREN arg_list RPAREN")
+        def expr_matrix_literal(p: List[Any]) -> MatrixLiteralNode:
+            return MatrixLiteralNode(
+                values=p[2],
+                line=getattr(p[0], "line", 0),
+                column=getattr(p[0], "column", 0),
+            )
+
+        # VECTOR(v1, v2, ...) constructor.
+        @self.pg.production("expression : KEYWORD_VECTOR LPAREN arg_list RPAREN")
+        def expr_vector_literal(p: List[Any]) -> VectorLiteralNode:
+            return VectorLiteralNode(
+                values=p[2],
+                line=getattr(p[0], "line", 0),
+                column=getattr(p[0], "column", 0),
+            )
+
+        # Structure field access: <expr>.<field>
+        @self.pg.production("expression : expression DOT IDENTIFIER")
+        def expr_field_access(p: List[Any]) -> FieldAccessNode:
+            return FieldAccessNode(
+                operand=p[0],
+                field_name=p[2].value,
+                line=getattr(p[1], "line", 0),
+                column=getattr(p[1], "column", 0),
+            )
+
+        # Unary minus.
+        @self.pg.production("expression : MINUS expression")
+        def expr_negate(p: List[Any]) -> UnaryOpNode:
+            return UnaryOpNode(
+                operator="-",
+                operand=p[1],
                 line=getattr(p[0], "line", 0),
                 column=getattr(p[0], "column", 0),
             )

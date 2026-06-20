@@ -236,7 +236,7 @@ def compile(
     """Run the complete compilation pipeline."""
     console.print(
         Panel.fit(
-            "[bold cyan]Resnik Compiler Pipeline[/bold cyan]",
+            "[bold cyan]Resnik - A Groovy HAL/S Compiler[/bold cyan]",
             subtitle=f"v{__version__}",
         )
     )

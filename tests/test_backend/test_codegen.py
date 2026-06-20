@@ -12,9 +12,17 @@ from resnik.parser.ast_nodes import (
     ProcedureNode,
     AssignmentNode,
     BinaryOpNode,
+    MultiAssignNode,
     UnaryOpNode,
     SubscriptNode,
     ForNode,
+    StarNode,
+    RangeNode,
+    MatrixLiteralNode,
+    MatrixSubscriptNode,
+    VectorLiteralNode,
+    StructureDefNode,
+    FieldAccessNode,
     LiteralNode,
     IdentifierNode,
     TaskNode,
@@ -24,6 +32,11 @@ from resnik.parser.ast_nodes import (
     CallNode,
     DoBlockNode,
     WhileNode,
+    CaseNode,
+    OnErrorNode,
+    ResumeNode,
+    BinaryOpNode,
+    MultiAssignNode,
     IfNode,
     ScheduleNode,
     TerminateNode,
@@ -979,3 +992,375 @@ class TestStrings:
         node = IfNode(condition=cond, then_block=DoBlockNode(statements=[]))
         code = generator.generate(ProgramNode(name="P", statements=[node]))
         assert 'if s == "OK" {' in code
+
+
+class TestMatrixOps:
+    """MATRIX(...) constructor and (row,col) subscripting."""
+
+    def _prog(self, stmts, decls=None):
+        return ProgramNode(name="P", declarations=decls or [], statements=stmts)
+
+    def _mat_decl(self, name, r, c):
+        return DeclareNode(
+            identifiers=[name],
+            type_spec=TypeSpec(data_type=DataType.MATRIX, dimensions=[r, c]),
+        )
+
+    def test_matrix_constructor_uses_target_dims(self) -> None:
+        generator = RustCodeGenerator()
+        lit = MatrixLiteralNode(values=[
+            LiteralNode(value=float(v), literal_type="SCALAR") for v in range(9)
+        ])
+        assign = AssignmentNode(target=IdentifierNode(name="M"), value=lit)
+        code = generator.generate(
+            self._prog([assign], [self._mat_decl("M", 3, 3)])
+        )
+        assert "Matrix([[0.0, 1.0, 2.0], [3.0, 4.0, 5.0], [6.0, 7.0, 8.0]])" in code
+
+    def test_row_extraction(self) -> None:
+        generator = RustCodeGenerator()
+        sub = MatrixSubscriptNode(
+            name="M",
+            args=[LiteralNode(value=2, literal_type="INTEGER"), StarNode()],
+        )
+        assign = AssignmentNode(target=IdentifierNode(name="V"), value=sub)
+        code = generator.generate(self._prog([assign], [self._mat_decl("M", 3, 3)]))
+        assert "m.row(2)" in code
+
+    def test_column_extraction(self) -> None:
+        generator = RustCodeGenerator()
+        sub = MatrixSubscriptNode(
+            name="M",
+            args=[StarNode(), LiteralNode(value=1, literal_type="INTEGER")],
+        )
+        assign = AssignmentNode(target=IdentifierNode(name="V"), value=sub)
+        code = generator.generate(self._prog([assign], [self._mat_decl("M", 3, 3)]))
+        assert "m.col(1)" in code
+
+    def test_submatrix_constant_ranges(self) -> None:
+        generator = RustCodeGenerator()
+        sub = MatrixSubscriptNode(
+            name="M",
+            args=[
+                RangeNode(lo=LiteralNode(value=2, literal_type="INTEGER"),
+                          hi=LiteralNode(value=3, literal_type="INTEGER")),
+                RangeNode(lo=LiteralNode(value=2, literal_type="INTEGER"),
+                          hi=LiteralNode(value=3, literal_type="INTEGER")),
+            ],
+        )
+        assign = AssignmentNode(target=IdentifierNode(name="S"), value=sub)
+        code = generator.generate(self._prog([assign], [self._mat_decl("M", 3, 3)]))
+        assert "Matrix([[m.0[1][1], m.0[1][2]], [m.0[2][1], m.0[2][2]]])" in code
+
+    def test_unary_minus(self) -> None:
+        generator = RustCodeGenerator()
+        assign = AssignmentNode(
+            target=IdentifierNode(name="X"),
+            value=UnaryOpNode(operator="-",
+                              operand=LiteralNode(value=0.6, literal_type="SCALAR")),
+        )
+        code = generator.generate(self._prog([assign]))
+        assert "-(0.6)" in code
+
+
+class TestMatrixElementAccess:
+    """M(r,c) / V(i) on declared aggregates resolve to element access, not calls."""
+
+    def test_matrix_element_access_not_call(self) -> None:
+        generator = RustCodeGenerator()
+        decl = DeclareNode(
+            identifiers=["M"],
+            type_spec=TypeSpec(data_type=DataType.MATRIX, dimensions=[3, 3]),
+        )
+        call = FunctionCallNode(
+            name="M",
+            arguments=[LiteralNode(value=1, literal_type="INTEGER"),
+                       LiteralNode(value=1, literal_type="INTEGER")],
+        )
+        assign = AssignmentNode(target=IdentifierNode(name="X"), value=call)
+        code = generator.generate(
+            ProgramNode(name="P", declarations=[decl], statements=[assign])
+        )
+        assert "m.0[(1) as usize - 1][(1) as usize - 1]" in code
+        assert "m(1, 1)" not in code
+
+    def test_vector_paren_element_access(self) -> None:
+        generator = RustCodeGenerator()
+        decl = DeclareNode(
+            identifiers=["V"],
+            type_spec=TypeSpec(data_type=DataType.VECTOR, dimensions=[3]),
+        )
+        call = FunctionCallNode(
+            name="V", arguments=[LiteralNode(value=2, literal_type="INTEGER")]
+        )
+        assign = AssignmentNode(target=IdentifierNode(name="X"), value=call)
+        code = generator.generate(
+            ProgramNode(name="P", declarations=[decl], statements=[assign])
+        )
+        assert "v.0[(2) as usize - 1]" in code
+
+
+class TestStructures:
+    """STRUCTURE templates, struct vars, field access, VECTOR constructor."""
+
+    def _node_template(self):
+        return StructureDefNode(
+            name="NODE",
+            fields=[
+                DeclareNode(identifiers=["STATUS"],
+                            type_spec=TypeSpec(data_type=DataType.BIT, dimensions=[8])),
+                DeclareNode(identifiers=["POSITION"],
+                            type_spec=TypeSpec(data_type=DataType.VECTOR, dimensions=[3])),
+                DeclareNode(identifiers=["TIMESTAMP"],
+                            type_spec=TypeSpec(data_type=DataType.SCALAR)),
+            ],
+        )
+
+    def test_structure_def_emits_struct(self) -> None:
+        generator = RustCodeGenerator()
+        prog = ProgramNode(name="P", statements=[self._node_template()])
+        code = generator.generate(prog)
+        assert "struct Node {" in code
+        assert "status: u32," in code
+        assert "position: Vector<3>," in code
+        assert "timestamp: f32," in code
+        assert "fn new() -> Self {" in code
+
+    def test_structure_var_declaration(self) -> None:
+        generator = RustCodeGenerator()
+        decl = DeclareNode(
+            identifiers=["PRIMARY"],
+            type_spec=TypeSpec(data_type=DataType.STRUCTURE, type_name="NODE"),
+        )
+        prog = ProgramNode(name="P",
+                           statements=[self._node_template()],
+                           declarations=[decl])
+        code = generator.generate(prog)
+        assert "let mut primary: Node = Node::new();" in code
+
+    def test_field_assignment_and_read(self) -> None:
+        generator = RustCodeGenerator()
+        assign = AssignmentNode(
+            target=FieldAccessNode(operand=IdentifierNode(name="PRIMARY"),
+                                   field_name="TIMESTAMP"),
+            value=LiteralNode(value=1024.05, literal_type="SCALAR"),
+        )
+        prog = ProgramNode(name="P", statements=[self._node_template(), assign])
+        code = generator.generate(prog)
+        assert "primary.timestamp = 1024.05;" in code
+
+    def test_vector_constructor(self) -> None:
+        generator = RustCodeGenerator()
+        lit = VectorLiteralNode(values=[
+            LiteralNode(value=0.0, literal_type="SCALAR"),
+            LiteralNode(value=1.0, literal_type="SCALAR"),
+            LiteralNode(value=0.0, literal_type="SCALAR"),
+        ])
+        assign = AssignmentNode(target=IdentifierNode(name="V"), value=lit)
+        code = generator.generate(ProgramNode(name="P", statements=[assign]))
+        assert "Vector([0.0, 1.0, 0.0])" in code
+
+
+class TestCaseStatement:
+    """DO CASE -> 1-indexed Rust match."""
+
+    def test_case_generates_indexed_match(self) -> None:
+        generator = RustCodeGenerator()
+        b1 = AssignmentNode(target=IdentifierNode(name="X"),
+                            value=LiteralNode(value=1, literal_type="INTEGER"))
+        b2 = AssignmentNode(target=IdentifierNode(name="X"),
+                            value=LiteralNode(value=2, literal_type="INTEGER"))
+        case = CaseNode(selector=IdentifierNode(name="S"), branches=[b1, b2])
+        code = generator.generate(ProgramNode(name="P", statements=[case]))
+        assert "match s {" in code
+        assert "1 => {" in code
+        assert "2 => {" in code
+        assert "_ => {}" in code
+
+    def test_case_doblock_branch_inlines(self) -> None:
+        generator = RustCodeGenerator()
+        block = DoBlockNode(statements=[
+            AssignmentNode(target=IdentifierNode(name="A"),
+                           value=LiteralNode(value=1, literal_type="INTEGER")),
+            AssignmentNode(target=IdentifierNode(name="B"),
+                           value=LiteralNode(value=2, literal_type="INTEGER")),
+        ])
+        case = CaseNode(selector=IdentifierNode(name="S"), branches=[block])
+        code = generator.generate(ProgramNode(name="P", statements=[case]))
+        assert "1 => {" in code
+        assert "a = 1;" in code and "b = 2;" in code
+
+
+class TestDoCase:
+    """DO CASE -> Rust match with 1-indexed arms and a default."""
+
+    def test_case_generates_match(self) -> None:
+        generator = RustCodeGenerator()
+        arm1 = AssignmentNode(target=IdentifierNode(name="X"),
+                              value=LiteralNode(value=1, literal_type="INTEGER"))
+        arm2 = DoBlockNode(statements=[
+            AssignmentNode(target=IdentifierNode(name="X"),
+                           value=LiteralNode(value=2, literal_type="INTEGER")),
+            AssignmentNode(target=IdentifierNode(name="Y"),
+                           value=LiteralNode(value=3, literal_type="INTEGER")),
+        ])
+        case = CaseNode(selector=IdentifierNode(name="S"), branches=[arm1, arm2])
+        code = generator.generate(ProgramNode(name="P", statements=[case]))
+        assert "match s {" in code
+        assert "1 => {" in code
+        assert "2 => {" in code
+        assert "_ => {}" in code
+        # the DO;...END; arm is unwrapped into the match arm body
+        assert "x = 2;" in code and "y = 3;" in code
+
+
+class TestOnErrorResume:
+    """ON ERROR(n) registers a handler; division is trapped via catch_unwind."""
+
+    def _prog(self):
+        handler = DoBlockNode(statements=[
+            AssignmentNode(target=IdentifierNode(name="FAULT"),
+                           value=IdentifierNode(name="TRUE")),
+            ResumeNode(),
+        ])
+        on_err = OnErrorNode(code=5, body=handler)
+        decl_d = DeclareNode(identifiers=["D"],
+                             type_spec=TypeSpec(data_type=DataType.INTEGER))
+        decl_r = DeclareNode(identifiers=["R"],
+                             type_spec=TypeSpec(data_type=DataType.SCALAR))
+        decl_f = DeclareNode(identifiers=["FAULT"],
+                             type_spec=TypeSpec(data_type=DataType.BOOLEAN))
+        div = AssignmentNode(
+            target=IdentifierNode(name="R"),
+            value=BinaryOpNode(operator="/",
+                               left=LiteralNode(value=100.0, literal_type="SCALAR"),
+                               right=IdentifierNode(name="D")),
+        )
+        return ProgramNode(name="P",
+                           declarations=[decl_d, decl_r, decl_f],
+                           statements=[on_err, div])
+
+    def test_handler_registered_and_division_trapped(self) -> None:
+        code = RustCodeGenerator().generate(self._prog())
+        assert "std::panic::set_hook" in code
+        assert "catch_unwind" in code
+        assert "std::panic::panic_any(5i32)" in code
+        assert "is_finite()" in code
+        assert "__e.downcast_ref::<i32>()" in code
+        assert "resume_unwind" in code      # unhandled codes re-raised
+        # handler body runs in the matching-code arm
+        assert "fault = true;" in code
+        # the ON ERROR block itself is not emitted inline as sequential code
+        assert "if __code == 5" in code
+
+    def test_no_trap_without_handler(self) -> None:
+        # Same division but no ON ERROR -> plain assignment, no catch_unwind.
+        prog = self._prog()
+        prog.statements = prog.statements[1:]   # drop the OnErrorNode
+        code = RustCodeGenerator().generate(prog)
+        assert "catch_unwind" not in code
+        assert "r = 100" in code
+
+
+class TestMultiDeclAndAssign:
+    """Multiple declaration and multiple assignment, plus CROSS/ABVAL."""
+
+    def test_multi_declare(self) -> None:
+        decl = DeclareNode(
+            identifiers=["A", "B"],
+            type_spec=TypeSpec(data_type=DataType.VECTOR, dimensions=[3]),
+        )
+        code = RustCodeGenerator().generate(
+            ProgramNode(name="P", declarations=[decl])
+        )
+        assert "let mut a: Vector<3> = Vector::<3>::zero();" in code
+        assert "let mut b: Vector<3> = Vector::<3>::zero();" in code
+
+    def test_multi_assign_single_eval(self) -> None:
+        ma = MultiAssignNode(
+            targets=[IdentifierNode(name="A"), IdentifierNode(name="B")],
+            value=FunctionCallNode(
+                name="CROSS",
+                arguments=[IdentifierNode(name="X"), IdentifierNode(name="Y")],
+            ),
+        )
+        code = RustCodeGenerator().generate(
+            ProgramNode(name="P", statements=[ma])
+        )
+        # RHS evaluated once into a temp, then copied to each target
+        assert "let __t = cross(x, y);" in code
+        assert "a = __t;" in code
+        assert "b = __t;" in code
+
+    def test_cross_and_abval_in_prelude(self) -> None:
+        ma = MultiAssignNode(
+            targets=[IdentifierNode(name="A")],
+            value=FunctionCallNode(name="CROSS",
+                                   arguments=[IdentifierNode(name="X"),
+                                              IdentifierNode(name="Y")]),
+        )
+        code = RustCodeGenerator().generate(
+            ProgramNode(name="P", statements=[ma])
+        )
+        assert "pub fn cross(a: Vector<3>, b: Vector<3>)" in code
+        assert "pub fn abval<const N: usize>" in code
+
+
+class TestArrayOfStruct:
+    """ARRAY(n) OF <template> STRUCTURE and chained subscript+field access."""
+
+    def _template(self):
+        return StructureDefNode(name="STAR_DATA", fields=[
+            DeclareNode(identifiers=["MAGNITUDE"],
+                        type_spec=TypeSpec(data_type=DataType.SCALAR)),
+            DeclareNode(identifiers=["VALID"],
+                        type_spec=TypeSpec(data_type=DataType.BOOLEAN)),
+        ])
+
+    def test_array_of_struct_declaration(self) -> None:
+        decl = DeclareNode(
+            identifiers=["CONSTELLATION"],
+            type_spec=TypeSpec(data_type=DataType.STRUCTURE,
+                               type_name="STAR_DATA", array_size=5),
+        )
+        code = RustCodeGenerator().generate(
+            ProgramNode(name="P", statements=[self._template()],
+                        declarations=[decl])
+        )
+        assert "let mut constellation: [StarData; 5] = [StarData::new(); 5];" in code
+
+    def test_chained_subscript_field_lvalue(self) -> None:
+        decl = DeclareNode(
+            identifiers=["CONSTELLATION"],
+            type_spec=TypeSpec(data_type=DataType.STRUCTURE,
+                               type_name="STAR_DATA", array_size=5),
+        )
+        assign = AssignmentNode(
+            target=FieldAccessNode(
+                operand=SubscriptNode(operand=IdentifierNode(name="CONSTELLATION"),
+                                      index=IdentifierNode(name="IDX")),
+                field_name="MAGNITUDE"),
+            value=LiteralNode(value=0.0, literal_type="SCALAR"),
+        )
+        code = RustCodeGenerator().generate(
+            ProgramNode(name="P", statements=[self._template(), assign],
+                        declarations=[decl])
+        )
+        assert "constellation[(idx - 1) as usize].magnitude = 0.0;" in code
+
+
+class TestConstSubscriptFieldLex:
+    """A constant subscript followed by a field must lex as NUMBER . FIELD,
+    not as a trailing-dot float that swallows the '.'."""
+
+    def test_number_dot_field_tokenization(self) -> None:
+        from resnik import Lexer
+        types = [t.type for t in Lexer().tokenize("C$1.M", "t")]
+        # '1' is a NUMBER and '.' a separate DOT (not '1.' as one NUMBER)
+        assert "DOT" in types
+        assert types.count("NUMBER") == 1
+
+    def test_float_still_lexes(self) -> None:
+        from resnik import Lexer
+        types = [t.type for t in Lexer().tokenize("100.0", "t")]
+        assert types == ["NUMBER"]

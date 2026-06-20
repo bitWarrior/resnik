@@ -83,7 +83,7 @@ class Lexer:
         self.lg.add("UNDERSCORE", r"_")
 
         # Numeric literals
-        self.lg.add("NUMBER", r"\d+\.?\d*([Ee][+-]?\d+)?")
+        self.lg.add("NUMBER", r"\d+(\.\d+)?([Ee][+-]?\d+)?")
 
         # Bit/Hex/Oct strings - match any content, validate later
         # (?i) so bin'..'/Hex'..' tokenize consistently with HAL/S case-insensitivity
