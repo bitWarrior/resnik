@@ -3,8 +3,7 @@
 An open-sourc compiler for the HAL/S aerospace programming language, translating legacy NASA HAL/S source code to safe, modern Rust.
 
 **Version:** 1.0.0 (Modern Edition)  
-**Status:** Lexer ✓ | Parser ✓ | Backend → Planned  
-**Date:** February 11, 2026
+**Status:** Lexer ✓ | Parser ✓ | ✓ Backend
 
 ## License
 
@@ -64,6 +63,15 @@ else:
     print(f"✓ Successfully parsed: {ast.name}")
 ```
 
+### Programming Language Triva
+The "HAL" name was chosen to honor Hal Laning, a pioneer in aerospace computing at MIT. The "S" was added to stand for "Shuttle"
+
+### HAL/S Deployments
+
+- Space Shuttle: Flight Software (FSW) for the Space Shuttle's onboard computers, including the Primary Avionics Software System (PASS) and the Backup Flight Software (BFS).
+
+- Galileo: Deployed Flight Software (FSW) for the Attitude and Articulation Control Subsystem (AACS),
+
 ## Project Structure
 ```
 resnik/
@@ -80,14 +88,15 @@ resnik/
 │   ├── types.py            # Type definitions
 │   └── exceptions.py       # Custom exceptions
 │
-├── tests/                   # Professional test suite
+├── tests/                  # Professional test suite
 │   ├── test_lexer/         # Lexer tests
 │   ├── test_parser/        # Parser tests
 │   ├── integration/        # End-to-end tests
 │   └── fixtures/           # Test data
+│   └── regression/         # Regression test
 │
-├── docs/                    # Documentation (MkDocs ready)
-├── examples/                # Usage examples
+├── docs/                   # Documentation (MkDocs ready)
+├── examples/               # Usage examples
 ├── pyproject.toml          # Single source of truth!
 ├── .pre-commit-config.yaml # Automated code quality
 └── .github/workflows/      # CI/CD pipelines
@@ -114,7 +123,7 @@ pytest -v
 pytest -m "not slow"
 ```
 
-## Namesake
+## Compilers Namesake
 
 Judith Resnik (April 5, 1949 – January 28, 1986) was an American electrical engineer, pilot, and NASA astronaut who became a trailblazer in space exploration.
 Born in Akron, Ohio, to Jewish parents of Russian immigrant background—her father an optometrist and her mother a legal secretary—Resnik showed exceptional talent in math and science from a young age. She graduated as valedictorian from Firestone High School and earned a perfect math SAT score. She received her B.S. in electrical engineering from Carnegie Mellon University (then Carnegie Tech) in 1970 and later a Ph.D. in electrical engineering from the University of Maryland in 1977.

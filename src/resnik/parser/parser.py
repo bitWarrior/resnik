@@ -25,6 +25,7 @@ from resnik.parser.ast_nodes import (
     SubscriptNode,
     ForNode,
     StarNode,
+    IndexListNode,
     RangeNode,
     MatrixLiteralNode,
     MatrixSubscriptNode,
@@ -33,6 +34,7 @@ from resnik.parser.ast_nodes import (
     FieldAccessNode,
     OnErrorNode,
     ResumeNode,
+    ReturnNode,
     MultiAssignNode,
     WriteNode,
     FunctionCallNode,
@@ -43,6 +45,8 @@ from resnik.parser.ast_nodes import (
     IfNode,
     ScheduleNode,
     TerminateNode,
+    WaitNode,
+    CancelNode,
     LiteralNode,
     IdentifierNode,
 )
@@ -69,11 +73,20 @@ class Parser:
                 "KEYWORD_CLOSE",
                 "KEYWORD_TASK",
                 "KEYWORD_PROCEDURE",
+                "KEYWORD_FUNCTION",
+                "KEYWORD_RETURN",
+                "KEYWORD_IN",
+                "KEYWORD_REPEAT",
+                "KEYWORD_EVERY",
+                "KEYWORD_WAIT",
+                "KEYWORD_UNTIL",
+                "KEYWORD_CANCEL",
                 "KEYWORD_COMPOOL",
                 "KEYWORD_STATIC",
                 "KEYWORD_CONSTANT",
                 "KEYWORD_STRUCTURE",
                 "KEYWORD_RESUME",
+                "KEYWORD_EQUATE",
                 "KEYWORD_ARRAY",
                 "KEYWORD_OF",
                 "DOT",
@@ -211,7 +224,8 @@ class Parser:
         )
 
     def _build_procedure(
-        self, name_tok: Any, params: list, statements: list, close_tok: Any
+        self, name_tok: Any, params: list, statements: list, close_tok: Any,
+        return_type: Any = None,
     ) -> ProcedureNode:
         """Build a ProcedureNode and check the CLOSE name matches the label."""
         name = name_tok.value
@@ -231,6 +245,7 @@ class Parser:
             name=name,
             parameters=params,
             statements=statements,
+            return_type=return_type,
             line=getattr(name_tok, "line", 0),
             column=getattr(name_tok, "column", 0),
         )
@@ -350,6 +365,28 @@ class Parser:
                 name_tok=p[0], params=[], statements=p[4], close_tok=p[6]
             )
 
+        # FUNCTION: like a procedure but with an explicit return type.
+        @self.pg.production(
+            "procedure_block : IDENTIFIER COLON KEYWORD_FUNCTION "
+            "LPAREN param_list RPAREN type_spec SEMICOLON "
+            "statement_list KEYWORD_CLOSE IDENTIFIER SEMICOLON"
+        )
+        def function_block(p: List[Any]) -> ProcedureNode:
+            return self._build_procedure(
+                name_tok=p[0], params=p[4], statements=p[8],
+                close_tok=p[10], return_type=p[6]
+            )
+
+        @self.pg.production(
+            "procedure_block : IDENTIFIER COLON KEYWORD_FUNCTION type_spec "
+            "SEMICOLON statement_list KEYWORD_CLOSE IDENTIFIER SEMICOLON"
+        )
+        def function_block_noparams(p: List[Any]) -> ProcedureNode:
+            return self._build_procedure(
+                name_tok=p[0], params=[], statements=p[5],
+                close_tok=p[7], return_type=p[3]
+            )
+
         @self.pg.production("param_list : param_list COMMA IDENTIFIER")
         def param_list(p: List[Any]) -> list:
             return p[0] + [p[2].value]
@@ -375,12 +412,15 @@ class Parser:
         @self.pg.production("statement : structure_def")
         @self.pg.production("statement : on_error_block")
         @self.pg.production("statement : resume_statement")
+        @self.pg.production("statement : return_statement")
         @self.pg.production("statement : declare_statement")
         @self.pg.production("statement : assignment_statement")
         @self.pg.production("statement : call_statement")
         @self.pg.production("statement : if_statement")
         @self.pg.production("statement : do_block")
         @self.pg.production("statement : schedule_statement")
+        @self.pg.production("statement : wait_statement")
+        @self.pg.production("statement : cancel_statement")
         @self.pg.production("statement : terminate_statement")
         @self.pg.production("statement : write_statement")
         def statement(p: List[Any]) -> ASTNode:
@@ -399,19 +439,55 @@ class Parser:
             )
 
         # Array of structures: DECLARE C ARRAY(5) OF STAR_DATA STRUCTURE;
+        # Unified array: DECLARE G ARRAY(d1, d2, ...) OF <element>;
+        # <element> is a type_spec (VECTOR(3), INTEGER, ...) or a structure
+        # template (IDENTIFIER STRUCTURE). Both dimension forms flow through
+        # array_dim_list, so there is a single ARRAY( ... ) prefix (no conflict).
         @self.pg.production(
             "declare_statement : KEYWORD_DECLARE IDENTIFIER KEYWORD_ARRAY "
-            "LPAREN NUMBER RPAREN KEYWORD_OF IDENTIFIER KEYWORD_STRUCTURE "
-            "SEMICOLON"
+            "LPAREN array_dim_list RPAREN KEYWORD_OF array_element SEMICOLON"
         )
-        def declare_array_struct(p: List[Any]) -> DeclareNode:
+        def declare_array(p: List[Any]) -> DeclareNode:
+            dims = p[4]
+            element = p[7]
             return DeclareNode(
                 identifiers=[p[1].value],
                 type_spec=TypeSpec(
-                    data_type=DataType.STRUCTURE,
-                    type_name=p[7].value,
-                    array_size=int(p[4].value),
+                    data_type=element.data_type,
+                    array_dims=dims,
+                    array_size=dims[0],
+                    element_type=element,
                 ),
+                line=getattr(p[0], "line", 0),
+                column=getattr(p[0], "column", 0),
+            )
+
+        @self.pg.production("array_element : type_spec")
+        def array_element_type(p: List[Any]) -> TypeSpec:
+            return p[0]
+
+        @self.pg.production("array_element : IDENTIFIER KEYWORD_STRUCTURE")
+        def array_element_struct(p: List[Any]) -> TypeSpec:
+            return TypeSpec(data_type=DataType.STRUCTURE, type_name=p[0].value)
+
+        @self.pg.production("array_dim_list : NUMBER")
+        def array_dim_single(p: List[Any]) -> list:
+            return [int(p[0].value)]
+
+        @self.pg.production("array_dim_list : array_dim_list COMMA NUMBER")
+        def array_dim_more(p: List[Any]) -> list:
+            return p[0] + [int(p[2].value)]
+
+        # Memory overlay: DECLARE VIEW <type> EQUATE TARGET;
+        @self.pg.production(
+            "declare_statement : KEYWORD_DECLARE IDENTIFIER type_spec "
+            "KEYWORD_EQUATE IDENTIFIER SEMICOLON"
+        )
+        def declare_equate(p: List[Any]) -> DeclareNode:
+            return DeclareNode(
+                identifiers=[p[1].value],
+                type_spec=p[2],
+                attributes={"equate": p[4].value},
                 line=getattr(p[0], "line", 0),
                 column=getattr(p[0], "column", 0),
             )
@@ -488,6 +564,31 @@ class Parser:
                 node.initial_value = values[0]
             return node
 
+        # CONSTANT before the type: DECLARE NAME CONSTANT SCALAR(value);
+        # Restricted to bare scalar/integer types so the value parens cannot be
+        # confused with a VECTOR(n)/MATRIX type_spec's own parens (no conflict).
+        @self.pg.production("const_scalar_type : KEYWORD_SCALAR")
+        @self.pg.production("const_scalar_type : KEYWORD_INTEGER")
+        def const_scalar_type(p: List[Any]) -> TypeSpec:
+            dt = (DataType.SCALAR
+                  if p[0].gettokentype() == "KEYWORD_SCALAR"
+                  else DataType.INTEGER)
+            return TypeSpec(data_type=dt)
+
+        @self.pg.production(
+            "declare_statement : KEYWORD_DECLARE IDENTIFIER KEYWORD_CONSTANT "
+            "const_scalar_type LPAREN expression RPAREN SEMICOLON"
+        )
+        def declare_constant_prefix(p: List[Any]) -> DeclareNode:
+            return DeclareNode(
+                identifiers=[p[1].value],
+                type_spec=p[3],
+                is_constant=True,
+                initial_value=p[5],
+                line=getattr(p[0], "line", 0),
+                column=getattr(p[0], "column", 0),
+            )
+
         @self.pg.production(
             "declare_statement : KEYWORD_DECLARE IDENTIFIER type_spec "
             "KEYWORD_CONSTANT LPAREN arg_list RPAREN SEMICOLON"
@@ -523,6 +624,23 @@ class Parser:
         @self.pg.production("resume_statement : KEYWORD_RESUME SEMICOLON")
         def resume_statement(p: List[Any]) -> ResumeNode:
             return ResumeNode(
+                line=getattr(p[0], "line", 0),
+                column=getattr(p[0], "column", 0),
+            )
+
+        # RETURN <expr>;  and bare RETURN;
+        @self.pg.production("return_statement : KEYWORD_RETURN expression SEMICOLON")
+        def return_statement(p: List[Any]) -> ReturnNode:
+            return ReturnNode(
+                value=p[1],
+                line=getattr(p[0], "line", 0),
+                column=getattr(p[0], "column", 0),
+            )
+
+        @self.pg.production("return_statement : KEYWORD_RETURN SEMICOLON")
+        def return_statement_bare(p: List[Any]) -> ReturnNode:
+            return ReturnNode(
+                value=None,
                 line=getattr(p[0], "line", 0),
                 column=getattr(p[0], "column", 0),
             )
@@ -872,6 +990,53 @@ class Parser:
                 column=getattr(p[0], "column", 0),
             )
 
+        # Timed/cyclic: SCHEDULE T IN <delay> REPEAT EVERY <period>;
+        @self.pg.production(
+            "schedule_statement : KEYWORD_SCHEDULE IDENTIFIER KEYWORD_IN "
+            "expression KEYWORD_REPEAT KEYWORD_EVERY expression SEMICOLON"
+        )
+        def schedule_cyclic(p: List[Any]) -> ScheduleNode:
+            return ScheduleNode(
+                task_name=p[1].value,
+                delay=p[3],
+                period=p[6],
+                line=getattr(p[0], "line", 0),
+                column=getattr(p[0], "column", 0),
+            )
+
+        # One-shot delayed: SCHEDULE T IN <delay>;
+        @self.pg.production(
+            "schedule_statement : KEYWORD_SCHEDULE IDENTIFIER KEYWORD_IN "
+            "expression SEMICOLON"
+        )
+        def schedule_delayed(p: List[Any]) -> ScheduleNode:
+            return ScheduleNode(
+                task_name=p[1].value,
+                delay=p[3],
+                line=getattr(p[0], "line", 0),
+                column=getattr(p[0], "column", 0),
+            )
+
+        # WAIT UNTIL <condition>;
+        @self.pg.production(
+            "wait_statement : KEYWORD_WAIT KEYWORD_UNTIL expression SEMICOLON"
+        )
+        def wait_statement(p: List[Any]) -> WaitNode:
+            return WaitNode(
+                condition=p[2],
+                line=getattr(p[0], "line", 0),
+                column=getattr(p[0], "column", 0),
+            )
+
+        # CANCEL <task>;
+        @self.pg.production("cancel_statement : KEYWORD_CANCEL IDENTIFIER SEMICOLON")
+        def cancel_statement(p: List[Any]) -> CancelNode:
+            return CancelNode(
+                task_name=p[1].value,
+                line=getattr(p[0], "line", 0),
+                column=getattr(p[0], "column", 0),
+            )
+
         @self.pg.production("terminate_statement : KEYWORD_TERMINATE SEMICOLON")
         def terminate_statement(p: List[Any]) -> TerminateNode:
             return TerminateNode(
@@ -1000,6 +1165,29 @@ class Parser:
         def subscript_index_expr(p: List[Any]) -> ASTNode:
             return p[1]
 
+        # Bit-slice range: X$(lo TO hi)
+        @self.pg.production(
+            "subscript_index : LPAREN expression KEYWORD_TO expression RPAREN"
+        )
+        def subscript_index_range(p: List[Any]) -> RangeNode:
+            return RangeNode(
+                lo=p[1],
+                hi=p[3],
+                line=getattr(p[0], "line", 0),
+                column=getattr(p[0], "column", 0),
+            )
+
+        # 2-D subscript: X$(i, j) -> a unified IndexListNode coordinate.
+        @self.pg.production(
+            "subscript_index : LPAREN expression COMMA expression RPAREN"
+        )
+        def subscript_index_2d(p: List[Any]) -> IndexListNode:
+            return IndexListNode(
+                indices=[p[1], p[3]],
+                line=getattr(p[0], "line", 0),
+                column=getattr(p[0], "column", 0),
+            )
+
         @self.pg.production("expression : HEXSTRING")
         @self.pg.production("expression : BITSTRING")
         @self.pg.production("expression : OCTSTRING")
@@ -1015,6 +1203,23 @@ class Parser:
         # If any argument is `*` or a range, it's a matrix subscript; otherwise
         # a function call (codegen may still treat it as matrix element access
         # when the name is a known matrix).
+        # Type-coercion casts that use type keywords: INTEGER(x), SCALAR(x).
+        @self.pg.production("expression : KEYWORD_INTEGER LPAREN expression RPAREN")
+        def expr_cast_integer(p: List[Any]) -> FunctionCallNode:
+            return FunctionCallNode(
+                name="INTEGER", arguments=[p[2]],
+                line=getattr(p[0], "line", 0),
+                column=getattr(p[0], "column", 0),
+            )
+
+        @self.pg.production("expression : KEYWORD_SCALAR LPAREN expression RPAREN")
+        def expr_cast_scalar(p: List[Any]) -> FunctionCallNode:
+            return FunctionCallNode(
+                name="SCALAR", arguments=[p[2]],
+                line=getattr(p[0], "line", 0),
+                column=getattr(p[0], "column", 0),
+            )
+
         @self.pg.production(
             "expression : IDENTIFIER LPAREN subscript_arg_list RPAREN"
         )

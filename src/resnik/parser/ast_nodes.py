@@ -154,6 +154,7 @@ class ProcedureNode(ASTNode):
     parameters: List[str] = field(default_factory=list)
     declarations: List[ASTNode] = field(default_factory=list)
     statements: List[ASTNode] = field(default_factory=list)
+    return_type: Optional["TypeSpec"] = None  # set when this is a FUNCTION
 
     def __post_init__(self) -> None:
         self.node_type = NodeType.PROCEDURE
@@ -166,8 +167,26 @@ class ProcedureNode(ASTNode):
                 "parameters": self.parameters,
                 "declarations": [d.to_dict() for d in self.declarations],
                 "statements": [s.to_dict() for s in self.statements],
+                "return_type": (
+                    self.return_type.to_dict() if self.return_type else None
+                ),
             }
         )
+        return result
+
+
+@dataclass
+class ReturnNode(ASTNode):
+    """RETURN <expr>; — return a value from a FUNCTION."""
+
+    value: Optional[ASTNode] = None
+
+    def __post_init__(self) -> None:
+        self.node_type = NodeType.RETURN
+
+    def to_dict(self) -> Dict[str, Any]:
+        result = super().to_dict()
+        result.update({"value": self.value.to_dict() if self.value else None})
         return result
 
 
@@ -428,6 +447,21 @@ class RangeNode(ASTNode):
 
 
 @dataclass
+class IndexListNode(ASTNode):
+    """A comma-separated subscript coordinate, e.g. X$(i, j) -> [i, j]."""
+
+    indices: List[ASTNode] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        self.node_type = NodeType.INDEX_LIST
+
+    def to_dict(self) -> Dict[str, Any]:
+        result = super().to_dict()
+        result.update({"indices": [i.to_dict() for i in self.indices]})
+        return result
+
+
+@dataclass
 class MatrixLiteralNode(ASTNode):
     """MATRIX(v1, v2, ...) constructor; values are row-major."""
 
@@ -678,6 +712,8 @@ class ScheduleNode(ASTNode):
 
     task_name: str = ""
     priority: Optional[ASTNode] = None
+    delay: Optional[ASTNode] = None   # SCHEDULE T IN <delay> ...
+    period: Optional[ASTNode] = None  # ... REPEAT EVERY <period>
 
     def __post_init__(self) -> None:
         self.node_type = NodeType.SCHEDULE
@@ -688,6 +724,8 @@ class ScheduleNode(ASTNode):
             {
                 "task_name": self.task_name,
                 "priority": self.priority.to_dict() if self.priority else None,
+                "delay": self.delay.to_dict() if self.delay else None,
+                "period": self.period.to_dict() if self.period else None,
             }
         )
         return result
@@ -701,6 +739,38 @@ class TerminateNode(ASTNode):
 
     def __post_init__(self) -> None:
         self.node_type = NodeType.TERMINATE
+
+    def to_dict(self) -> Dict[str, Any]:
+        result = super().to_dict()
+        result.update({"task_name": self.task_name})
+        return result
+
+
+@dataclass
+class WaitNode(ASTNode):
+    """WAIT UNTIL <condition>; — block until the condition holds."""
+
+    condition: Optional[ASTNode] = None
+
+    def __post_init__(self) -> None:
+        self.node_type = NodeType.WAIT
+
+    def to_dict(self) -> Dict[str, Any]:
+        result = super().to_dict()
+        result.update(
+            {"condition": self.condition.to_dict() if self.condition else None}
+        )
+        return result
+
+
+@dataclass
+class CancelNode(ASTNode):
+    """CANCEL <task>; — stop a scheduled (cyclic) task."""
+
+    task_name: str = ""
+
+    def __post_init__(self) -> None:
+        self.node_type = NodeType.CANCEL
 
     def to_dict(self) -> Dict[str, Any]:
         result = super().to_dict()

@@ -82,6 +82,7 @@ class NodeType(Enum):
     ON_ERROR = "OnError"
     RESUME = "Resume"
     MULTI_ASSIGN = "MultiAssign"
+    INDEX_LIST = "IndexList"
     RANGE = "Range"
     STAR = "Star"
     FUNCTION_CALL = "FunctionCall"
@@ -100,6 +101,8 @@ class TypeSpec:
     length: Optional[int] = None
     type_name: Optional[str] = None  # structure template name, when STRUCTURE
     array_size: Optional[int] = None  # element count, when an ARRAY(n) OF ...
+    array_dims: Optional[List[int]] = None  # multi-dim ARRAY(d1, d2, ...)
+    element_type: Optional["TypeSpec"] = None  # ARRAY element type
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
@@ -110,6 +113,10 @@ class TypeSpec:
             "length": self.length,
             "type_name": self.type_name,
             "array_size": self.array_size,
+            "array_dims": self.array_dims,
+            "element_type": (
+                self.element_type.to_dict() if self.element_type else None
+            ),
         }
 
 

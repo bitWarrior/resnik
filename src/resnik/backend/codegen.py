@@ -23,6 +23,7 @@ from resnik.parser.ast_nodes import (
     SubscriptNode,
     ForNode,
     StarNode,
+    IndexListNode,
     RangeNode,
     MatrixLiteralNode,
     MatrixSubscriptNode,
@@ -31,6 +32,7 @@ from resnik.parser.ast_nodes import (
     FieldAccessNode,
     OnErrorNode,
     ResumeNode,
+    ReturnNode,
     MultiAssignNode,
     LiteralNode,
     IdentifierNode,
@@ -43,6 +45,8 @@ from resnik.parser.ast_nodes import (
     IfNode,
     ScheduleNode,
     TerminateNode,
+    WaitNode,
+    CancelNode,
 )
 from resnik.backend.rust_emitter import RustEmitter
 from resnik.backend.type_mapper import TypeMapper
@@ -103,6 +107,7 @@ class RustCodeGenerator:
         self._structs: dict = {}
         self._error_handlers: dict = {}
         self._panic_hook_emitted: bool = False
+        self._equates: dict = {}
     
     def generate(self, ast: Optional[ASTNode]) -> str:
         """
@@ -151,6 +156,7 @@ class RustCodeGenerator:
         self._structs = {}
         self._error_handlers = {}
         self._panic_hook_emitted = False
+        self._equates = {}
         for node in self._walk(ast):
             if isinstance(node, StructureDefNode):
                 self._structs[node.name.upper()] = node
@@ -188,7 +194,7 @@ class RustCodeGenerator:
     _PRELUDE = """mod hal_rt {
     //! Minimal dependency-free runtime for generated HAL/S code (host target).
     #![allow(dead_code)]
-    use std::ops::{Add, Sub, Mul};
+    use std::ops::{Add, Sub, Mul, Div};
 
     #[derive(Clone, Copy, Debug)]
     pub struct Vector<const N: usize>(pub [f32; N]);
@@ -211,6 +217,33 @@ class RustCodeGenerator:
         fn sub(self, rhs: Vector<N>) -> Vector<N> {
             let mut out = [0.0; N];
             for i in 0..N { out[i] = self.0[i] - rhs.0[i]; }
+            Vector(out)
+        }
+    }
+
+    impl<const N: usize> Mul<f32> for Vector<N> {
+        type Output = Vector<N>;
+        fn mul(self, s: f32) -> Vector<N> {
+            let mut out = [0.0; N];
+            for i in 0..N { out[i] = self.0[i] * s; }
+            Vector(out)
+        }
+    }
+
+    impl<const N: usize> Mul<Vector<N>> for f32 {
+        type Output = Vector<N>;
+        fn mul(self, v: Vector<N>) -> Vector<N> {
+            let mut out = [0.0; N];
+            for i in 0..N { out[i] = self * v.0[i]; }
+            Vector(out)
+        }
+    }
+
+    impl<const N: usize> Div<f32> for Vector<N> {
+        type Output = Vector<N>;
+        fn div(self, s: f32) -> Vector<N> {
+            let mut out = [0.0; N];
+            for i in 0..N { out[i] = self.0[i] / s; }
             Vector(out)
         }
     }
@@ -285,16 +318,26 @@ use hal_rt::*;
         self.emitter.emit_line()
 
     # Function-call names that lower to inline Rust (not the hal_rt prelude).
-    _INTRINSICS_NO_RUNTIME = {"LENGTH"}
+    _INTRINSICS_NO_RUNTIME = {"LENGTH", "INTEGER", "SCALAR"}
+
+    # Intrinsics that lower to hal_rt prelude functions (so their use requires
+    # the prelude). User-defined functions and inline casts are NOT here.
+    _PRELUDE_INTRINSICS = {"ABVAL", "CROSS"}
 
     def _uses_runtime(self, node: ASTNode) -> bool:
         """True if any node in the tree needs the hal_rt prelude."""
         for n in self._walk(node):
             if isinstance(n, FunctionCallNode):
-                if n.name.upper() not in self._INTRINSICS_NO_RUNTIME:
+                if n.name.upper() in self._PRELUDE_INTRINSICS:
                     return True
-            elif isinstance(n, (ScheduleNode, TerminateNode)):
-                return True
+            elif isinstance(n, ScheduleNode):
+                # Priority schedules use the schedule() helper; timed/cyclic
+                # ones are generated inline with std and need no prelude.
+                if n.delay is None:
+                    return True
+            elif isinstance(n, TerminateNode):
+                if n.task_name:   # named TERMINATE uses the terminate() helper
+                    return True
             elif isinstance(n, (VectorLiteralNode, MatrixLiteralNode,
                                 MatrixSubscriptNode)):
                 return True
@@ -311,7 +354,8 @@ use hal_rt::*;
         yield node
         list_attrs = (
             "statements", "declarations", "procedures", "tasks", "units",
-            "items", "arguments", "values", "args", "fields", "targets"
+            "items", "arguments", "values", "args", "fields", "targets",
+            "indices"
         )
         for attr in list_attrs:
             for child in getattr(node, attr, None) or []:
@@ -378,12 +422,23 @@ use hal_rt::*;
             )
         elif isinstance(node, MultiAssignNode):
             self._generate_multi_assign(node)
+        elif isinstance(node, ReturnNode):
+            if node.value is not None:
+                self.emitter.emit_line(
+                    f"return {self._generate_expression(node.value)};"
+                )
+            else:
+                self.emitter.emit_line("return;")
         elif isinstance(node, ForNode):
             self._generate_for(node)
         elif isinstance(node, CallNode):
             self._generate_call(node)
         elif isinstance(node, ScheduleNode):
             self._generate_schedule(node)
+        elif isinstance(node, WaitNode):
+            self._generate_wait(node)
+        elif isinstance(node, CancelNode):
+            self._generate_cancel(node)
         elif isinstance(node, TerminateNode):
             self._generate_terminate(node)
         else:
@@ -495,10 +550,11 @@ use hal_rt::*;
         self.emitter.emit_block_end()
 
     def _contains_schedule(self, statements: list) -> bool:
-        """True if any SCHEDULE appears in these statements (incl. nested if/do)."""
+        """True if any priority-style SCHEDULE appears (these use __tasks).
+        Timed/cyclic schedules manage their own handles, so they don't count."""
         for stmt in statements:
             for n in self._walk(stmt):
-                if isinstance(n, ScheduleNode):
+                if isinstance(n, ScheduleNode) and n.delay is None:
                     return True
         return False
 
@@ -574,6 +630,41 @@ use hal_rt::*;
         """
         rust_type = self.type_mapper.map_type(node.type_spec)
 
+        # EQUATE overlay: VIEW aliases TARGET's storage. No separate binding;
+        # accesses are rewritten onto the target with bit-preserving casts.
+        equate = node.attributes.get("equate") if node.attributes else None
+        if equate is not None:
+            view = node.identifiers[0].lower()
+            target = equate.lower()
+            target_ts = self._var_info.get(target)
+            target_type = (self.type_mapper.map_type(target_ts)
+                           if target_ts is not None else "u32")
+            self._equates[view] = (target, rust_type, target_type)
+            self.emitter.emit_comment(
+                f"{node.identifiers[0]} EQUATE {equate} "
+                f"(overlay: {rust_type} view of {target_type})"
+            )
+            return
+        # General ARRAY(d1, d2, ...) OF <element> -> nested Rust array.
+        if (node.type_spec is not None
+                and node.type_spec.array_dims is not None
+                and node.type_spec.element_type is not None):
+            ets = node.type_spec.element_type
+            if ets.data_type == DataType.STRUCTURE:
+                et = self._struct_name(ets.type_name or "")
+                ei = f"{et}::new()"
+            else:
+                et = self.type_mapper.map_type(ets)
+                ei = self.type_mapper.get_default_value(ets)
+            rust_t, rust_i = et, ei
+            for d in reversed(node.type_spec.array_dims):
+                rust_t = f"[{rust_t}; {d}]"
+                rust_i = f"[{rust_i}; {d}]"
+            for identifier in node.identifiers:
+                self.emitter.emit_variable_declaration(
+                    identifier.lower(), rust_t, rust_i, True
+                )
+            return
         # STRUCTURE-typed variable: `let mut v: Struct = Struct::new();`
         if (node.type_spec is not None
                 and node.type_spec.data_type == DataType.STRUCTURE):
@@ -686,9 +777,13 @@ use hal_rt::*;
             for p in node.parameters
         ]
 
-        # Emit procedure
-        self.emitter.emit_comment(f"HAL/S Procedure: {node.name}")
-        self.emitter.emit_function_header(rust_name, params, None, is_public=False)
+        # Emit procedure (or function, when it carries a return type)
+        ret = (self.type_mapper.map_type(node.return_type)
+               if node.return_type is not None else None)
+        kind = "Function" if ret is not None else "Procedure"
+        self.emitter.emit_comment(f"HAL/S {kind}: {node.name}")
+        self.emitter.emit_function_header(rust_name, params, ret, is_public=False)
+
 
         def _is_param_decl(n: ASTNode) -> bool:
             return (
@@ -845,6 +940,14 @@ use hal_rt::*;
             node: AssignmentNode to generate
         """
         if node.target and node.value:
+            # EQUATE overlay write: VIEW = expr  ->  target = (expr) as target_type
+            # (bit-preserving, so the alias and the target stay byte-identical).
+            if (isinstance(node.target, IdentifierNode)
+                    and node.target.name.lower() in self._equates):
+                target, _, target_type = self._equates[node.target.name.lower()]
+                rhs = self._generate_expression(node.value)
+                self.emitter.emit_line(f"{target} = ({rhs}) as {target_type};")
+                return
             # If a fault handler is registered and this assignment performs a
             # division, route it through a catch_unwind trap (see
             # _generate_trapped_division) so a divide-by-zero invokes the
@@ -1008,6 +1111,10 @@ use hal_rt::*;
             if kind == "const":
                 return up
             return f"(*{up}.lock().unwrap())"
+        # EQUATE overlay read: VIEW -> (target as view_type), bit-preserving.
+        if node.name.lower() in self._equates:
+            target, view_type, _ = self._equates[node.name.lower()]
+            return f"({target} as {view_type})"
         # Convert HAL/S UPPER_CASE to Rust snake_case
         return node.name.lower()
     
@@ -1036,16 +1143,31 @@ use hal_rt::*;
         }
         rust_op = op_map.get(op, op)
 
-        # Power has no Rust infix operator; keep prior behavior.
+        # Power has no Rust infix operator. f32 uses .powi(i32); integer
+        # bases use .pow(u32). Default to the float form (common in HAL/S math).
         if op == "**":
             base = self._generate_expression(node.left)
             exp = self._generate_expression(node.right)
-            return f"({base}).pow({exp} as u32)"
+            if self._is_integer_operand(node.left):
+                return f"({base}).pow({exp} as u32)"
+            return f"({base}).powi({exp} as i32)"
 
         my_prec = self._PRECEDENCE.get(op, 0)
         left = self._operand(node.left, my_prec, right_side=False)
         right = self._operand(node.right, my_prec, right_side=True)
         return f"{left} {rust_op} {right}"
+
+    def _is_integer_operand(self, node) -> bool:
+        """Best-effort: is this expression an integer (INTEGER/BIT) rather than
+        a float? Used to pick .pow vs .powi for the ** operator."""
+        if isinstance(node, LiteralNode):
+            return (isinstance(node.value, int)
+                    and (node.literal_type or "").upper() in ("INTEGER", "BIT"))
+        if isinstance(node, IdentifierNode):
+            ts = self._var_info.get(node.name.lower())
+            return ts is not None and ts.data_type in (
+                DataType.INTEGER, DataType.BIT)
+        return False
 
     def _generate_unary_op(self, node: UnaryOpNode) -> str:
         """Generate a unary operation. NOT -> bitwise/logical ! in Rust."""
@@ -1066,13 +1188,17 @@ use hal_rt::*;
         """
         operand = self._generate_expression(node.operand)
 
-        idx = node.index
-        if isinstance(idx, int):
-            idx_src, idx_const = str(idx), idx
-        elif isinstance(idx, LiteralNode) and isinstance(idx.value, int):
-            idx_src, idx_const = str(idx.value), idx.value
-        else:
-            idx_src, idx_const = self._generate_expression(idx), None
+        # N-D subscript X$(i, j[, ...]): nested 1-indexed array access.
+        if isinstance(node.index, IndexListNode):
+            out = operand
+            for ix in node.index.indices:
+                if isinstance(ix, LiteralNode) and isinstance(ix.value, int):
+                    out += f"[{ix.value - 1}]"
+                elif isinstance(ix, int):
+                    out += f"[{ix - 1}]"
+                else:
+                    out += f"[({self._generate_expression(ix)} - 1) as usize]"
+            return out
 
         data_type = None
         ts = None
@@ -1080,6 +1206,20 @@ use hal_rt::*;
             ts = self._var_info.get(node.operand.name.lower())
             if ts is not None:
                 data_type = ts.data_type
+
+        # Range subscript X$(lo TO hi): CHARACTER -> substring; BIT -> bit slice.
+        if isinstance(node.index, RangeNode):
+            if data_type == DataType.CHARACTER:
+                return self._generate_char_slice(operand, node.index)
+            return self._generate_bit_slice(node.operand, operand, node.index)
+
+        idx = node.index
+        if isinstance(idx, int):
+            idx_src, idx_const = str(idx), idx
+        elif isinstance(idx, LiteralNode) and isinstance(idx.value, int):
+            idx_src, idx_const = str(idx.value), idx.value
+        else:
+            idx_src, idx_const = self._generate_expression(idx), None
 
         # ARRAY(n) OF ... element access, 1-indexed -> 0-indexed.
         if ts is not None and ts.array_size is not None:
@@ -1100,6 +1240,49 @@ use hal_rt::*;
         if idx_const is not None:
             return f"(({operand} >> {width - idx_const}) & 1)"
         return f"(({operand} >> ({width} - {idx_src})) & 1)"
+
+    def _const_int(self, node) -> Optional[int]:
+        """Return an int if node is an integer literal, else None."""
+        if isinstance(node, int):
+            return node
+        if isinstance(node, LiteralNode) and isinstance(node.value, int):
+            return node.value
+        return None
+
+    def _generate_char_slice(self, operand_src, rng) -> str:
+        """X$(lo TO hi) on a CHARACTER value -> substring, 1-indexed inclusive.
+
+        HAL/S chars 1..N map to Rust byte indices [lo-1 .. hi]. CHARACTER is
+        ASCII-oriented, so byte slicing is appropriate here.
+        """
+        lo = self._const_int(rng.lo)
+        hi = self._const_int(rng.hi)
+        if lo is not None and hi is not None:
+            return f"{operand_src}[{lo - 1}..{hi}].to_string()"
+        lo_s = self._generate_expression(rng.lo)
+        hi_s = self._generate_expression(rng.hi)
+        return (f"{operand_src}[(({lo_s}) as usize - 1).."
+                f"(({hi_s}) as usize)].to_string()")
+
+    def _generate_bit_slice(self, operand_node, operand_src, rng) -> str:
+        """X$(lo TO hi) — extract a contiguous bit field, MSB-first, 1-indexed.
+
+        For a BIT(W) register, bit 1 is the MSB. The slice [lo..hi] occupies
+        the bits right-shifted by (W - hi), masked to (hi - lo + 1) bits.
+        """
+        width = 32
+        if isinstance(operand_node, IdentifierNode):
+            width = self._bit_widths.get(operand_node.name.lower(), 32)
+        lo = self._const_int(rng.lo)
+        hi = self._const_int(rng.hi)
+        if lo is not None and hi is not None:
+            shift = width - hi
+            mask = (1 << (hi - lo + 1)) - 1
+            return f"(({operand_src} >> {shift}) & 0x{mask:X})"
+        lo_s = self._generate_expression(rng.lo)
+        hi_s = self._generate_expression(rng.hi)
+        return (f"(({operand_src} >> ({width} - ({hi_s}))) "
+                f"& ((1u32 << (({hi_s}) - ({lo_s}) + 1)) - 1))")
 
     def _struct_name(self, name: str) -> str:
         """HAL/S template name -> Rust PascalCase struct name (NODE -> Node)."""
@@ -1246,6 +1429,13 @@ use hal_rt::*;
         if node.name.upper() == "LENGTH" and len(node.arguments) == 1:
             arg = self._generate_expression(node.arguments[0])
             return f"({arg}.len() as i32)"
+        # Type-coercion casts: INTEGER(x) / SCALAR(x).
+        if node.name.upper() == "INTEGER" and len(node.arguments) == 1:
+            arg = self._generate_expression(node.arguments[0])
+            return f"(({arg}) as i32)"
+        if node.name.upper() == "SCALAR" and len(node.arguments) == 1:
+            arg = self._generate_expression(node.arguments[0])
+            return f"(({arg}) as f32)"
         # If the name is a declared MATRIX/VECTOR, parenthesized indices are
         # element access (1-indexed), not a function call.
         ts = self._var_info.get(node.name.lower())
@@ -1295,15 +1485,63 @@ use hal_rt::*;
     def _generate_schedule(self, node: ScheduleNode) -> None:
         """Generate a SCHEDULE statement.
 
-        Known task (defined in this unit) -> spawn it on an OS thread and keep
-        the join handle. Unknown task -> a logged no-op (nothing to spawn).
+        Timed/cyclic form (SCHEDULE T IN d [REPEAT EVERY p]) spawns a thread
+        that sleeps for the initial delay, then either runs once or repeats on
+        the period until a per-task cancel flag is set. Priority form keeps the
+        existing fire-and-join model.
         """
+        task_fn = node.task_name.lower()
+
+        if node.delay is not None:
+            # Timed/cyclic: self-managed thread + cancel flag (for CANCEL).
+            delay = self._generate_expression(node.delay)
+            cflag = f"__cancel_{task_fn}"
+            handle = f"__h_{task_fn}"
+            self.emitter.emit_comment(
+                f"SCHEDULE {node.task_name} IN {delay}"
+                + (f" REPEAT EVERY {self._generate_expression(node.period)}"
+                   if node.period is not None else "")
+            )
+            self.emitter.emit_line(
+                f"let {cflag} = std::sync::Arc::new("
+                "std::sync::atomic::AtomicBool::new(false));"
+            )
+            self.emitter.emit_line(
+                f"let {cflag}_t = std::sync::Arc::clone(&{cflag});"
+            )
+            self.emitter.emit_line(f"let {handle} = std::thread::spawn(move || {{")
+            self.emitter.indent()
+            self.emitter.emit_line(
+                f"std::thread::sleep(std::time::Duration::from_secs_f64("
+                f"{delay} as f64));"
+            )
+            if node.period is not None:
+                period = self._generate_expression(node.period)
+                self.emitter.emit_line(
+                    f"while !{cflag}_t.load(std::sync::atomic::Ordering::Relaxed) {{"
+                )
+                self.emitter.indent()
+                self.emitter.emit_line(f"{task_fn}();")
+                self.emitter.emit_line(
+                    f"std::thread::sleep(std::time::Duration::from_secs_f64("
+                    f"{period} as f64));"
+                )
+                self.emitter.dedent()
+                self.emitter.emit_line("}")
+            else:
+                self.emitter.emit_line(
+                    f"if !{cflag}_t.load(std::sync::atomic::Ordering::Relaxed) "
+                    f"{{ {task_fn}(); }}"
+                )
+            self.emitter.dedent()
+            self.emitter.emit_line("});")
+            return
+
         priority = (
             self._generate_expression(node.priority)
             if node.priority is not None
             else "0"
         )
-        task_fn = node.task_name.lower()
         if task_fn in self._task_names:
             self.emitter.emit_line(
                 f'__tasks.push(schedule("{node.task_name}", {priority}, {task_fn}));'
@@ -1312,6 +1550,34 @@ use hal_rt::*;
             self.emitter.emit_line(
                 f'schedule_pending("{node.task_name}", {priority});'
             )
+
+    def _generate_wait(self, node: WaitNode) -> None:
+        """WAIT UNTIL <cond>; -> spin-wait until the condition holds.
+
+        Faithful to HAL/S blocking semantics: if nothing ever makes the
+        condition true, this blocks indefinitely (as a real executive would,
+        pending an interrupt or another task clearing the condition).
+        """
+        cond = self._generate_expression(node.condition)
+        self.emitter.emit_comment("WAIT UNTIL <cond> (blocks until satisfied)")
+        self.emitter.emit_line(f"while !({cond}) {{")
+        self.emitter.indent()
+        self.emitter.emit_line(
+            "std::thread::sleep(std::time::Duration::from_millis(1));"
+        )
+        self.emitter.dedent()
+        self.emitter.emit_line("}")
+
+    def _generate_cancel(self, node: CancelNode) -> None:
+        """CANCEL <task>; -> set the task's cancel flag and join its thread."""
+        task_fn = node.task_name.lower()
+        cflag = f"__cancel_{task_fn}"
+        handle = f"__h_{task_fn}"
+        self.emitter.emit_comment(f"CANCEL {node.task_name}")
+        self.emitter.emit_line(
+            f"{cflag}.store(true, std::sync::atomic::Ordering::Relaxed);"
+        )
+        self.emitter.emit_line(f"let _ = {handle}.join();")
 
     def _generate_terminate(self, node: TerminateNode) -> None:
         """Generate a TERMINATE statement.

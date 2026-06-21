@@ -10,11 +10,15 @@ from resnik.parser.ast_nodes import (
     ProgramNode,
     DeclareNode,
     ProcedureNode,
+    ReturnNode,
+    CancelNode,
+    WaitNode,
     AssignmentNode,
     BinaryOpNode,
     MultiAssignNode,
     UnaryOpNode,
     SubscriptNode,
+    IndexListNode,
     ForNode,
     StarNode,
     RangeNode,
@@ -1364,3 +1368,276 @@ class TestConstSubscriptFieldLex:
         from resnik import Lexer
         types = [t.type for t in Lexer().tokenize("100.0", "t")]
         assert types == ["NUMBER"]
+
+
+class TestBitSliceAndCast:
+    """X$(lo TO hi) bit-slice (MSB-first) and INTEGER(...) coercion."""
+
+    def _bit_slice_code(self, lo, hi):
+        decl = DeclareNode(identifiers=["RAW"],
+                           type_spec=TypeSpec(data_type=DataType.BIT, dimensions=[32]))
+        assign = AssignmentNode(
+            target=IdentifierNode(name="OUT"),
+            value=SubscriptNode(
+                operand=IdentifierNode(name="RAW"),
+                index=RangeNode(lo=LiteralNode(value=lo, literal_type="INTEGER"),
+                                hi=LiteralNode(value=hi, literal_type="INTEGER")),
+            ),
+        )
+        out = DeclareNode(identifiers=["OUT"],
+                          type_spec=TypeSpec(data_type=DataType.BIT, dimensions=[8]))
+        return RustCodeGenerator().generate(
+            ProgramNode(name="P", declarations=[decl, out], statements=[assign])
+        )
+
+    def test_bit_slice_high_byte(self) -> None:
+        # bits 1..8 of a 32-bit reg = (x >> 24) & 0xFF
+        assert "((raw >> 24) & 0xFF)" in self._bit_slice_code(1, 8)
+
+    def test_bit_slice_low_24(self) -> None:
+        # bits 9..32 = (x >> 0) & 0xFFFFFF
+        assert "((raw >> 0) & 0xFFFFFF)" in self._bit_slice_code(9, 32)
+
+    def test_integer_cast(self) -> None:
+        decl = DeclareNode(identifiers=["P"],
+                           type_spec=TypeSpec(data_type=DataType.INTEGER))
+        assign = AssignmentNode(
+            target=IdentifierNode(name="P"),
+            value=FunctionCallNode(name="INTEGER",
+                                   arguments=[LiteralNode(value=5, literal_type="INTEGER")]),
+        )
+        code = RustCodeGenerator().generate(
+            ProgramNode(name="P", declarations=[decl], statements=[assign])
+        )
+        assert "as i32)" in code
+        assert "use hal_rt" not in code   # cast needs no prelude
+
+
+class TestFunctions:
+    """FUNCTION blocks: return type in signature, RETURN, no spurious prelude."""
+
+    def _func_prog(self):
+        body = [
+            DeclareNode(identifiers=["W"], type_spec=TypeSpec(data_type=DataType.SCALAR)),
+            DeclareNode(identifiers=["S"], type_spec=TypeSpec(data_type=DataType.SCALAR)),
+            AssignmentNode(target=IdentifierNode(name="S"),
+                           value=BinaryOpNode(operator="*",
+                                              left=IdentifierNode(name="W"),
+                                              right=LiteralNode(value=2.5, literal_type="SCALAR"))),
+            ReturnNode(value=IdentifierNode(name="S")),
+        ]
+        fn = ProcedureNode(name="CALC", parameters=["W"], statements=body,
+                           return_type=TypeSpec(data_type=DataType.SCALAR))
+        call = AssignmentNode(
+            target=IdentifierNode(name="R"),
+            value=FunctionCallNode(name="CALC",
+                                   arguments=[LiteralNode(value=1.0, literal_type="SCALAR")]),
+        )
+        rdecl = DeclareNode(identifiers=["R"], type_spec=TypeSpec(data_type=DataType.SCALAR))
+        return ProgramNode(name="P", declarations=[rdecl], statements=[fn, call])
+
+    def test_function_signature_and_return(self) -> None:
+        code = RustCodeGenerator().generate(self._func_prog())
+        assert "fn calc(w: f32) -> f32 {" in code
+        assert "return s;" in code
+
+    def test_function_called_in_expression(self) -> None:
+        code = RustCodeGenerator().generate(self._func_prog())
+        assert "r = calc(1)" in code or "r = calc(1.0)" in code
+
+    def test_user_function_does_not_pull_prelude(self) -> None:
+        code = RustCodeGenerator().generate(self._func_prog())
+        assert "use hal_rt" not in code
+
+
+class TestRealtimeExecutive:
+    """Timed/cyclic SCHEDULE, WAIT UNTIL, CANCEL."""
+
+    def _prog(self):
+        task = TaskNode(name="POLL", statements=[]) if 'TaskNode' in globals() else None
+        sched = ScheduleNode(task_name="POLL",
+                             delay=LiteralNode(value=0.5, literal_type="SCALAR"),
+                             period=LiteralNode(value=0.125, literal_type="SCALAR"))
+        wait = WaitNode(condition=BinaryOpNode(
+            operator="==", left=IdentifierNode(name="RUN_FLAG"),
+            right=IdentifierNode(name="FALSE")))
+        cancel = CancelNode(task_name="POLL")
+        return ProgramNode(name="P", statements=[sched, wait, cancel])
+
+    def test_cyclic_schedule(self) -> None:
+        code = RustCodeGenerator().generate(self._prog())
+        assert "Duration::from_secs_f64(0.5 as f64)" in code   # IN delay
+        assert "Duration::from_secs_f64(0.125 as f64)" in code  # REPEAT EVERY
+        assert "AtomicBool::new(false)" in code                 # cancel flag
+        assert "poll();" in code
+
+    def test_wait_until_spin(self) -> None:
+        code = RustCodeGenerator().generate(self._prog())
+        assert "while !(run_flag == false)" in code
+        assert "from_millis(1)" in code
+
+    def test_cancel_sets_flag_and_joins(self) -> None:
+        code = RustCodeGenerator().generate(self._prog())
+        assert "__cancel_poll.store(true" in code
+        assert "__h_poll.join()" in code
+
+    def test_cyclic_schedule_no_prelude(self) -> None:
+        # Timed schedule is inline std; should not pull hal_rt.
+        code = RustCodeGenerator().generate(self._prog())
+        assert "use hal_rt" not in code
+
+
+class TestCharVsBitSlice:
+    """X$(lo TO hi) is a substring on CHARACTER, a bit-slice on BIT."""
+
+    def _slice_code(self, data_type, dims):
+        decl = DeclareNode(identifiers=["BUF"],
+                           type_spec=TypeSpec(data_type=data_type, dimensions=dims))
+        out = DeclareNode(identifiers=["OUT"],
+                          type_spec=TypeSpec(data_type=data_type, dimensions=dims))
+        assign = AssignmentNode(
+            target=IdentifierNode(name="OUT"),
+            value=SubscriptNode(
+                operand=IdentifierNode(name="BUF"),
+                index=RangeNode(lo=LiteralNode(value=6, literal_type="INTEGER"),
+                                hi=LiteralNode(value=10, literal_type="INTEGER"))),
+        )
+        return RustCodeGenerator().generate(
+            ProgramNode(name="P", declarations=[decl, out], statements=[assign])
+        )
+
+    def test_character_slice_is_substring(self) -> None:
+        code = self._slice_code(DataType.CHARACTER, [64])
+        assert "buf[5..10].to_string()" in code
+        assert ">>" not in code   # no bit-shift on a String
+
+    def test_bit_slice_is_shift_mask(self) -> None:
+        code = self._slice_code(DataType.BIT, [32])
+        assert "(buf >> 22) & 0x1F" in code
+
+
+class TestEquateOverlay:
+    """EQUATE: a view aliases a target's storage (alias-rewrite lowering)."""
+
+    def _prog(self, with_read=False):
+        raw = DeclareNode(identifiers=["RAW"],
+                          type_spec=TypeSpec(data_type=DataType.BIT, dimensions=[32]))
+        view = DeclareNode(identifiers=["IV"],
+                           type_spec=TypeSpec(data_type=DataType.INTEGER),
+                           attributes={"equate": "RAW"})
+        stmts = [AssignmentNode(target=IdentifierNode(name="IV"),
+                                value=LiteralNode(value=0, literal_type="INTEGER"))]
+        if with_read:
+            out = DeclareNode(identifiers=["X"],
+                              type_spec=TypeSpec(data_type=DataType.INTEGER))
+            stmts.append(AssignmentNode(target=IdentifierNode(name="X"),
+                                        value=IdentifierNode(name="IV")))
+            return ProgramNode(name="P", declarations=[raw, view, out], statements=stmts)
+        return ProgramNode(name="P", declarations=[raw, view], statements=stmts)
+
+    def test_view_has_no_separate_storage(self) -> None:
+        code = RustCodeGenerator().generate(self._prog())
+        assert "let mut iv" not in code   # the view is not its own binding
+
+    def test_write_through_view_hits_target(self) -> None:
+        code = RustCodeGenerator().generate(self._prog())
+        assert "raw = (0) as u32;" in code
+
+    def test_read_of_view_casts_target(self) -> None:
+        code = RustCodeGenerator().generate(self._prog(with_read=True))
+        assert "x = (raw as i32);" in code
+
+
+class TestMultiDimArray:
+    """ARRAY(d1, d2) OF <element> and 2-D subscript X$(i, j)."""
+
+    def test_2d_array_of_vectors_declaration(self) -> None:
+        decl = DeclareNode(
+            identifiers=["GRID"],
+            type_spec=TypeSpec(
+                data_type=DataType.VECTOR, array_dims=[4, 4], array_size=4,
+                element_type=TypeSpec(data_type=DataType.VECTOR, dimensions=[3])),
+        )
+        code = RustCodeGenerator().generate(
+            ProgramNode(name="P", declarations=[decl]))
+        assert "let mut grid: [[Vector<3>; 4]; 4] = [[Vector::<3>::zero(); 4]; 4];" in code
+
+    def test_2d_subscript_is_nested_index(self) -> None:
+        decl = DeclareNode(
+            identifiers=["GRID"],
+            type_spec=TypeSpec(
+                data_type=DataType.VECTOR, array_dims=[4, 4], array_size=4,
+                element_type=TypeSpec(data_type=DataType.VECTOR, dimensions=[3])),
+        )
+        assign = AssignmentNode(
+            target=SubscriptNode(
+                operand=IdentifierNode(name="GRID"),
+                index=IndexListNode(indices=[IdentifierNode(name="I"),
+                                             IdentifierNode(name="J")])),
+            value=VectorLiteralNode(values=[
+                LiteralNode(value=0.0, literal_type="SCALAR"),
+                LiteralNode(value=0.0, literal_type="SCALAR"),
+                LiteralNode(value=0.0, literal_type="SCALAR")]),
+        )
+        code = RustCodeGenerator().generate(
+            ProgramNode(name="P", declarations=[decl], statements=[assign]))
+        assert "grid[(i - 1) as usize][(j - 1) as usize] = Vector([0.0, 0.0, 0.0]);" in code
+
+    def test_1d_array_of_integer(self) -> None:
+        decl = DeclareNode(
+            identifiers=["A"],
+            type_spec=TypeSpec(
+                data_type=DataType.INTEGER, array_dims=[8], array_size=8,
+                element_type=TypeSpec(data_type=DataType.INTEGER)),
+        )
+        code = RustCodeGenerator().generate(
+            ProgramNode(name="P", declarations=[decl]))
+        assert "let mut a: [i32; 8] = [0; 8];" in code
+
+
+class TestConstantsAndScalarVector:
+    """CONSTANT-prefix decls, ** power, and scalar<->vector arithmetic."""
+
+    def test_constant_prefix_is_immutable_let(self) -> None:
+        decl = DeclareNode(
+            identifiers=["G_CONST"],
+            type_spec=TypeSpec(data_type=DataType.SCALAR),
+            is_constant=True,
+            initial_value=LiteralNode(value=6.6743e-11, literal_type="SCALAR"),
+        )
+        code = RustCodeGenerator().generate(
+            ProgramNode(name="P", declarations=[decl]))
+        assert "let g_const: f32 = 0.000000000066743" in code \
+            or "let g_const: f32 = 6.6743e-11" in code
+        assert "let mut g_const" not in code  # CONSTANT => immutable
+
+    def test_power_float_base_uses_powi(self) -> None:
+        gen = RustCodeGenerator()
+        gen._var_info = {"r_mag": TypeSpec(data_type=DataType.SCALAR)}
+        expr = BinaryOpNode(
+            operator="**",
+            left=IdentifierNode(name="R_MAG"),
+            right=LiteralNode(value=3, literal_type="INTEGER"))
+        assert gen._generate_expression(expr) == "(r_mag).powi(3 as i32)"
+
+    def test_power_integer_base_uses_pow(self) -> None:
+        gen = RustCodeGenerator()
+        gen._var_info = {"n": TypeSpec(data_type=DataType.INTEGER)}
+        expr = BinaryOpNode(
+            operator="**",
+            left=IdentifierNode(name="N"),
+            right=LiteralNode(value=2, literal_type="INTEGER"))
+        assert gen._generate_expression(expr) == "(n).pow(2 as u32)"
+
+    def test_scalar_times_vector_and_vector_div_scalar_prelude(self) -> None:
+        # The runtime prelude must define the scalar<->vector operators.
+        code = RustCodeGenerator().generate(ProgramNode(
+            name="P",
+            declarations=[DeclareNode(
+                identifiers=["V"],
+                type_spec=TypeSpec(data_type=DataType.VECTOR, dimensions=[3]))],
+        ))
+        assert "impl<const N: usize> Mul<Vector<N>> for f32" in code
+        assert "impl<const N: usize> Mul<f32> for Vector<N>" in code
+        assert "impl<const N: usize> Div<f32> for Vector<N>" in code
+        assert "use std::ops::{Add, Sub, Mul, Div};" in code

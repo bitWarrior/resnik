@@ -128,6 +128,7 @@ KEYWORDS = {
     # Error handling
     "ERROR",
     "RESUME",
+    "EQUATE",
     "OFF",
     # Boolean operators
     "AND",
