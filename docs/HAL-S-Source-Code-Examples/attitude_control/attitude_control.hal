@@ -1,26 +1,88 @@
-ATTITUDE_CTRL: TASK;
-  DECLARE SENSOR_INPUT VECTOR(3);
-  DECLARE CALIB_MATRIX MATRIX(3,3);
-  DECLARE CORRECTED_VAL VECTOR(3);
-  DECLARE NORM SCALAR;
-  
-  /* KILROY SENTINEL VECTOR FOR ZERO-STATE COMPARISONS */
-  DECLARE KILROY_VEC VECTOR(3) INITIAL(0.0, 0.0, 0.0);
+ATTITUDE_CONTROL: PROGRAM;
 
-  /* MATRIX-VECTOR MULTIPLICATION AST NODE */
-  CORRECTED_VAL = CALIB_MATRIX * SENSOR_INPUT;
-  
-  /* INTRINSIC FUNCTION CALL */
-  NORM = ABVAL(CORRECTED_VAL);
+C******************************************************************
+C  HAL/S Advanced Features Compiler Test
+C
+C  Features demonstrated:
+C    - BIT and BOOLEAN data types and literals
+C    - Real-time EVENT variables (SIGNAL and WAIT)
+C    - PROCEDURE definitions with ASSIGN (output) parameters
+C    - Matrix partitioning (extracting rows/columns)
+C    - Built-in functions (CROSS, DOT, TRANSPOSE)
+C    - DO CASE branch structure
+C******************************************************************
 
-  IF NORM > 0.95 THEN
-  DO;
-    SCHEDULE MANEUVER PRIORITY(10);
-  END;
-  ELSE
-  DO;
-    /* FALLBACK TO KILROY STATE */
-    CORRECTED_VAL = KILROY_VEC;
-  END;
-  
-CLOSE ATTITUDE_CTRL;
+C  Global constants and variables
+DECLARE PI CONSTANT (3.14159265);
+
+C  Logic and Bit types
+DECLARE SENSOR_OK BOOLEAN INITIAL(TRUE);
+DECLARE STATUS_FLAGS BIT(8) INITIAL(BIN '10101010');
+DECLARE SENSOR_UPDATE EVENT;                     
+
+C  Vectors and Matrices
+DECLARE OMEGA VECTOR(3) INITIAL(0.1, 0.05, 0.01);
+DECLARE TORQUE VECTOR(3);
+DECLARE INERTIA MATRIX(3,3) INITIAL(
+    1000.0, 0.0, 0.0,
+    0.0, 800.0, 0.0,
+    0.0, 0.0, 500.0);
+
+DECLARE MODE INTEGER INITIAL(2);
+DECLARE M_ROW VECTOR(3);
+DECLARE PROD SCALAR;
+
+C------------------------------------------------------------------
+C  Procedure: Compute gyroscopic torque
+C  Demonstrates strict separation of IN vs ASSIGN (OUT) parameters
+C------------------------------------------------------------------
+COMPUTE_TORQUE: PROCEDURE(W, I) ASSIGN(T);
+    DECLARE W VECTOR(3);
+    DECLARE I MATRIX(3,3);
+    DECLARE T VECTOR(3);
+    DECLARE MOMENTUM VECTOR(3);
+
+    MOMENTUM = I W;
+    
+    T = CROSS(W, MOMENTUM);
+CLOSE COMPUTE_TORQUE;
+
+C------------------------------------------------------------------
+C  Main program body
+C------------------------------------------------------------------
+C  Trigger and wait for event (tests real-time keyword parsing)
+SIGNAL SENSOR_UPDATE;
+WAIT SENSOR_UPDATE;
+
+IF SENSOR_OK THEN
+    DO;
+        CALL COMPUTE_TORQUE(OMEGA, INERTIA) ASSIGN(TORQUE);
+
+        DO CASE MODE;
+            /*  Executes if MODE = 1 */
+            WRITE(6) 'Mode 1: Idle';
+            
+            /*  Executes if MODE = 2 */
+            WRITE(6) 'Mode 2: Active Control';
+            
+            /*  Executes if MODE = 3 (Block structure) */
+            DO;
+                WRITE(6) 'Mode 3: Emergency Dump';
+                TORQUE = (0.0, 0.0, 0.0);
+            END;
+        END;
+
+        /*  Matrix Partitioning: Extracts the entire 1st row as a vector.
+            The asterisk (*) is valid here, denoting "all columns". */
+        M_ROW = INERTIA(1, *);
+
+        /* Dot product built-in function */
+        PROD = DOT(M_ROW, OMEGA);
+
+        WRITE(6) 'Computed Torque:', TORQUE;
+        WRITE(6) 'Row 1 Dot OMEGA:', PROD;
+    END;
+ELSE
+    WRITE(6) 'Sensor Fault: Cannot compute torque';
+
+CLOSE ATTITUDE_CONTROL;

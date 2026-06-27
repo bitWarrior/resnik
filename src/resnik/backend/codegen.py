@@ -37,6 +37,7 @@ from resnik.parser.ast_nodes import (
     LiteralNode,
     IdentifierNode,
     WriteNode,
+    ReadNode,
     FunctionCallNode,
     CallNode,
     DoBlockNode,
@@ -46,6 +47,7 @@ from resnik.parser.ast_nodes import (
     ScheduleNode,
     TerminateNode,
     WaitNode,
+    SignalNode,
     CancelNode,
 )
 from resnik.backend.rust_emitter import RustEmitter
@@ -194,7 +196,7 @@ class RustCodeGenerator:
     _PRELUDE = """mod hal_rt {
     //! Minimal dependency-free runtime for generated HAL/S code (host target).
     #![allow(dead_code)]
-    use std::ops::{Add, Sub, Mul, Div};
+    use std::ops::{Add, Sub, Mul, Div, Neg};
 
     #[derive(Clone, Copy, Debug)]
     pub struct Vector<const N: usize>(pub [f32; N]);
@@ -248,6 +250,26 @@ class RustCodeGenerator:
         }
     }
 
+    impl<const N: usize> std::fmt::Display for Vector<N> {
+        fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            write!(f, "[")?;
+            for i in 0..N {
+                if i > 0 { write!(f, ", ")?; }
+                write!(f, "{}", self.0[i])?;
+            }
+            write!(f, "]")
+        }
+    }
+
+    impl<const N: usize> Neg for Vector<N> {
+        type Output = Vector<N>;
+        fn neg(self) -> Vector<N> {
+            let mut out = [0.0; N];
+            for i in 0..N { out[i] = -self.0[i]; }
+            Vector(out)
+        }
+    }
+
     #[derive(Clone, Copy, Debug)]
     pub struct Matrix<const R: usize, const C: usize>(pub [[f32; C]; R]);
 
@@ -277,6 +299,31 @@ class RustCodeGenerator:
         }
     }
 
+    impl<const R: usize, const C: usize> std::fmt::Display for Matrix<R, C> {
+        fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            write!(f, "[")?;
+            for r in 0..R {
+                if r > 0 { write!(f, "; ")?; }
+                for c in 0..C {
+                    if c > 0 { write!(f, ", ")?; }
+                    write!(f, "{}", self.0[r][c])?;
+                }
+            }
+            write!(f, "]")
+        }
+    }
+
+    impl<const R: usize, const C: usize> Neg for Matrix<R, C> {
+        type Output = Matrix<R, C>;
+        fn neg(self) -> Matrix<R, C> {
+            let mut out = [[0.0; C]; R];
+            for r in 0..R {
+                for c in 0..C { out[r][c] = -self.0[r][c]; }
+            }
+            Matrix(out)
+        }
+    }
+
     pub fn abval<const N: usize>(v: Vector<N>) -> f32 {
         let mut acc = 0.0f32;
         for i in 0..N { acc += v.0[i] * v.0[i]; }
@@ -289,6 +336,12 @@ class RustCodeGenerator:
             a.0[2] * b.0[0] - a.0[0] * b.0[2],
             a.0[0] * b.0[1] - a.0[1] * b.0[0],
         ])
+    }
+
+    pub fn dot<const N: usize>(a: Vector<N>, b: Vector<N>) -> f32 {
+        let mut acc = 0.0f32;
+        for i in 0..N { acc += a.0[i] * b.0[i]; }
+        acc
     }
 
     pub fn schedule(task: &str, priority: i32, body: fn()) -> std::thread::JoinHandle<()> {
@@ -306,6 +359,43 @@ class RustCodeGenerator:
     pub fn terminate(task: &str) {
         eprintln!("[hal_rt] TERMINATE {} (host stub)", task);
     }
+
+    use std::cell::RefCell;
+    use std::collections::VecDeque;
+    use std::io::BufRead;
+    thread_local! {
+        // Leftover tokens from previously read lines, shared across all READs
+        // so multiple statements draw from one continuous input cursor.
+        static INPUT_TOKENS: RefCell<VecDeque<f32>> = RefCell::new(VecDeque::new());
+    }
+
+    /// Read exactly `n` f32 values from stdin, pulling additional lines only
+    /// as needed and caching any surplus tokens for later READs. Reads
+    /// line-by-line (never waits for EOF once `n` values are available); at
+    /// EOF any shortfall is filled with 0.0.
+    pub fn read_f32(n: usize) -> Vec<f32> {
+        INPUT_TOKENS.with(|cell| {
+            let mut buf = cell.borrow_mut();
+            let mut out: Vec<f32> = Vec::with_capacity(n);
+            while out.len() < n {
+                if let Some(v) = buf.pop_front() {
+                    out.push(v);
+                    continue;
+                }
+                let mut line = String::new();
+                let stdin = std::io::stdin();
+                let read = stdin.lock().read_line(&mut line).unwrap_or(0);
+                if read == 0 {
+                    while out.len() < n { out.push(0.0); }
+                    break;
+                }
+                for t in line.split_whitespace() {
+                    if let Ok(v) = t.parse::<f32>() { buf.push_back(v); }
+                }
+            }
+            out
+        })
+    }
 }
 
 use hal_rt::*;
@@ -322,7 +412,7 @@ use hal_rt::*;
 
     # Intrinsics that lower to hal_rt prelude functions (so their use requires
     # the prelude). User-defined functions and inline casts are NOT here.
-    _PRELUDE_INTRINSICS = {"ABVAL", "CROSS"}
+    _PRELUDE_INTRINSICS = {"ABVAL", "CROSS", "DOT"}
 
     def _uses_runtime(self, node: ASTNode) -> bool:
         """True if any node in the tree needs the hal_rt prelude."""
@@ -341,6 +431,8 @@ use hal_rt::*;
             elif isinstance(n, (VectorLiteralNode, MatrixLiteralNode,
                                 MatrixSubscriptNode)):
                 return True
+            elif isinstance(n, ReadNode):
+                return True  # READ uses the hal_rt::read_f32 helper
             if (
                 isinstance(n, DeclareNode)
                 and n.type_spec is not None
@@ -355,7 +447,7 @@ use hal_rt::*;
         list_attrs = (
             "statements", "declarations", "procedures", "tasks", "units",
             "items", "arguments", "values", "args", "fields", "targets",
-            "indices"
+            "indices", "assign_args"
         )
         for attr in list_attrs:
             for child in getattr(node, attr, None) or []:
@@ -406,6 +498,8 @@ use hal_rt::*;
             self._generate_assignment(node)
         elif isinstance(node, WriteNode):
             self._generate_write(node)
+        elif isinstance(node, ReadNode):
+            self._generate_read(node)
         elif isinstance(node, IfNode):
             self._generate_if(node)
         elif isinstance(node, DoBlockNode):
@@ -437,6 +531,8 @@ use hal_rt::*;
             self._generate_schedule(node)
         elif isinstance(node, WaitNode):
             self._generate_wait(node)
+        elif isinstance(node, SignalNode):
+            self._generate_signal(node)
         elif isinstance(node, CancelNode):
             self._generate_cancel(node)
         elif isinstance(node, TerminateNode):
@@ -757,7 +853,9 @@ use hal_rt::*;
             node: ProcedureNode to generate
         """
         rust_name = node.name.lower()
-        param_set = {p.lower() for p in node.parameters}
+        all_param_names = list(node.parameters) + list(node.assign_params)
+        param_set = {p.lower() for p in all_param_names}
+        assign_set = {p.lower() for p in node.assign_params}
 
         # In HAL/S a parameter's type is given by a DECLARE in the body. Collect
         # those (from both the declarations list and the statement stream, since
@@ -772,9 +870,14 @@ use hal_rt::*;
                     d.type_spec
                 )
 
+        # Input parameters by value; ASSIGN (output) parameters by &mut.
         params = [
             (p.lower(), param_types.get(p.lower(), "i32"))
             for p in node.parameters
+        ]
+        params += [
+            (p.lower(), f"&mut {param_types.get(p.lower(), 'i32')}")
+            for p in node.assign_params
         ]
 
         # Emit procedure (or function, when it carries a return type)
@@ -792,6 +895,11 @@ use hal_rt::*;
                 and n.identifiers[0].lower() in param_set
             )
 
+        # Within the body, ASSIGN parameters are &mut references, so uses must
+        # be dereferenced. _generate_identifier consults this set.
+        prev_assign = getattr(self, "_assign_params", set())
+        self._assign_params = assign_set
+
         # Local declarations (those not naming a parameter)
         for decl in node.declarations:
             if not _is_param_decl(decl):
@@ -804,6 +912,7 @@ use hal_rt::*;
                 continue
             self._generate_node(stmt)
 
+        self._assign_params = prev_assign
         self.emitter.emit_block_end()
 
     def _generate_while(self, node: WhileNode) -> None:
@@ -922,9 +1031,14 @@ use hal_rt::*;
         self.emitter.emit_line("}")
 
     def _generate_call(self, node: CallNode) -> None:
-        """Generate a CALL statement as a Rust function call statement."""
-        args = ", ".join(self._generate_expression(a) for a in node.arguments)
-        self.emitter.emit_line(f"{node.name.lower()}({args});")
+        """Generate a CALL as a Rust function call. Input arguments pass by
+        value; ASSIGN (output) arguments pass by &mut so the callee writes
+        back to the caller's variables."""
+        parts = [self._generate_expression(a) for a in node.arguments]
+        parts += [
+            f"&mut {self._generate_expression(a)}" for a in node.assign_args
+        ]
+        self.emitter.emit_line(f"{node.name.lower()}({', '.join(parts)});")
     
     def _generate_assignment(self, node: AssignmentNode) -> None:
         """
@@ -1021,6 +1135,50 @@ use hal_rt::*;
         args_str = ", ".join(args)
         self.emitter.emit_line(f'println!("{placeholders}", {args_str});')
 
+    def _generate_read(self, node: ReadNode) -> None:
+        """Generate a READ statement using the shared hal_rt::read_f32 cursor.
+        All READs draw from one continuous input stream, line-by-line, without
+        waiting for EOF. SCALAR -> 1 f32, INTEGER -> 1 i32, VECTOR(n) -> n f32;
+        read_f32 always returns exactly the requested count (0.0-padded at EOF),
+        so the distribution below needs no bounds checks."""
+        if node.channel != 5:
+            self.emitter.emit_comment(f"READ channel {node.channel}")
+
+        target_info = []
+        total = 0
+        for tgt in node.targets:
+            ts = (self._var_info.get(tgt.name.lower())
+                  if isinstance(tgt, IdentifierNode) else None)
+            if ts is not None and ts.data_type == DataType.VECTOR:
+                n, kind = (ts.dimensions[0] if ts.dimensions else 3), "vector"
+            elif ts is not None and ts.data_type in (
+                    DataType.INTEGER, DataType.BIT):
+                n, kind = 1, "int"
+            else:
+                n, kind = 1, "scalar"
+            target_info.append((self._generate_expression(tgt), kind, n))
+            total += n
+
+        self.emitter.emit_line("{")
+        self.emitter.indent()
+        self.emitter.emit_line(f"let __vals = hal_rt::read_f32({total});")
+        self.emitter.emit_line("let mut __k = 0usize;")
+        for lvalue, kind, n in target_info:
+            if kind == "vector":
+                self.emitter.emit_line(
+                    f"{lvalue} = {{ let mut __v = [0.0f32; {n}]; "
+                    f"for __j in 0..{n} {{ __v[__j] = __vals[__k]; "
+                    "__k += 1; } Vector(__v) };")
+            elif kind == "int":
+                self.emitter.emit_line(
+                    f"{lvalue} = {{ let __t = __vals[__k] as i32; "
+                    "__k += 1; __t };")
+            else:
+                self.emitter.emit_line(
+                    f"{lvalue} = {{ let __t = __vals[__k]; __k += 1; __t }};")
+        self.emitter.dedent()
+        self.emitter.emit_line("}")
+
     def _generate_expression(self, node: ASTNode) -> str:
         """
         Generate Rust expression from AST node.
@@ -1115,6 +1273,10 @@ use hal_rt::*;
         if node.name.lower() in self._equates:
             target, view_type, _ = self._equates[node.name.lower()]
             return f"({target} as {view_type})"
+        # ASSIGN (output) parameters are &mut references inside a procedure;
+        # dereference on every use so reads and assignment targets both work.
+        if node.name.lower() in getattr(self, "_assign_params", set()):
+            return f"(*{node.name.lower()})"
         # Convert HAL/S UPPER_CASE to Rust snake_case
         return node.name.lower()
     
@@ -1155,7 +1317,64 @@ use hal_rt::*;
         my_prec = self._PRECEDENCE.get(op, 0)
         left = self._operand(node.left, my_prec, right_side=False)
         right = self._operand(node.right, my_prec, right_side=True)
+
+        # HAL/S promotes mixed integer/scalar arithmetic to scalar; Rust has no
+        # implicit numeric coercion, so cast the integer operand to f32 when the
+        # other side is float (e.g. INTEGER * SCALAR -> (i as f32) * s).
+        if op in ("+", "-", "*", "/"):
+            lk = self._numeric_kind(node.left)
+            rk = self._numeric_kind(node.right)
+            if lk == "int" and rk == "float":
+                left = f"({left} as f32)"
+            elif rk == "int" and lk == "float":
+                right = f"({right} as f32)"
         return f"{left} {rust_op} {right}"
+
+    def _numeric_kind(self, node) -> str:
+        """Best-effort numeric classification of an expression: 'int', 'float',
+        or 'unknown'. Drives mixed-type promotion casts. VECTOR/MATRIX count as
+        'float' (their element type is f32)."""
+        if isinstance(node, LiteralNode):
+            lt = (node.literal_type or "").upper()
+            if lt in ("INTEGER", "BIT"):
+                return "int"
+            if lt == "SCALAR":
+                return "float"
+            if isinstance(node.value, bool):
+                return "unknown"
+            if isinstance(node.value, int):
+                return "int"
+            if isinstance(node.value, float):
+                return "float"
+            return "unknown"
+        if isinstance(node, IdentifierNode):
+            ts = self._var_info.get(node.name.lower())
+            if ts is None:
+                return "unknown"
+            if ts.data_type in (DataType.INTEGER, DataType.BIT):
+                return "int"
+            if ts.data_type in (DataType.SCALAR, DataType.VECTOR,
+                                DataType.MATRIX):
+                return "float"
+            return "unknown"
+        if isinstance(node, UnaryOpNode):
+            return self._numeric_kind(node.operand)
+        if isinstance(node, BinaryOpNode):
+            if node.operator in ("+", "-", "*", "/", "**"):
+                lk = self._numeric_kind(node.left)
+                rk = self._numeric_kind(node.right)
+                if lk == "float" or rk == "float":
+                    return "float"
+                if lk == "int" and rk == "int":
+                    return "int"
+            return "unknown"
+        if isinstance(node, FunctionCallNode):
+            nm = node.name.upper()
+            if nm in ("ABVAL", "DOT", "SCALAR"):
+                return "float"
+            if nm == "INTEGER":
+                return "int"
+        return "unknown"
 
     def _is_integer_operand(self, node) -> bool:
         """Best-effort: is this expression an integer (INTEGER/BIT) rather than
@@ -1553,11 +1772,22 @@ use hal_rt::*;
 
     def _generate_wait(self, node: WaitNode) -> None:
         """WAIT UNTIL <cond>; -> spin-wait until the condition holds.
+        WAIT <event>; -> host stub (advisory; does NOT block, does NOT model
+        latched/unlatched semantics -- see RTOS backend for faithful behavior).
 
-        Faithful to HAL/S blocking semantics: if nothing ever makes the
-        condition true, this blocks indefinitely (as a real executive would,
-        pending an interrupt or another task clearing the condition).
+        For WAIT UNTIL: faithful to HAL/S blocking semantics: if nothing ever
+        makes the condition true, this blocks indefinitely (as a real executive
+        would, pending an interrupt or another task clearing the condition).
         """
+        if node.event is not None:
+            ev = node.event.lower()
+            self.emitter.emit_comment(
+                f"WAIT {node.event} (host stub: advisory, non-blocking)")
+            self.emitter.emit_line(
+                f'eprintln!("[hal_rt] WAIT {node.event} '
+                '(advisory host stub; not real-time, does not block)");')
+            self.emitter.emit_line(f"let _ = {ev};")
+            return
         cond = self._generate_expression(node.condition)
         self.emitter.emit_comment("WAIT UNTIL <cond> (blocks until satisfied)")
         self.emitter.emit_line(f"while !({cond}) {{")
@@ -1567,6 +1797,19 @@ use hal_rt::*;
         )
         self.emitter.dedent()
         self.emitter.emit_line("}")
+
+    def _generate_signal(self, node: SignalNode) -> None:
+        """SIGNAL <event>; -> host stub. Sets the event's latched flag and
+        emits an advisory marker. This is NOT real-time-faithful: a real
+        unlatched event would pulse and be lost with no waiter; here the flag
+        persists. See the RTOS backend for faithful task-notification."""
+        ev = node.name.lower()
+        self.emitter.emit_comment(
+            f"SIGNAL {node.name} (host stub: advisory, latched flag)")
+        self.emitter.emit_line(f"{ev} = true;")
+        self.emitter.emit_line(
+            f'eprintln!("[hal_rt] SIGNAL {node.name} '
+            '(advisory host stub; not real-time)");')
 
     def _generate_cancel(self, node: CancelNode) -> None:
         """CANCEL <task>; -> set the task's cancel flag and join its thread."""

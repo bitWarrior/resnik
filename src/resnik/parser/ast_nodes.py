@@ -152,6 +152,7 @@ class ProcedureNode(ASTNode):
 
     name: str = ""
     parameters: List[str] = field(default_factory=list)
+    assign_params: List[str] = field(default_factory=list)  # ASSIGN outputs
     declarations: List[ASTNode] = field(default_factory=list)
     statements: List[ASTNode] = field(default_factory=list)
     return_type: Optional["TypeSpec"] = None  # set when this is a FUNCTION
@@ -578,6 +579,27 @@ class WriteNode(ASTNode):
 
 
 @dataclass
+class ReadNode(ASTNode):
+    """READ statement node: READ(channel) target, target, ...;"""
+
+    channel: int = 5
+    targets: List[ASTNode] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        self.node_type = NodeType.READ
+
+    def to_dict(self) -> Dict[str, Any]:
+        result = super().to_dict()
+        result.update(
+            {
+                "channel": self.channel,
+                "targets": [t.to_dict() for t in self.targets],
+            }
+        )
+        return result
+
+
+@dataclass
 class FunctionCallNode(ASTNode):
     """Function/built-in call used as an expression, e.g. ABVAL(V)."""
 
@@ -664,6 +686,7 @@ class CallNode(ASTNode):
 
     name: str = ""
     arguments: List[ASTNode] = field(default_factory=list)
+    assign_args: List[ASTNode] = field(default_factory=list)  # ASSIGN outputs
 
     def __post_init__(self) -> None:
         self.node_type = NodeType.CALL
@@ -748,9 +771,11 @@ class TerminateNode(ASTNode):
 
 @dataclass
 class WaitNode(ASTNode):
-    """WAIT UNTIL <condition>; — block until the condition holds."""
+    """WAIT UNTIL <condition>; — block until the condition holds.
+    WAIT <event>; — wait on a real-time EVENT (host stub: advisory)."""
 
     condition: Optional[ASTNode] = None
+    event: Optional[str] = None
 
     def __post_init__(self) -> None:
         self.node_type = NodeType.WAIT
@@ -758,8 +783,26 @@ class WaitNode(ASTNode):
     def to_dict(self) -> Dict[str, Any]:
         result = super().to_dict()
         result.update(
-            {"condition": self.condition.to_dict() if self.condition else None}
+            {
+                "condition": self.condition.to_dict() if self.condition else None,
+                "event": self.event,
+            }
         )
+        return result
+
+
+@dataclass
+class SignalNode(ASTNode):
+    """SIGNAL <event>; — signal a real-time EVENT (host stub: advisory)."""
+
+    name: str = ""
+
+    def __post_init__(self) -> None:
+        self.node_type = NodeType.SIGNAL
+
+    def to_dict(self) -> Dict[str, Any]:
+        result = super().to_dict()
+        result.update({"name": self.name})
         return result
 
 

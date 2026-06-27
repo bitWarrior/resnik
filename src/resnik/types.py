@@ -59,6 +59,7 @@ class NodeType(Enum):
     GOTO = "Goto"
     REPEAT = "Repeat"
     WRITE = "Write"
+    READ = "Read"
 
     # Real-time control
     SCHEDULE = "Schedule"

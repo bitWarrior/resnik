@@ -126,23 +126,50 @@ class Lexer:
         for line in lines:
             line_num += 1
 
-            # Block comments /* */
-            processed_line = []
+            # HAL/S 'C' comment card. Recognized when 'C' is the first
+            # non-blank character on the line (column 1 or indented) and is
+            # followed by whitespace, end-of-line, or a banner char (* - =).
+            # This keeps keywords (CLOSE, CONSTANT) and C-subscripts (C$1.M)
+            # as code, since those put a letter or '$' right after the C.
+            # Only consulted outside an open /* */ block.
+            if not in_block_comment:
+                stripped = line.lstrip()
+                if stripped[:1] == "C":
+                    after = stripped[1:2]
+                    if after == "" or after in " \t*-=":
+                        processed_lines.append("")
+                        continue
+
+            # Block comments /* */ and '...' strings.
+            processed_line: List[str] = []
             i = 0
+            in_string = False
             while i < len(line):
+                ch = line[i]
                 if in_block_comment:
                     if i < len(line) - 1 and line[i : i + 2] == "*/":
                         in_block_comment = False
                         i += 2
                         continue
                     i += 1
-                else:
-                    if i < len(line) - 1 and line[i : i + 2] == "/*":
-                        in_block_comment = True
-                        i += 2
-                        continue
-                    processed_line.append(line[i])
+                    continue
+                if in_string:
+                    processed_line.append(ch)
+                    if ch == "'":
+                        in_string = False
                     i += 1
+                    continue
+                if i < len(line) - 1 and line[i : i + 2] == "/*":
+                    in_block_comment = True
+                    i += 2
+                    continue
+                if ch == "'":
+                    in_string = True
+                    processed_line.append(ch)
+                    i += 1
+                    continue
+                processed_line.append(ch)
+                i += 1
 
             processed_lines.append("".join(processed_line))
 

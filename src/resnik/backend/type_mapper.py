@@ -32,6 +32,7 @@ class TypeMapper:
         DataType.SCALAR: "f32",  # Default to single precision
         DataType.BIT: "u32",   # bit string -> unsigned register
         DataType.BOOLEAN: "bool",
+        DataType.EVENT: "bool",  # host stub: latched flag (advisory)
         DataType.CHARACTER: "String",
     }
     
@@ -113,6 +114,7 @@ class TypeMapper:
             DataType.SCALAR: "0.0",
             DataType.BIT: "0",
             DataType.BOOLEAN: "false",
+            DataType.EVENT: "false",
             DataType.CHARACTER: 'String::new()',
         }
         

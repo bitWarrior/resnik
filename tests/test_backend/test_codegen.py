@@ -13,11 +13,13 @@ from resnik.parser.ast_nodes import (
     ReturnNode,
     CancelNode,
     WaitNode,
+    SignalNode,
     AssignmentNode,
     BinaryOpNode,
     MultiAssignNode,
     UnaryOpNode,
     SubscriptNode,
+    ReadNode,
     IndexListNode,
     ForNode,
     StarNode,
@@ -1359,7 +1361,7 @@ class TestConstSubscriptFieldLex:
 
     def test_number_dot_field_tokenization(self) -> None:
         from resnik import Lexer
-        types = [t.type for t in Lexer().tokenize("C$1.M", "t")]
+        types = [t.type for t in Lexer().tokenize("A$1.M", "t")]
         # '1' is a NUMBER and '.' a separate DOT (not '1.' as one NUMBER)
         assert "DOT" in types
         assert types.count("NUMBER") == 1
@@ -1640,4 +1642,261 @@ class TestConstantsAndScalarVector:
         assert "impl<const N: usize> Mul<Vector<N>> for f32" in code
         assert "impl<const N: usize> Mul<f32> for Vector<N>" in code
         assert "impl<const N: usize> Div<f32> for Vector<N>" in code
-        assert "use std::ops::{Add, Sub, Mul, Div};" in code
+        assert "use std::ops::{Add, Sub, Mul, Div, Neg};" in code
+
+
+class TestHalsSemanticsNavUpdate:
+    """Features and checks driven by nav_update.hal review."""
+
+    def _parse(self, src: str):
+        from resnik import Lexer, Parser
+        p = Parser()
+        ast = p.parse(Lexer().tokenize(src, "t"))
+        return ast, p.errors
+
+    def test_c_style_comment_card_stripped(self) -> None:
+        from resnik import Lexer
+        lx = Lexer()
+        lx.tokenize("C this is a comment\nT: PROGRAM;\nCLOSE T;", "t")
+        assert not lx.errors
+
+    def test_c_subscript_not_treated_as_comment(self) -> None:
+        from resnik import Lexer
+        types = [t.type for t in Lexer().tokenize("A$1.M", "t")]
+        assert "DOT" in types and "DOLLAR" in types
+
+    def test_untyped_constant_infers_scalar(self) -> None:
+        ast, errs = self._parse(
+            "T: PROGRAM; DECLARE PI CONSTANT (3.14159); CLOSE T;")
+        assert not errs
+
+    def test_return_type_first_function(self) -> None:
+        ast, errs = self._parse(
+            "P: PROGRAM; MAG: SCALAR FUNCTION(V); DECLARE V VECTOR(3); "
+            "RETURN ABVAL(V); CLOSE MAG; CLOSE P;")
+        assert not errs
+
+    def test_bare_paren_vector_literal(self) -> None:
+        ast, errs = self._parse(
+            "T: PROGRAM; DECLARE A VECTOR(3); A = (1.0, 2.0, 3.0); CLOSE T;")
+        assert not errs
+
+    def test_read_statement(self) -> None:
+        ast, errs = self._parse(
+            "T: PROGRAM; DECLARE P VECTOR(3); READ(5) P; CLOSE T;")
+        assert not errs
+
+    def test_late_declaration_flagged(self) -> None:
+        _, errs = self._parse(
+            "T: PROGRAM; DECLARE X SCALAR; X = 1.0; "
+            "DECLARE Y SCALAR; CLOSE T;")
+        assert any("DECLARE must precede" in str(e) for e in errs)
+
+    def test_declaration_inside_loop_flagged(self) -> None:
+        _, errs = self._parse(
+            "T: PROGRAM; DECLARE X SCALAR; DO FOR X = 1 TO 3; "
+            "DECLARE Y SCALAR; END; CLOSE T;")
+        assert any("inside an executable block" in str(e) for e in errs)
+
+    def test_wellformed_program_has_no_decl_errors(self) -> None:
+        _, errs = self._parse(
+            "T: PROGRAM; DECLARE X SCALAR; DECLARE Y SCALAR; "
+            "X = 1.0; Y = 2.0; CLOSE T;")
+        assert not [e for e in errs if "DECLARE" in str(e)]
+
+    def test_vector_has_display_impl(self) -> None:
+        ast, _ = self._parse(
+            "T: PROGRAM; DECLARE V VECTOR(3); WRITE(6) V; CLOSE T;")
+        code = RustCodeGenerator().generate(ast)
+        assert "impl<const N: usize> std::fmt::Display for Vector<N>" in code
+
+
+class TestReadSharedCursor:
+    """READ uses the shared hal_rt::read_f32 cursor, not read_to_string."""
+
+    def _gen(self, src: str) -> str:
+        from resnik import Lexer, Parser
+        ast = Parser().parse(Lexer().tokenize(src, "t"))
+        return RustCodeGenerator().generate(ast)
+
+    def test_read_uses_shared_helper_not_read_to_string(self) -> None:
+        code = self._gen(
+            "T: PROGRAM; DECLARE P VECTOR(3); READ(5) P; CLOSE T;")
+        assert "hal_rt::read_f32(3)" in code
+        assert "read_to_string" not in code
+
+    def test_read_f32_helper_emitted_in_prelude(self) -> None:
+        code = self._gen(
+            "T: PROGRAM; DECLARE X SCALAR; READ(5) X; CLOSE T;")
+        assert "pub fn read_f32(n: usize) -> Vec<f32>" in code
+        assert "thread_local!" in code
+
+    def test_read_total_counts_mixed_targets(self) -> None:
+        code = self._gen(
+            "T: PROGRAM; DECLARE A SCALAR; DECLARE V VECTOR(3); "
+            "READ(5) A, V; CLOSE T;")
+        assert "hal_rt::read_f32(4)" in code  # 1 scalar + 3 vector
+
+
+class TestVectorNegation:
+    """Unary minus applied to a whole vector/matrix expression."""
+
+    def _gen(self, src: str) -> str:
+        from resnik import Lexer, Parser
+        return RustCodeGenerator().generate(
+            Parser().parse(Lexer().tokenize(src, "t")))
+
+    def test_vector_neg_impl_in_prelude(self) -> None:
+        code = self._gen(
+            "T: PROGRAM; DECLARE V VECTOR(3); V = -V; CLOSE T;")
+        assert "impl<const N: usize> Neg for Vector<N>" in code
+
+    def test_matrix_neg_impl_in_prelude(self) -> None:
+        code = self._gen(
+            "T: PROGRAM; DECLARE M MATRIX(2,2); DECLARE V VECTOR(2); "
+            "V = M * V; CLOSE T;")
+        assert "Neg for Matrix<R, C>" in code
+
+
+class TestEventSignalWaitHostStub:
+    """Option-1 host stubs for real-time EVENT / SIGNAL / WAIT (advisory)."""
+
+    def _gen(self, src: str):
+        from resnik import Lexer, Parser
+        p = Parser()
+        ast = p.parse(Lexer().tokenize(src, "t"))
+        return p.errors, (RustCodeGenerator().generate(ast) if not p.errors else "")
+
+    def test_event_declaration_parses_to_bool_flag(self) -> None:
+        errs, code = self._gen("T: PROGRAM; DECLARE E EVENT; CLOSE T;")
+        assert not errs
+        assert "let mut e: bool = false;" in code
+
+    def test_signal_sets_flag_and_emits_advisory(self) -> None:
+        errs, code = self._gen(
+            "T: PROGRAM; DECLARE E EVENT; SIGNAL E; CLOSE T;")
+        assert not errs
+        assert "e = true;" in code
+        assert "advisory host stub" in code and "SIGNAL E" in code
+
+    def test_wait_event_is_nonblocking_advisory(self) -> None:
+        errs, code = self._gen(
+            "T: PROGRAM; DECLARE E EVENT; WAIT E; CLOSE T;")
+        assert not errs
+        # advisory marker present, and no spin-loop for the event form
+        assert "WAIT E (advisory host stub" in code
+        assert "does not block" in code
+
+    def test_wait_until_still_blocks(self) -> None:
+        # The event form must not disturb the existing WAIT UNTIL blocking form.
+        errs, code = self._gen(
+            "T: PROGRAM; DECLARE X INTEGER; WAIT UNTIL X > 0; CLOSE T;")
+        assert not errs
+        assert "while !(x > 0)" in code
+
+    def test_signal_wait_roundtrip_parses(self) -> None:
+        errs, _ = self._gen(
+            "T: PROGRAM; DECLARE E EVENT; SIGNAL E; WAIT E; "
+            "WRITE(6) 'OK'; CLOSE T;")
+        assert not errs
+
+
+class TestProcedureAssignParams:
+    """HAL/S PROCEDURE(inputs) ASSIGN(outputs) and CALL ... ASSIGN."""
+
+    def _run(self, src: str):
+        from resnik import Lexer, Parser
+        p = Parser()
+        ast = p.parse(Lexer().tokenize(src, "t"))
+        code = RustCodeGenerator().generate(ast) if not p.errors else ""
+        return p.errors, code
+
+    PROC = ("P: PROGRAM; "
+            "CT: PROCEDURE(W, I) ASSIGN(T); "
+            "DECLARE W VECTOR(3); DECLARE I MATRIX(3,3); DECLARE T VECTOR(3); "
+            "T = W; CLOSE CT; ")
+
+    def test_assign_param_is_mut_ref(self) -> None:
+        errs, code = self._run(self.PROC + "CLOSE P;")
+        assert not errs
+        assert "t: &mut Vector<3>" in code
+        assert "w: Vector<3>" in code  # input stays by value
+
+    def test_assign_param_use_is_dereferenced(self) -> None:
+        _, code = self._run(self.PROC + "CLOSE P;")
+        assert "(*t) = w;" in code
+
+    def test_call_passes_assign_arg_by_mut_ref(self) -> None:
+        src = (self.PROC + "DECLARE A VECTOR(3); DECLARE B MATRIX(3,3); "
+               "DECLARE C VECTOR(3); CALL CT(A, B) ASSIGN(C); CLOSE P;")
+        errs, code = self._run(src)
+        assert not errs
+        assert "ct(a, b, &mut c);" in code
+
+    def test_call_wrong_input_count_flagged(self) -> None:
+        src = self.PROC + "DECLARE A VECTOR(3); DECLARE C VECTOR(3); " \
+                          "CALL CT(A) ASSIGN(C); CLOSE P;"
+        errs, _ = self._run(src)
+        assert any("input argument" in str(e) for e in errs)
+
+    def test_call_missing_assign_flagged(self) -> None:
+        src = self.PROC + "DECLARE A VECTOR(3); DECLARE B MATRIX(3,3); " \
+                          "CALL CT(A, B); CLOSE P;"
+        errs, _ = self._run(src)
+        assert any("ASSIGN output" in str(e) for e in errs)
+
+    def test_dot_intrinsic(self) -> None:
+        errs, code = self._run(
+            "P: PROGRAM; DECLARE A VECTOR(3); DECLARE B VECTOR(3); "
+            "DECLARE D SCALAR; D = DOT(A, B); CLOSE P;")
+        assert not errs
+        assert "d = dot(a, b);" in code
+        assert "pub fn dot<const N: usize>" in code
+
+
+class TestAdjacencyMultiply:
+    """HAL/S juxtaposition multiply: `I W` means `I * W` (lexer/parser pass)."""
+
+    def _run(self, src: str):
+        from resnik import Lexer, Parser
+        p = Parser()
+        ast = p.parse(Lexer().tokenize(src, "t"))
+        code = RustCodeGenerator().generate(ast) if not p.errors else ""
+        return p.errors, code
+
+    def test_identifier_adjacency_is_multiply(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE I MATRIX(3,3); DECLARE W VECTOR(3); "
+            "DECLARE M VECTOR(3); M = I W; CLOSE T;")
+        assert not errs
+        assert "m = i * w;" in code
+
+    def test_number_identifier_adjacency_is_multiply(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE X SCALAR; DECLARE Y SCALAR; "
+            "Y = 2 X; CLOSE T;")
+        assert not errs
+        # 2 is an integer literal, X is scalar -> mixed-type promotion casts it
+        assert "y = (2 as f32) * x;" in code
+
+    def test_three_operand_adjacency_chains(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE A SCALAR; DECLARE B SCALAR; "
+            "DECLARE C SCALAR; DECLARE D SCALAR; D = A B C; CLOSE T;")
+        assert not errs
+        assert "d = a * b * c;" in code
+
+    def test_declare_structure_template_not_multiplied(self) -> None:
+        # `DECLARE name TEMPLATE STRUCTURE` must NOT insert a multiply between
+        # the variable name and the template name.
+        errs, _ = self._run(
+            "T: PROGRAM; STRUCTURE NODE: DECLARE F SCALAR; CLOSE NODE; "
+            "DECLARE PRIMARY NODE STRUCTURE; CLOSE T;")
+        assert not errs
+
+    def test_write_channel_then_item_not_multiplied(self) -> None:
+        # WRITE(6) X  -> RPAREN then IDENT must not become a product.
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE X SCALAR; WRITE(6) X; CLOSE T;")
+        assert not errs
+        assert "* x" not in code

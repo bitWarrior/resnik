@@ -37,6 +37,7 @@ from resnik.parser.ast_nodes import (
     ReturnNode,
     MultiAssignNode,
     WriteNode,
+    ReadNode,
     FunctionCallNode,
     CallNode,
     DoBlockNode,
@@ -46,6 +47,7 @@ from resnik.parser.ast_nodes import (
     ScheduleNode,
     TerminateNode,
     WaitNode,
+    SignalNode,
     CancelNode,
     LiteralNode,
     IdentifierNode,
@@ -80,6 +82,9 @@ class Parser:
                 "KEYWORD_EVERY",
                 "KEYWORD_WAIT",
                 "KEYWORD_UNTIL",
+                "KEYWORD_EVENT",
+                "KEYWORD_SIGNAL",
+                "KEYWORD_ASSIGN",
                 "KEYWORD_CANCEL",
                 "KEYWORD_COMPOOL",
                 "KEYWORD_STATIC",
@@ -98,6 +103,7 @@ class Parser:
                 "KEYWORD_BY",
                 "KEYWORD_INITIAL",
                 "KEYWORD_WRITE",
+                "KEYWORD_READ",
                 "KEYWORD_DECLARE",
                 "KEYWORD_INTEGER",
                 "KEYWORD_SCALAR",
@@ -169,9 +175,100 @@ class Parser:
         self.symbol_table = SymbolTable()
         self.errors: List[ParserError] = []
         self.ast: Optional[ASTNode] = None
+        self._proc_signatures: Dict[str, tuple] = {}
 
         self._define_grammar()
         self.parser = self.pg.build()
+
+    def _find_nested_declares(self, node: ASTNode, out: list) -> None:
+        """Collect DeclareNodes anywhere inside a node's child statements."""
+        for value in vars(node).values():
+            children = (value if isinstance(value, list)
+                        else [value] if isinstance(value, ASTNode) else [])
+            for child in children:
+                if not isinstance(child, ASTNode):
+                    continue
+                if isinstance(child, DeclareNode):
+                    out.append(child)
+                self._find_nested_declares(child, out)
+
+    def _check_declaration_order(self, body: list, kind: str) -> None:
+        """HAL/S requires all DECLAREs to precede the first executable
+        statement in a block, and forbids declarations inside nested
+        executable blocks (DO/IF/FOR). Flag both."""
+        declarative = (DeclareNode, StructureDefNode)
+        seen_executable = False
+        for stmt in body:
+            if isinstance(stmt, declarative):
+                if seen_executable:
+                    self.errors.append(
+                        SemanticError(
+                            f"DECLARE must precede executable statements in a "
+                            f"{kind}; this declaration appears after code has "
+                            f"already run (HAL/S forbids late declarations)",
+                            getattr(stmt, "line", 0),
+                            getattr(stmt, "column", 0),
+                        )
+                    )
+            else:
+                seen_executable = True
+                nested: list = []
+                self._find_nested_declares(stmt, nested)
+                for decl in nested:
+                    self.errors.append(
+                        SemanticError(
+                            f"DECLARE may not appear inside an executable block "
+                            f"in a {kind}; all declarations must be at the top "
+                            f"of the block, before any executable statement",
+                            getattr(decl, "line", 0),
+                            getattr(decl, "column", 0),
+                        )
+                    )
+
+    def _check_call_signatures(self, body: list) -> None:
+        """Enforce that each CALL matches its PROCEDURE's input/output
+        structure: same number of input arguments and ASSIGN (output)
+        arguments. HAL/S separates the two at the syntax level, so a CALL
+        that supplies the wrong count of either is an error."""
+        calls: list = []
+
+        def collect(node: ASTNode) -> None:
+            for value in vars(node).values():
+                children = (value if isinstance(value, list)
+                            else [value] if isinstance(value, ASTNode) else [])
+                for child in children:
+                    if not isinstance(child, ASTNode):
+                        continue
+                    if isinstance(child, CallNode):
+                        calls.append(child)
+                    collect(child)
+
+        for stmt in body:
+            if isinstance(stmt, CallNode):
+                calls.append(stmt)
+            collect(stmt)
+
+        for call in calls:
+            sig = self._proc_signatures.get(call.name.upper())
+            if sig is None:
+                continue  # unknown/forward procedure: not checked here
+            n_in, n_out = sig
+            if len(call.arguments) != n_in:
+                self.errors.append(
+                    SemanticError(
+                        f"CALL {call.name} passes {len(call.arguments)} input "
+                        f"argument(s) but the PROCEDURE declares {n_in}",
+                        getattr(call, "line", 0), getattr(call, "column", 0),
+                    )
+                )
+            if len(call.assign_args) != n_out:
+                self.errors.append(
+                    SemanticError(
+                        f"CALL {call.name} passes {len(call.assign_args)} "
+                        f"ASSIGN output(s) but the PROCEDURE declares {n_out}",
+                        getattr(call, "line", 0), getattr(call, "column", 0),
+                    )
+                )
 
     def _build_unit(
         self,
@@ -206,6 +303,9 @@ class Parser:
             if not isinstance(s, (TaskNode, ProcedureNode))
         ]
 
+        self._check_declaration_order(body, kind)
+        self._check_call_signatures(body)
+
         return node_cls(
             name=name,
             statements=body,
@@ -225,11 +325,12 @@ class Parser:
 
     def _build_procedure(
         self, name_tok: Any, params: list, statements: list, close_tok: Any,
-        return_type: Any = None,
+        return_type: Any = None, assign_params: Any = None,
     ) -> ProcedureNode:
         """Build a ProcedureNode and check the CLOSE name matches the label."""
         name = name_tok.value
         close_name = close_tok.value
+        assign_params = assign_params or []
         if name.upper() != close_name.upper():
             self.errors.append(
                 SemanticError(
@@ -239,11 +340,17 @@ class Parser:
                     getattr(close_tok, "column", 0),
                 )
             )
+        # Record the signature (input arity, output arity) so CALL sites can be
+        # checked for the same input/output structure HAL/S enforces.
+        self._proc_signatures[name.upper()] = (len(params), len(assign_params))
         # Procedure bodies may not nest further tasks/procedures here; keep all
         # body items as statements (declarations are extracted by codegen).
+        self._check_declaration_order(
+            statements, "FUNCTION" if return_type is not None else "PROCEDURE")
         return ProcedureNode(
             name=name,
             parameters=params,
+            assign_params=assign_params,
             statements=statements,
             return_type=return_type,
             line=getattr(name_tok, "line", 0),
@@ -356,6 +463,31 @@ class Parser:
                 name_tok=p[0], params=p[4], statements=p[7], close_tok=p[9]
             )
 
+        # PROCEDURE(inputs) ASSIGN(outputs); -- HAL/S separates inputs from
+        # outputs at the syntax level; ASSIGN names are the writable outputs.
+        @self.pg.production(
+            "procedure_block : IDENTIFIER COLON KEYWORD_PROCEDURE "
+            "LPAREN param_list RPAREN KEYWORD_ASSIGN LPAREN param_list RPAREN "
+            "SEMICOLON statement_list KEYWORD_CLOSE IDENTIFIER SEMICOLON"
+        )
+        def procedure_block_assign(p: List[Any]) -> ProcedureNode:
+            return self._build_procedure(
+                name_tok=p[0], params=p[4], statements=p[11],
+                close_tok=p[13], assign_params=p[8]
+            )
+
+        # PROCEDURE ASSIGN(outputs);  (no input parameters)
+        @self.pg.production(
+            "procedure_block : IDENTIFIER COLON KEYWORD_PROCEDURE "
+            "KEYWORD_ASSIGN LPAREN param_list RPAREN "
+            "SEMICOLON statement_list KEYWORD_CLOSE IDENTIFIER SEMICOLON"
+        )
+        def procedure_block_assign_noinput(p: List[Any]) -> ProcedureNode:
+            return self._build_procedure(
+                name_tok=p[0], params=[], statements=p[8],
+                close_tok=p[10], assign_params=p[5]
+            )
+
         @self.pg.production(
             "procedure_block : IDENTIFIER COLON KEYWORD_PROCEDURE SEMICOLON "
             "statement_list KEYWORD_CLOSE IDENTIFIER SEMICOLON"
@@ -385,6 +517,18 @@ class Parser:
             return self._build_procedure(
                 name_tok=p[0], params=[], statements=p[5],
                 close_tok=p[7], return_type=p[3]
+            )
+
+        # Return type before FUNCTION: NAME: SCALAR FUNCTION(params);
+        @self.pg.production(
+            "procedure_block : IDENTIFIER COLON type_spec KEYWORD_FUNCTION "
+            "LPAREN param_list RPAREN SEMICOLON "
+            "statement_list KEYWORD_CLOSE IDENTIFIER SEMICOLON"
+        )
+        def function_block_prefix_type(p: List[Any]) -> ProcedureNode:
+            return self._build_procedure(
+                name_tok=p[0], params=p[5], statements=p[8],
+                close_tok=p[10], return_type=p[2]
             )
 
         @self.pg.production("param_list : param_list COMMA IDENTIFIER")
@@ -420,9 +564,11 @@ class Parser:
         @self.pg.production("statement : do_block")
         @self.pg.production("statement : schedule_statement")
         @self.pg.production("statement : wait_statement")
+        @self.pg.production("statement : signal_statement")
         @self.pg.production("statement : cancel_statement")
         @self.pg.production("statement : terminate_statement")
         @self.pg.production("statement : write_statement")
+        @self.pg.production("statement : read_statement")
         def statement(p: List[Any]) -> ASTNode:
             return p[0]
 
@@ -585,6 +731,34 @@ class Parser:
                 type_spec=p[3],
                 is_constant=True,
                 initial_value=p[5],
+                line=getattr(p[0], "line", 0),
+                column=getattr(p[0], "column", 0),
+            )
+
+        # Real-time EVENT variable: DECLARE name EVENT;
+        @self.pg.production(
+            "declare_statement : KEYWORD_DECLARE IDENTIFIER KEYWORD_EVENT "
+            "SEMICOLON"
+        )
+        def declare_event(p: List[Any]) -> DeclareNode:
+            return DeclareNode(
+                identifiers=[p[1].value],
+                type_spec=TypeSpec(data_type=DataType.EVENT),
+                line=getattr(p[0], "line", 0),
+                column=getattr(p[0], "column", 0),
+            )
+
+        # Untyped: DECLARE PI CONSTANT (value);  -> inferred SCALAR.
+        @self.pg.production(
+            "declare_statement : KEYWORD_DECLARE IDENTIFIER KEYWORD_CONSTANT "
+            "LPAREN expression RPAREN SEMICOLON"
+        )
+        def declare_constant_untyped(p: List[Any]) -> DeclareNode:
+            return DeclareNode(
+                identifiers=[p[1].value],
+                type_spec=TypeSpec(data_type=DataType.SCALAR),
+                is_constant=True,
+                initial_value=p[4],
                 line=getattr(p[0], "line", 0),
                 column=getattr(p[0], "column", 0),
             )
@@ -931,6 +1105,20 @@ class Parser:
                 column=getattr(p[0], "column", 0),
             )
 
+        # CALL <proc>(<inputs>) ASSIGN(<outputs>);
+        @self.pg.production(
+            "call_statement : KEYWORD_CALL IDENTIFIER LPAREN arg_list RPAREN "
+            "KEYWORD_ASSIGN LPAREN arg_list RPAREN SEMICOLON"
+        )
+        def call_statement_assign(p: List[Any]) -> CallNode:
+            return CallNode(
+                name=p[1].value,
+                arguments=p[3],
+                assign_args=p[7],
+                line=getattr(p[0], "line", 0),
+                column=getattr(p[0], "column", 0),
+            )
+
         @self.pg.production(
             "call_statement : KEYWORD_CALL IDENTIFIER LPAREN RPAREN SEMICOLON"
         )
@@ -1028,6 +1216,28 @@ class Parser:
                 column=getattr(p[0], "column", 0),
             )
 
+        # WAIT <event>;  (real-time event; host stub)
+        @self.pg.production(
+            "wait_statement : KEYWORD_WAIT IDENTIFIER SEMICOLON"
+        )
+        def wait_event_statement(p: List[Any]) -> WaitNode:
+            return WaitNode(
+                event=p[1].value,
+                line=getattr(p[0], "line", 0),
+                column=getattr(p[0], "column", 0),
+            )
+
+        # SIGNAL <event>;  (real-time event; host stub)
+        @self.pg.production(
+            "signal_statement : KEYWORD_SIGNAL IDENTIFIER SEMICOLON"
+        )
+        def signal_statement(p: List[Any]) -> SignalNode:
+            return SignalNode(
+                name=p[1].value,
+                line=getattr(p[0], "line", 0),
+                column=getattr(p[0], "column", 0),
+            )
+
         # CANCEL <task>;
         @self.pg.production("cancel_statement : KEYWORD_CANCEL IDENTIFIER SEMICOLON")
         def cancel_statement(p: List[Any]) -> CancelNode:
@@ -1085,6 +1295,27 @@ class Parser:
 
         @self.pg.production("write_items : expression")
         def write_items_single(p: List[Any]) -> list:
+            return [p[0]]
+
+        # ---- READ -------------------------------------------------------
+        @self.pg.production(
+            "read_statement : KEYWORD_READ LPAREN NUMBER RPAREN "
+            "read_items SEMICOLON"
+        )
+        def read_statement(p: List[Any]) -> ReadNode:
+            return ReadNode(
+                channel=int(p[2].value),
+                targets=p[4],
+                line=getattr(p[0], "line", 0),
+                column=getattr(p[0], "column", 0),
+            )
+
+        @self.pg.production("read_items : read_items COMMA expression")
+        def read_items(p: List[Any]) -> list:
+            return p[0] + [p[2]]
+
+        @self.pg.production("read_items : expression")
+        def read_items_single(p: List[Any]) -> list:
             return [p[0]]
 
         # ---- expressions (precedence handled by the table above) -------
@@ -1282,6 +1513,18 @@ class Parser:
                 column=getattr(p[0], "column", 0),
             )
 
+        # Bare parenthesized list as a vector literal: (a, b, c).
+        # Distinct from grouping (expr) by the comma after the first element.
+        @self.pg.production(
+            "expression : LPAREN expression COMMA arg_list RPAREN"
+        )
+        def expr_paren_vector(p: List[Any]) -> VectorLiteralNode:
+            return VectorLiteralNode(
+                values=[p[1]] + p[3],
+                line=getattr(p[0], "line", 0),
+                column=getattr(p[0], "column", 0),
+            )
+
         # Structure field access: <expr>.<field>
         @self.pg.production("expression : expression DOT IDENTIFIER")
         def expr_field_access(p: List[Any]) -> FieldAccessNode:
@@ -1403,6 +1646,37 @@ class Parser:
             i += 1
         return out
 
+    def _insert_implicit_multiply(self, tokens: List[Token]) -> List[Token]:
+        """HAL/S multiplies adjacent operands by juxtaposition (e.g. `I W` means
+        `I * W`). Rather than make the grammar ambiguous (a generative
+        `expression : expression expression` rule yields dozens of reduce/reduce
+        conflicts), synthesize an explicit MULTIPLY token between two adjacent
+        operand tokens so the parser uses its existing multiply rule.
+
+        Scoped to IDENTIFIER/NUMBER followed by IDENTIFIER/NUMBER, and SUPPRESSED
+        inside DECLARE statements -- there a variable name sits next to a
+        structure-template name (`DECLARE PRIMARY_ALARM NODE STRUCTURE;`) or a
+        type, which is not a product. Paren juxtaposition (`(A) B`, `A (B)`) is
+        intentionally NOT handled, since it collides with grouping, calls, and
+        subscripts.
+        """
+        operand = {"IDENTIFIER", "NUMBER"}
+        out: List[Token] = []
+        in_declare = False
+        for tok in tokens:
+            if tok.type == "KEYWORD_DECLARE":
+                in_declare = True
+            elif tok.type == "SEMICOLON":
+                in_declare = False
+            if (not in_declare and out
+                    and out[-1].type in operand and tok.type in operand):
+                out.append(Token(
+                    type="MULTIPLY", lexeme="*",
+                    line=tok.line, column=tok.column, file=tok.file,
+                ))
+            out.append(tok)
+        return out
+
     def _make_based_literal(self, tok: Any) -> LiteralNode:
         """Parse a HEX/BIN/OCT or suffix bit literal token into a LiteralNode."""
         import re
@@ -1443,12 +1717,14 @@ class Parser:
             Root AST node or None if parsing failed
         """
         self.errors = []
+        self._proc_signatures = {}
         self.symbol_table = SymbolTable()
 
         # Expand REPLACE ... BY ...; macros (HAL/S preprocessor) at the token
         # level before parsing. Definitions are removed; later uses of a macro
         # name are substituted with the definition's tokens.
         tokens = self._expand_replace(tokens)
+        tokens = self._insert_implicit_multiply(tokens)
 
         try:
             rply_tokens = []
