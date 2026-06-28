@@ -1,0 +1,43 @@
+LINEAR_ALGEBRA_TEST: PROGRAM;
+
+/* ****************************************************************
+   Test 3: Pure Linear Algebra
+   Validates Matrix/Vector multiplication, built-in math functions,
+   and operator precedence without hardware dependencies.
+**************************************************************** */
+
+DECLARE VEC_A VECTOR(3) INITIAL(1.0, 2.0, 3.0);
+DECLARE VEC_B VECTOR(3) INITIAL(4.0, 5.0, 6.0);
+DECLARE MAT_M MATRIX(3,3) INITIAL(
+    2.0, 0.0, 0.0,
+    0.0, 2.0, 0.0,
+    0.0, 0.0, 2.0);
+
+DECLARE RESULT_VEC VECTOR(3);
+DECLARE DOT_PROD SCALAR;
+DECLARE MAGNITUDE SCALAR;
+
+/* ----------------------------------------------------------------
+   Executable Code
+---------------------------------------------------------------- */
+/* Matrix multiplied by Vector (adjacency) */
+RESULT_VEC = MAT_M VEC_A;
+
+/* Built-in Dot Product function */
+DOT_PROD = DOT(VEC_A, VEC_B);
+
+/* 
+   Mixed operation: 
+   DOT_PROD (scalar) multiplied by VEC_B (vector) via adjacency,
+   then added to RESULT_VEC. 
+   Precedence check: The scalar-vector multiplication must happen first.
+*/
+RESULT_VEC = RESULT_VEC + DOT_PROD VEC_B;
+
+/* Built-in absolute value (magnitude) of a vector */
+MAGNITUDE = ABVAL(RESULT_VEC);
+
+WRITE(6) 'Final Vector: ', RESULT_VEC;
+WRITE(6) 'Final Magnitude: ', MAGNITUDE;
+
+CLOSE LINEAR_ALGEBRA_TEST;

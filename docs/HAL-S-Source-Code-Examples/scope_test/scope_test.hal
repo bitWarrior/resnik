@@ -1,0 +1,36 @@
+SCOPE_TEST: PROGRAM;
+
+/* ****************************************************************
+   Test 2: Functions and Local Scope
+   Validates function definitions, local variable declarations,
+   and parameter passing.
+**************************************************************** */
+
+DECLARE INPUT_VAL INTEGER INITIAL(6);
+DECLARE OUTPUT_VAL INTEGER;
+
+/* ----------------------------------------------------------------
+   Function Definition
+   Must be declared after global variables but before main execution
+---------------------------------------------------------------- */
+CALC_FACTORIAL: INTEGER FUNCTION(N);
+    DECLARE N INTEGER;
+    DECLARE I INTEGER;
+    DECLARE FACT INTEGER INITIAL(1);
+    
+    DO FOR I = 1 TO N;
+        /* Multiplication by adjacency (FACT = FACT * I) */
+        FACT = FACT I;
+    END;
+    
+    RETURN FACT;
+CLOSE CALC_FACTORIAL;
+
+/* ----------------------------------------------------------------
+   Executable Code
+---------------------------------------------------------------- */
+OUTPUT_VAL = CALC_FACTORIAL(INPUT_VAL);
+
+WRITE(6) 'The factorial of ', INPUT_VAL, ' is ', OUTPUT_VAL;
+
+CLOSE SCOPE_TEST;

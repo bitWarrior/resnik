@@ -589,24 +589,46 @@ class Parser:
         # <element> is a type_spec (VECTOR(3), INTEGER, ...) or a structure
         # template (IDENTIFIER STRUCTURE). Both dimension forms flow through
         # array_dim_list, so there is a single ARRAY( ... ) prefix (no conflict).
-        @self.pg.production(
-            "declare_statement : KEYWORD_DECLARE IDENTIFIER KEYWORD_ARRAY "
-            "LPAREN array_dim_list RPAREN KEYWORD_OF array_element SEMICOLON"
-        )
-        def declare_array(p: List[Any]) -> DeclareNode:
-            dims = p[4]
-            element = p[7]
+        # `OF` is optional in HAL/S array declarations: `ARRAY(n) SCALAR` is the
+        # canonical form, `ARRAY(n) OF SCALAR` an accepted variant. Both flow
+        # through array_of_element so the rest of the rule is shared. An optional
+        # INITIAL(...) clause supplies element values.
+        @self.pg.production("array_of_element : KEYWORD_OF array_element")
+        def array_of_with_of(p: List[Any]) -> TypeSpec:
+            return p[1]
+
+        @self.pg.production("array_of_element : array_element")
+        def array_of_bare(p: List[Any]) -> TypeSpec:
+            return p[0]
+
+        def _mk_array(p, ident_tok, dims, element, init=None):
             return DeclareNode(
-                identifiers=[p[1].value],
+                identifiers=[ident_tok.value],
                 type_spec=TypeSpec(
                     data_type=element.data_type,
                     array_dims=dims,
                     array_size=dims[0],
                     element_type=element,
                 ),
+                attributes={"initial": init} if init is not None else {},
                 line=getattr(p[0], "line", 0),
                 column=getattr(p[0], "column", 0),
             )
+
+        @self.pg.production(
+            "declare_statement : KEYWORD_DECLARE IDENTIFIER KEYWORD_ARRAY "
+            "LPAREN array_dim_list RPAREN array_of_element SEMICOLON"
+        )
+        def declare_array_no_of(p: List[Any]) -> DeclareNode:
+            return _mk_array(p, p[1], p[4], p[6])
+
+        @self.pg.production(
+            "declare_statement : KEYWORD_DECLARE IDENTIFIER KEYWORD_ARRAY "
+            "LPAREN array_dim_list RPAREN array_of_element "
+            "KEYWORD_INITIAL LPAREN arg_list RPAREN SEMICOLON"
+        )
+        def declare_array_initial(p: List[Any]) -> DeclareNode:
+            return _mk_array(p, p[1], p[4], p[6], init=p[9])
 
         @self.pg.production("array_element : type_spec")
         def array_element_type(p: List[Any]) -> TypeSpec:
@@ -1020,6 +1042,36 @@ class Parser:
             return AssignmentNode(
                 target=target,
                 value=p[6],
+                line=getattr(p[0], "line", 0),
+                column=getattr(p[0], "column", 0),
+            )
+
+        # Paren-subscript lvalue: MAT(r, c) = expr;  or  VEC(i) = expr;
+        # Matrix/vector element assignment. Shares MAT(r,c) read syntax; the
+        # trailing ASSIGN disambiguates a target from an equality expression.
+        @self.pg.production(
+            "assignment_statement : IDENTIFIER LPAREN subscript_arg_list RPAREN "
+            "ASSIGN expression SEMICOLON"
+        )
+        def paren_element_assignment(p: List[Any]) -> AssignmentNode:
+            operand = IdentifierNode(
+                name=p[0].value,
+                line=getattr(p[0], "line", 0),
+                column=getattr(p[0], "column", 0),
+            )
+            target = SubscriptNode(
+                operand=operand,
+                index=IndexListNode(
+                    indices=p[2],
+                    line=getattr(p[1], "line", 0),
+                    column=getattr(p[1], "column", 0),
+                ),
+                line=getattr(p[1], "line", 0),
+                column=getattr(p[1], "column", 0),
+            )
+            return AssignmentNode(
+                target=target,
+                value=p[5],
                 line=getattr(p[0], "line", 0),
                 column=getattr(p[0], "column", 0),
             )

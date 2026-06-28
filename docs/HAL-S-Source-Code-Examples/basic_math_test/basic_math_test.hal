@@ -1,0 +1,45 @@
+BASIC_MATH_TEST: PROGRAM;
+
+/* ****************************************************************
+   HAL/S Minimal Compiler Test (Block Comment Style)
+   
+   Features demonstrated:
+     - Block comments using slash-asterisk
+     - Basic SCALAR and INTEGER data types
+     - DO WHILE loop structure
+     - Single-line IF-THEN-ELSE logic
+     - Scalar arithmetic (addition, subtraction)
+     - Multiplication by adjacency
+**************************************************************** */
+
+DECLARE LIMIT INTEGER INITIAL(5);
+DECLARE COUNTER INTEGER INITIAL(1);
+DECLARE SUM SCALAR INITIAL(0.0);
+DECLARE FACTOR SCALAR INITIAL(2.5);
+
+/* ----------------------------------------------------------------
+   Main program body starts here
+   (All DECLARE statements must be strictly above this line)
+---------------------------------------------------------------- */
+WRITE(6) 'Starting simple loop test';
+
+DO WHILE COUNTER <= LIMIT;
+    
+    /* Calculate sum using adjacency for multiplication.
+       In standard math notation this is: SUM = SUM + (COUNTER * FACTOR) */
+    SUM = SUM + COUNTER FACTOR;
+
+    /* A simple branch test without compound DO...END blocks */
+    IF SUM > 10.0 THEN
+        WRITE(6) 'Sum has exceeded 10.0';
+    ELSE
+        WRITE(6) 'Sum is still small';
+
+    /* Increment the counter */
+    COUNTER = COUNTER + 1;
+
+END;
+
+WRITE(6) 'Loop complete. Final Sum =', SUM;
+
+CLOSE BASIC_MATH_TEST;

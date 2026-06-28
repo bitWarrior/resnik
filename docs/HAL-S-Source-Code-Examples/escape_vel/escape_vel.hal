@@ -1,0 +1,41 @@
+ESCAPE_VEL: PROGRAM;
+
+/* ****************************************************************
+   Test 1: Escape Velocity Calculator
+   Validates scientific notation parsing, built-in SQRT function, 
+   and parenthetical grouping in adjacency multiplication.
+**************************************************************** */
+
+/* Universal Gravitational Constant (m^3 kg^-1 s^-2) */
+DECLARE G CONSTANT (6.6743E-11); 
+
+/* Mass of Earth (kg) */
+DECLARE M CONSTANT (5.972E24);   
+
+/* Earth radius and target altitude in meters */
+DECLARE RADIUS SCALAR INITIAL(6371000.0);
+DECLARE ALTITUDE SCALAR INITIAL(400000.0); /* ISS typical altitude */
+
+DECLARE V_ESC SCALAR;
+DECLARE R_TOTAL SCALAR;
+
+/* ----------------------------------------------------------------
+   Executable Code
+---------------------------------------------------------------- */
+R_TOTAL = RADIUS + ALTITUDE;
+
+/* 
+   Calculate escape velocity: v = sqrt(2 * G * M / r)
+   Tests the parser's ability to chain adjacency multiplications
+   (2.0 * G * M) before applying division and the SQRT function.
+*/
+V_ESC = SQRT(2.0 G M / R_TOTAL);
+
+WRITE(6) 'Escape velocity at 400km altitude (m/s): ', V_ESC;
+
+IF V_ESC > 10000.0 THEN
+    WRITE(6) 'Velocity check nominal.';
+ELSE
+    WRITE(6) 'Calculation error: value too low.';
+
+CLOSE ESCAPE_VEL;

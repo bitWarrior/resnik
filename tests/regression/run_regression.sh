@@ -200,9 +200,17 @@ run_regression_case "CVE Monitor" \
     "Verify Resnik compatability to HAL/S EQUATE keyword aliasing across entirely different primitive types, simulating a memory corruption check." \
     "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/cve_monitor/cve_monitor.hal --emit-exe
 
+run_regression_case "Escape Velocity" \
+    "Verify Resnik's ability to handle standard mathematical built-in functions (like SQRT), extremely large scientific notation literals, and complex adjacency multiplication grouped by parentheses." \
+    "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/escape_vel/escape_vel.hal --emit-exe
+
 run_regression_case "EULER" \
     "Verify Resnik's conversion of vectors as primitive types." \
     "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/euler/euler.hal --emit-exe
+
+run_regression_case "First Contact" \
+    "Verify Resnik's conversion of vectors as primitive types." \
+    "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/first_contact/first_contact.hal --emit-exe
 
 run_regression_case "GNC Correction" \
     "Verify Resnik's ability to process asynchronous tasks." \
@@ -211,6 +219,10 @@ run_regression_case "GNC Correction" \
 run_regression_case "JSTAR Telemetry" \
     "Verify Resnik ability to process HAL/S includes native error-trapping constructs (ON ERROR block) on divide-by-zero error." \
     "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/jstar_telemetry/jstar_telemetry.hal --emit-exe
+
+run_regression_case "Linear Algebra Test" \
+    "Verify Resnik's ability to apply adjacency multiplication across complex data structures, rather than just scalars." \
+    "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/linear_algebra_test/linear_algebra_test.hal --emit-exe
 
 run_regression_case "NAV Filter" \
     "Verify Resnik's compatability of HAL/S unique indexing semantics for geometric types using advanced matrix partitioning and slicing." \
@@ -223,6 +235,10 @@ run_regression_case "ORBITAL KINEMATICS" \
 run_regression_case "Sat Mon" \
     "Verify Resnik's parsing with the REPLACE keyword before or during AST generation and Bit Slicing." \
     "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/sat_mon/sat_mon.hal --emit-exe
+
+run_regression_case "Scope Test" \
+    "Verify Resnik's Abstract Syntax Tree (AST) handles localized scopes. It defines a function with its own local variables before the main program logic begins." \
+    "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/scope_test/scope_test.hal --emit-exe
 
 run_regression_case "Shuttle State" \
     "Verify Resnik does not perform dyanmic memory allocation - all global data shared between different tasks and programs must be statically allocated in a COMPOOL." \
@@ -244,10 +260,6 @@ run_regression_case "Star Tracker" \
     "Verify Resnik's ability to to handle deeply nested data types—specifically, arrays where each element is a complex structure." \
     "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/star_tracker/star_tracker.hal --emit-exe
 
-run_regression_case "Tensor Math" \
-    "Verify Resnik's ability to distinguish between a PROCEDURE (which performs actions, cannot return a value directly, and is invoked via CALL) and a FUNCTION (which strictly returns a value and can be embedded directly within mathematical expressions)." \
-    "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/tensor_math/tensor_math.hal --emit-exe
-
 run_regression_case "Telemetry App" \
     "Verify Resnik parser's ability to process structure templates, instantiate structure variables, and handle multi-element assignments." \
     "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/telemetry_app/telemetry_app.hal --emit-exe
@@ -257,8 +269,24 @@ run_regression_case "Telemetry Formatter" \
     "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/telemetry_formatter/telemetry_formatter.hal --emit-exe
 
 run_regression_case "Tensor Init" \
-    "Verify Resnik's compliance to parse tests nested iteration and the memory stride calculations required for arrays containing complex intrinsic types." \
+    "Verify Resnik's ability to parse tests nested iteration and the memory stride calculations required for arrays containing complex intrinsic types." \
     "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/tensor_init/tensor_init.hal --emit-exe
+
+run_regression_case "Tensor Math" \
+    "Verify Resnik's ability to distinguish between a PROCEDURE (which performs actions, cannot return a value directly, and is invoked via CALL) and a FUNCTION (which strictly returns a value and can be embedded directly within mathematical expressions)." \
+    "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/tensor_math/tensor_math.hal --emit-exe
+
+run_regression_case "Tsiolkovsky Delta V Calc" \
+    "Verify Resnik's abiliy to parse combined arrays, loops, logarithms (LN), and conditional margin checks." \
+    "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/tsiolkovsky_deltav_calc/tsiolkovsky_deltav_calc.hal --emit-exe
+
+run_regression_case "Warp Drive Init" \
+    "Verify Resnik's ability to parse ability to handle matrix-vector multiplication, universal constants with scientific notation, array iteration, and compound logical branching." \
+    "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/warp_drive_init/warp_drive_init.hal --emit-exe
+
+run_regression_case "Yaw Rotate" \
+    "Verify Resnik's ability to parse 2D matrix element assignments and trigonometric built-in functions." \
+    "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/yaw_rotate/yaw_rotate.hal --emit-exe
 
 # ==============================================================================
 # 7. SUMMARY

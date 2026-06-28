@@ -1,0 +1,78 @@
+FIRST_CONTACT: PROGRAM;
+
+/* ****************************************************************
+   Extraterrestrial Threat Assessment & Greeting Protocol
+   
+   Features demonstrated:
+     - DO FOR loops for simulated sensor sweeps
+     - Vector distance calculations using ABVAL
+     - Adjacency multiplication for threat weighting
+     - Compound DO...END blocks for shield activation
+**************************************************************** */
+
+/* Ship Systems */
+DECLARE SHIELDS_ACTIVE BOOLEAN INITIAL(FALSE);
+DECLARE PHASER_CHARGE SCALAR INITIAL(0.0);
+DECLARE ENERGY_GRID_RATE SCALAR INITIAL(1.2);
+
+/* Sensor Data */
+DECLARE ALIEN_POS VECTOR(3) INITIAL(450.0, -120.0, 300.0);
+DECLARE MOTHERSHIP VECTOR(3) INITIAL(0.0, 0.0, 0.0);
+DECLARE TARGET_DISTANCE SCALAR;
+
+/* Biological/Sci-Fi Metrics */
+DECLARE BIO_SIGNATURES INTEGER INITIAL(42);
+DECLARE TENTACLE_COUNT INTEGER INITIAL(8);
+DECLARE THREAT_QUOTIENT SCALAR;
+DECLARE SWEEP INTEGER;
+
+/* Communications */
+DECLARE GREETING CHARACTER(40) INITIAL('BAH-WEEP-GRAHNAH WEEP NINI BONG');
+
+/* ----------------------------------------------------------------
+   Executable Code
+---------------------------------------------------------------- */
+WRITE(6) 'Initiating deep space sensor sweep...';
+
+/* Simulate the scanning process */
+DO FOR SWEEP = 1 TO 3;
+    WRITE(6) 'Sensor Ping ', SWEEP, '...';
+END;
+
+/* 
+   Calculate absolute distance to the anomaly.
+   ABVAL computes the magnitude of the vector difference.
+*/
+TARGET_DISTANCE = ABVAL(ALIEN_POS - MOTHERSHIP);
+WRITE(6) 'Unidentified vessel detected at distance: ', TARGET_DISTANCE;
+
+/* 
+   Calculate the threat level.
+   Tests adjacency multiplication combined with addition grouping: 
+   (BIO_SIGNATURES * 1.5) + (TENTACLE_COUNT * 2.5) 
+*/
+THREAT_QUOTIENT = (BIO_SIGNATURES 1.5) + (TENTACLE_COUNT 2.5);
+
+WRITE(6) 'Calculated Threat Quotient: ', THREAT_QUOTIENT;
+
+/* Branching logic based on the threat assessment */
+IF THREAT_QUOTIENT > 50.0 THEN
+    DO;
+        WRITE(6) 'WARNING: High tentacle-to-mass ratio detected!';
+        
+        SHIELDS_ACTIVE = TRUE;
+        
+        /* Route power to phasers: energy rate * threat quotient */
+        PHASER_CHARGE = ENERGY_GRID_RATE THREAT_QUOTIENT;
+        
+        WRITE(6) 'Shields raised. Phasers charged to: ', PHASER_CHARGE, ' MW';
+        WRITE(6) 'Awaiting captain''s orders.';
+    END;
+ELSE
+    DO;
+        WRITE(6) 'Vessel appears peaceful (or lacks manipulative appendages).';
+        WRITE(6) 'Broadcasting universal greeting:';
+        WRITE(6) GREETING;
+    END;
+
+CLOSE FIRST_CONTACT;

@@ -1,0 +1,47 @@
+TSIOLKOVSKY_DELTAV_CALC: PROGRAM;
+
+/* ****************************************************************
+   Test 3: Delta-V Budget Analyzer
+   Validates the LN (natural log) built-in function, array iteration,
+   and basic relational operators.
+**************************************************************** */
+
+DECLARE G0 CONSTANT (9.81);
+
+/* Apollo Service Module propulsion parameters */
+DECLARE ISP SCALAR INITIAL(314.0);           /* Specific impulse (s) */
+DECLARE MASS_INITIAL SCALAR INITIAL(24500.0); /* Wet mass (kg) */
+DECLARE MASS_FINAL SCALAR INITIAL(10500.0);   /* Dry mass (kg) */
+
+DECLARE DELTA_V_AVAIL SCALAR;
+DECLARE DELTA_V_REQ SCALAR INITIAL(0.0);
+
+/* Array of planned orbital maneuvers (m/s) */
+DECLARE MANEUVERS ARRAY(3) SCALAR INITIAL(850.0, 1150.0, 400.0);
+DECLARE I INTEGER;
+
+/* ----------------------------------------------------------------
+   Executable Code
+---------------------------------------------------------------- */
+/* 
+   Tsiolkovsky rocket equation: dV = Isp * g0 * ln(m0 / mf)
+   Tests adjacency multiplication combined with a function call.
+*/
+DELTA_V_AVAIL = ISP G0 LN(MASS_INITIAL / MASS_FINAL);
+
+/* Sum the required Delta-V from the maneuver array */
+DO FOR I = 1 TO 3;
+    DELTA_V_REQ = DELTA_V_REQ + MANEUVERS(I);
+END;
+
+WRITE(6) 'Total Available Delta-V: ', DELTA_V_AVAIL;
+WRITE(6) 'Total Required Delta-V: ', DELTA_V_REQ;
+
+/* Final fuel margin check */
+IF DELTA_V_AVAIL >= DELTA_V_REQ THEN
+    /* Nested expression within a WRITE statement */
+    WRITE(6) 'Mission Feasible. Margin: ', (DELTA_V_AVAIL - DELTA_V_REQ);
+ELSE
+    WRITE(6) 'Mission Impossible. Shortfall: ', (DELTA_V_REQ - DELTA_V_AVAIL);
+
+CLOSE TSIOLKOVSKY_DELTAV_CALC;

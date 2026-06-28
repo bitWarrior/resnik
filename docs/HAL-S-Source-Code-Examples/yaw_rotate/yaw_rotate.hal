@@ -1,0 +1,38 @@
+YAW_ROTATE: PROGRAM;
+
+/* ****************************************************************
+   Test 2: Coordinate Frame Rotation
+   Validates 2D indexing syntax, trigonometric built-ins (SIN, COS),
+   and matrix-vector multiplication.
+**************************************************************** */
+
+DECLARE PI CONSTANT(3.14159265);
+
+/* Yaw angle: 45 degrees expressed in radians */
+DECLARE THETA SCALAR INITIAL(0.785398); 
+
+/* A vector representing spacecraft thrust in the body frame */
+DECLARE THRUST_BODY VECTOR(3) INITIAL(1500.0, 0.0, 0.0);
+
+DECLARE THRUST_INERTIAL VECTOR(3);
+DECLARE ROT_Z MATRIX(3,3);
+
+/* ----------------------------------------------------------------
+   Executable Code
+---------------------------------------------------------------- */
+/* 
+   Populate a Z-axis rotation matrix (Yaw).
+   This strictly tests the parser's ability to map MAT(ROW, COL)
+   syntax to specific memory offsets in a 2D structure.
+*/
+ROT_Z(1,1) = COS(THETA);  ROT_Z(1,2) = -SIN(THETA); ROT_Z(1,3) = 0.0;
+ROT_Z(2,1) = SIN(THETA);  ROT_Z(2,2) = COS(THETA);  ROT_Z(2,3) = 0.0;
+ROT_Z(3,1) = 0.0;         ROT_Z(3,2) = 0.0;         ROT_Z(3,3) = 1.0;
+
+/* Matrix-vector multiplication via adjacency */
+THRUST_INERTIAL = ROT_Z THRUST_BODY;
+
+WRITE(6) 'Body Frame Thrust: ', THRUST_BODY;
+WRITE(6) 'Inertial Frame Thrust: ', THRUST_INERTIAL;
+
+CLOSE YAW_ROTATE;

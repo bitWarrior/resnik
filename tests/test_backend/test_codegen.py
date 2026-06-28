@@ -1900,3 +1900,136 @@ class TestAdjacencyMultiply:
             "T: PROGRAM; DECLARE X SCALAR; WRITE(6) X; CLOSE T;")
         assert not errs
         assert "* x" not in code
+
+
+class TestMathIntrinsics:
+    """HAL/S scalar math built-ins lower to Rust f32 methods."""
+
+    def _run(self, src: str):
+        from resnik import Lexer, Parser
+        p = Parser()
+        ast = p.parse(Lexer().tokenize(src, "t"))
+        code = RustCodeGenerator().generate(ast) if not p.errors else ""
+        return p.errors, code
+
+    def test_sqrt_is_method(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE X SCALAR; DECLARE Y SCALAR; "
+            "Y = SQRT(X); CLOSE T;")
+        assert not errs
+        assert "(x).sqrt()" in code
+
+    def test_sqrt_of_expression(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE A SCALAR; DECLARE B SCALAR; DECLARE Y SCALAR; "
+            "Y = SQRT(2.0 A B); CLOSE T;")
+        assert not errs
+        assert "(2.0 * a * b).sqrt()" in code
+
+    def test_trig_methods(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE X SCALAR; DECLARE Y SCALAR; "
+            "Y = SIN(X); Y = COS(X); Y = ARCTAN(X); CLOSE T;")
+        assert not errs
+        assert "(x).sin()" in code and "(x).cos()" in code \
+            and "(x).atan()" in code
+
+    def test_arctan2_two_args(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE A SCALAR; DECLARE B SCALAR; DECLARE Y SCALAR; "
+            "Y = ARCTAN2(A, B); CLOSE T;")
+        assert not errs
+        assert "(a).atan2(b)" in code
+
+    def test_sqrt_casts_integer_arg(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE N INTEGER; DECLARE Y SCALAR; "
+            "Y = SQRT(N); CLOSE T;")
+        assert not errs
+        assert "(n) as f32).sqrt()" in code
+
+
+class TestParenElementAssignment:
+    """Matrix/vector element assignment via paren-subscript lvalue:
+    MAT(r,c) = expr; and VEC(i) = expr;"""
+
+    def _run(self, src: str):
+        from resnik import Lexer, Parser
+        p = Parser()
+        ast = p.parse(Lexer().tokenize(src, "t"))
+        code = RustCodeGenerator().generate(ast) if not p.errors else ""
+        return p.errors, code
+
+    def test_matrix_element_lvalue(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE M MATRIX(3,3); "
+            "M(1,1) = 1.0; M(2,3) = 4.0; CLOSE T;")
+        assert not errs
+        assert "m.0[0][0] = 1.0;" in code
+        assert "m.0[1][2] = 4.0;" in code
+
+    def test_vector_element_lvalue(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE V VECTOR(3); V(2) = 9.0; CLOSE T;")
+        assert not errs
+        assert "v.0[1] = 9.0;" in code
+
+    def test_matrix_element_rvalue_still_reads(self) -> None:
+        # The MAT(r,c) read path must still work alongside the lvalue form.
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE M MATRIX(3,3); DECLARE X SCALAR; "
+            "M(1,1) = 2.0; X = M(1,1); CLOSE T;")
+        assert not errs
+        assert "x = m.0[(1) as usize - 1][(1) as usize - 1]" in code
+
+    def test_equality_expression_unaffected(self) -> None:
+        # `=` as equality inside IF must not be captured by the lvalue rule.
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE A INTEGER; DECLARE B INTEGER; "
+            "IF A = B THEN WRITE(6) 'eq'; CLOSE T;")
+        assert not errs
+        assert "if a == b" in code
+
+
+class TestArrayDeclAndAccess:
+    """ARRAY(n) type (no OF), INITIAL values, and paren element access."""
+
+    def _run(self, src: str):
+        from resnik import Lexer, Parser
+        p = Parser()
+        ast = p.parse(Lexer().tokenize(src, "t"))
+        code = RustCodeGenerator().generate(ast) if not p.errors else ""
+        return p.errors, code
+
+    def test_array_without_of_keyword(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE A ARRAY(3) SCALAR; CLOSE T;")
+        assert not errs
+        assert "let mut a: [f32; 3]" in code
+
+    def test_array_with_of_keyword_still_works(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE A ARRAY(3) OF SCALAR; CLOSE T;")
+        assert not errs
+        assert "let mut a: [f32; 3]" in code
+
+    def test_array_initial_values(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE A ARRAY(3) SCALAR INITIAL(1.0, 2.0, 3.0); "
+            "CLOSE T;")
+        assert not errs
+        assert "[1.0, 2.0, 3.0]" in code
+
+    def test_array_element_paren_access(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE A ARRAY(3) SCALAR; DECLARE X SCALAR; "
+            "DECLARE I INTEGER; X = A(I); CLOSE T;")
+        assert not errs
+        assert "a[(i) as usize - 1]" in code
+
+    def test_ln_is_natural_log_method(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE X SCALAR; DECLARE Y SCALAR; "
+            "Y = LN(X); CLOSE T;")
+        assert not errs
+        assert "(x).ln()" in code

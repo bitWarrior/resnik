@@ -1,0 +1,74 @@
+WARP_DRIVE_INIT: PROGRAM;
+
+/* ****************************************************************
+   Starfleet Joint Experimental Warp Controller
+   
+   Features demonstrated:
+     - Boolean logic and compound DO...END blocks
+     - Matrix-Vector multiplication (Spacetime folding)
+     - Adjacency multiplication with multiple operands
+     - DO FOR loops iterating through an array
+**************************************************************** */
+
+/* Universal Constants */
+DECLARE C CONSTANT (299792.458);          /* Speed of light (km/s) */
+DECLARE PARSEC CONSTANT (3.086E13);       /* Kilometers in a parsec */
+
+/* Drive Status and Power */
+DECLARE CONTAINMENT_STABLE BOOLEAN INITIAL(TRUE);
+DECLARE WARP_FACTOR SCALAR INITIAL(9.5);
+DECLARE SPOOL_SEQ ARRAY(4) INTEGER INITIAL(25, 50, 75, 100);
+DECLARE SEQ_INDEX INTEGER;
+DECLARE ENERGY_REQ SCALAR;
+
+/* Navigation Vectors (x, y, z in parsecs) */
+DECLARE CURRENT_POS VECTOR(3) INITIAL(0.0, 0.0, 0.0);       /* Sol System */
+DECLARE TARGET_POS VECTOR(3) INITIAL(4.37, -1.25, 0.88);    /* Alpha Centauri */
+DECLARE TRAJECTORY VECTOR(3);
+DECLARE DISTANCE_PC SCALAR;
+
+/* Spacetime Fold Tensor (Matrix) 
+   Z-axis is heavily compressed for forward travel */
+DECLARE FOLD_TENSOR MATRIX(3,3) INITIAL(
+    10.0,  0.0,  0.0,
+     0.0, 10.0,  0.0,
+     0.0,  0.0, 50.0); 
+
+/* ----------------------------------------------------------------
+   Executable Code starts here
+---------------------------------------------------------------- */
+WRITE(6) 'Drive Initialization Sequence...';
+
+IF CONTAINMENT_STABLE = FALSE THEN
+    WRITE(6) 'ABORT: Antimatter containment field is unstable!';
+ELSE
+    DO;
+        /* Calculate standard Euclidean distance in parsecs */
+        TRAJECTORY = TARGET_POS - CURRENT_POS;
+        DISTANCE_PC = ABVAL(TRAJECTORY);
+        WRITE(6) 'Target locked. Real-space distance (pc): ', DISTANCE_PC;
+
+        /* Spool up the warp coils using array indexing */
+        DO FOR SEQ_INDEX = 1 TO 4;
+            WRITE(6) 'Warp coil power at ', SPOOL_SEQ(SEQ_INDEX), ' percent...';
+        END;
+
+        /* 
+           Apply the fold tensor to the trajectory.
+           Tests parser for Matrix multiplied by Vector adjacency.
+        */
+        TRAJECTORY = FOLD_TENSOR TRAJECTORY;
+        WRITE(6) 'Spacetime folded. Apparent trajectory vector: ', TRAJECTORY;
+
+        /* 
+           Calculate energy requirement.
+           Tests multiple adjacency multiplications in one expression: 
+           (Warp Factor) * (Distance) * 1.21
+        */
+        ENERGY_REQ = WARP_FACTOR DISTANCE_PC 1.21;
+        
+        WRITE(6) 'Required energy (Jigowatts): ', ENERGY_REQ;
+        WRITE(6) 'Engaging Warp ', WARP_FACTOR, '. Punch it!';
+    END;
+
+CLOSE WARP_DRIVE_INIT;

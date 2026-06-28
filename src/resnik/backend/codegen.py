@@ -414,6 +414,17 @@ use hal_rt::*;
     # the prelude). User-defined functions and inline casts are NOT here.
     _PRELUDE_INTRINSICS = {"ABVAL", "CROSS", "DOT"}
 
+    # HAL/S scalar math built-ins that lower to Rust f32 methods (no prelude
+    # needed -- they're inherent on f32). Single-argument: SQRT(x) -> (x).sqrt().
+    _MATH_METHODS = {
+        "SQRT": "sqrt", "SIN": "sin", "COS": "cos", "TAN": "tan",
+        "ARCSIN": "asin", "ARCCOS": "acos", "ARCTAN": "atan",
+        "SINH": "sinh", "COSH": "cosh", "TANH": "tanh",
+        "EXP": "exp", "LOG": "ln", "LN": "ln", "ABS": "abs",
+        "FLOOR": "floor", "CEILING": "ceil", "ROUND": "round",
+        "TRUNCATE": "trunc",
+    }
+
     def _uses_runtime(self, node: ASTNode) -> bool:
         """True if any node in the tree needs the hal_rt prelude."""
         for n in self._walk(node):
@@ -752,10 +763,20 @@ use hal_rt::*;
             else:
                 et = self.type_mapper.map_type(ets)
                 ei = self.type_mapper.get_default_value(ets)
-            rust_t, rust_i = et, ei
+            rust_t = et
             for d in reversed(node.type_spec.array_dims):
                 rust_t = f"[{rust_t}; {d}]"
-                rust_i = f"[{rust_i}; {d}]"
+            # INITIAL(v0, v1, ...) -> literal array (1-D, row-major).
+            init_vals = (node.attributes or {}).get("initial")
+            dims = node.type_spec.array_dims
+            if init_vals is not None and len(dims) == 1:
+                elems = ", ".join(
+                    self._generate_expression(v) for v in init_vals)
+                rust_i = f"[{elems}]"
+            else:
+                rust_i = ei
+                for d in reversed(dims):
+                    rust_i = f"[{rust_i}; {d}]"
             for identifier in node.identifiers:
                 self.emitter.emit_variable_declaration(
                     identifier.lower(), rust_t, rust_i, True
@@ -1370,7 +1391,8 @@ use hal_rt::*;
             return "unknown"
         if isinstance(node, FunctionCallNode):
             nm = node.name.upper()
-            if nm in ("ABVAL", "DOT", "SCALAR"):
+            if nm in ("ABVAL", "DOT", "SCALAR") or nm in self._MATH_METHODS \
+                    or nm == "ARCTAN2":
                 return "float"
             if nm == "INTEGER":
                 return "int"
@@ -1410,6 +1432,14 @@ use hal_rt::*;
         # N-D subscript X$(i, j[, ...]): nested 1-indexed array access.
         if isinstance(node.index, IndexListNode):
             out = operand
+            # MATRIX/VECTOR are tuple structs -> index through .0; a multi-dim
+            # ARRAY is a plain nested array and needs no .0.
+            ts0 = None
+            if isinstance(node.operand, IdentifierNode):
+                ts0 = self._var_info.get(node.operand.name.lower())
+            if (ts0 is not None and ts0.array_size is None
+                    and ts0.data_type in (DataType.MATRIX, DataType.VECTOR)):
+                out += ".0"
             for ix in node.index.indices:
                 if isinstance(ix, LiteralNode) and isinstance(ix.value, int):
                     out += f"[{ix.value - 1}]"
@@ -1655,10 +1685,34 @@ use hal_rt::*;
         if node.name.upper() == "SCALAR" and len(node.arguments) == 1:
             arg = self._generate_expression(node.arguments[0])
             return f"(({arg}) as f32)"
+        # Scalar math built-ins -> f32 methods, e.g. SQRT(x) -> (x).sqrt().
+        # Cast an integer argument to f32 since these methods are f32-only.
+        method = self._MATH_METHODS.get(node.name.upper())
+        if method is not None and len(node.arguments) == 1:
+            arg = self._generate_expression(node.arguments[0])
+            if self._numeric_kind(node.arguments[0]) == "int":
+                arg = f"({arg}) as f32"
+            return f"({arg}).{method}()"
+        # ARCTAN2(y, x) -> (y).atan2(x).
+        if node.name.upper() == "ARCTAN2" and len(node.arguments) == 2:
+            y = self._generate_expression(node.arguments[0])
+            x = self._generate_expression(node.arguments[1])
+            return f"({y}).atan2({x})"
         # If the name is a declared MATRIX/VECTOR, parenthesized indices are
         # element access (1-indexed), not a function call.
         ts = self._var_info.get(node.name.lower())
         if ts is not None:
+            # Plain ARRAY element access: A(i) -> a[(i) as usize - 1],
+            # A(i,j) -> a[..][..]. 1-indexed HAL/S -> 0-indexed Rust.
+            if ts.array_size is not None and len(node.arguments) >= 1:
+                out = node.name.lower()
+                for a in node.arguments:
+                    ci = self._const_int(a)
+                    if ci is not None:
+                        out += f"[{ci - 1}]"
+                    else:
+                        out += f"[({self._generate_expression(a)}) as usize - 1]"
+                return out
             if ts.data_type == DataType.MATRIX and len(node.arguments) == 2:
                 r = self._generate_expression(node.arguments[0])
                 c = self._generate_expression(node.arguments[1])
