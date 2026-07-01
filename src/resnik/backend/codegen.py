@@ -10,6 +10,8 @@ from typing import Optional, List
 from pathlib import Path
 
 from resnik.parser.ast_nodes import (
+    GotoNode,
+    LabelNode,
     ASTNode,
     ProgramNode,
     TaskNode,
@@ -170,7 +172,17 @@ class RustCodeGenerator:
         # vectors/matrices, function calls, or real-time statements.
         if self._uses_runtime(ast):
             self._emit_prelude()
-        
+
+        # COMPOOL shared data lowers to module-level statics so every generated
+        # function (program + scheduled tasks) can reach it. Emit each COMPOOL
+        # up front wherever it appears -- a top-level unit OR nested inside a
+        # PROGRAM -- and record it so it is not re-emitted inside a function.
+        self._emitted_compools: set = set()
+        for node in self._walk(ast):
+            if isinstance(node, CompoolNode):
+                self._generate_compool(node)
+                self._emitted_compools.add(id(node))
+
         # Generate code from AST
         self._generate_node(ast)
         
@@ -202,7 +214,7 @@ class RustCodeGenerator:
     pub struct Vector<const N: usize>(pub [f32; N]);
 
     impl<const N: usize> Vector<N> {
-        pub fn zero() -> Self { Vector([0.0; N]) }
+        pub const fn zero() -> Self { Vector([0.0; N]) }
     }
 
     impl<const N: usize> Add for Vector<N> {
@@ -274,7 +286,7 @@ class RustCodeGenerator:
     pub struct Matrix<const R: usize, const C: usize>(pub [[f32; C]; R]);
 
     impl<const R: usize, const C: usize> Matrix<R, C> {
-        pub fn zero() -> Self { Matrix([[0.0; C]; R]) }
+        pub const fn zero() -> Self { Matrix([[0.0; C]; R]) }
         /// 1-indexed row i as a Vector<C>.
         pub fn row(&self, i: usize) -> Vector<C> { Vector(self.0[i - 1]) }
         /// 1-indexed column j as a Vector<R>.
@@ -296,6 +308,21 @@ class RustCodeGenerator:
                 out[r] = acc;
             }
             Vector(out)
+        }
+    }
+
+    impl<const R: usize, const C: usize, const K: usize> Mul<Matrix<C, K>> for Matrix<R, C> {
+        type Output = Matrix<R, K>;
+        fn mul(self, rhs: Matrix<C, K>) -> Matrix<R, K> {
+            let mut out = [[0.0f32; K]; R];
+            for i in 0..R {
+                for j in 0..K {
+                    let mut acc = 0.0f32;
+                    for k in 0..C { acc += self.0[i][k] * rhs.0[k][j]; }
+                    out[i][j] = acc;
+                }
+            }
+            Matrix(out)
         }
     }
 
@@ -342,6 +369,56 @@ class RustCodeGenerator:
         let mut acc = 0.0f32;
         for i in 0..N { acc += a.0[i] * b.0[i]; }
         acc
+    }
+
+    pub fn transpose<const R: usize, const C: usize>(m: Matrix<R, C>) -> Matrix<C, R> {
+        let mut out = [[0.0f32; R]; C];
+        for i in 0..R { for j in 0..C { out[j][i] = m.0[i][j]; } }
+        Matrix(out)
+    }
+
+    // Square-matrix determinant via Gaussian elimination with partial pivoting.
+    pub fn determ<const N: usize>(m: Matrix<N, N>) -> f32 {
+        let mut a = m.0;
+        let mut det = 1.0f32;
+        for i in 0..N {
+            let mut piv = i;
+            for r in (i + 1)..N { if a[r][i].abs() > a[piv][i].abs() { piv = r; } }
+            if a[piv][i] == 0.0 { return 0.0; }
+            if piv != i { a.swap(i, piv); det = -det; }
+            det *= a[i][i];
+            for r in (i + 1)..N {
+                let f = a[r][i] / a[i][i];
+                for c in i..N { a[r][c] -= f * a[i][c]; }
+            }
+        }
+        det
+    }
+
+    // Square-matrix inverse via Gauss-Jordan elimination. A singular matrix
+    // yields a partial result (the caller is expected to gate on determ != 0).
+    pub fn inverse<const N: usize>(m: Matrix<N, N>) -> Matrix<N, N> {
+        let mut a = m.0;
+        let mut inv = [[0.0f32; N]; N];
+        for i in 0..N { inv[i][i] = 1.0; }
+        for i in 0..N {
+            let mut piv = i;
+            for r in (i + 1)..N { if a[r][i].abs() > a[piv][i].abs() { piv = r; } }
+            if a[piv][i] == 0.0 { return Matrix(inv); }
+            if piv != i { a.swap(i, piv); inv.swap(i, piv); }
+            let d = a[i][i];
+            for c in 0..N { a[i][c] /= d; inv[i][c] /= d; }
+            for r in 0..N {
+                if r != i {
+                    let f = a[r][i];
+                    for c in 0..N {
+                        a[r][c] -= f * a[i][c];
+                        inv[r][c] -= f * inv[i][c];
+                    }
+                }
+            }
+        }
+        Matrix(inv)
     }
 
     pub fn schedule(task: &str, priority: i32, body: fn()) -> std::thread::JoinHandle<()> {
@@ -412,7 +489,8 @@ use hal_rt::*;
 
     # Intrinsics that lower to hal_rt prelude functions (so their use requires
     # the prelude). User-defined functions and inline casts are NOT here.
-    _PRELUDE_INTRINSICS = {"ABVAL", "CROSS", "DOT"}
+    _PRELUDE_INTRINSICS = {"ABVAL", "CROSS", "DOT",
+                           "DETERM", "INVERSE", "TRANSPOSE"}
 
     # HAL/S scalar math built-ins that lower to Rust f32 methods (no prelude
     # needed -- they're inherent on f32). Single-argument: SQRT(x) -> (x).sqrt().
@@ -483,6 +561,7 @@ use hal_rt::*;
         self.emitter.emit_line("#![allow(unused_mut)]")
         self.emitter.emit_line("#![allow(unused_assignments)]")
         self.emitter.emit_line("#![allow(unused_parens)]")
+        self.emitter.emit_line("#![allow(unreachable_code)]")
         self.emitter.emit_line("#![allow(dead_code)]")
         self.emitter.emit_line()
     
@@ -496,7 +575,8 @@ use hal_rt::*;
         if isinstance(node, CompilationNode):
             self._generate_compilation(node)
         elif isinstance(node, CompoolNode):
-            self._generate_compool(node)
+            if id(node) not in getattr(self, "_emitted_compools", set()):
+                self._generate_compool(node)
         elif isinstance(node, ProgramNode):
             self._generate_program(node)
         elif isinstance(node, TaskNode):
@@ -536,6 +616,13 @@ use hal_rt::*;
                 self.emitter.emit_line("return;")
         elif isinstance(node, ForNode):
             self._generate_for(node)
+        elif isinstance(node, GotoNode):
+            self._generate_goto(node)
+        elif isinstance(node, LabelNode):
+            # A label reached in normal (non-dispatch) flow: emit its inner
+            # statement. In a labelled body, _generate_dispatch handles these.
+            if node.statement is not None:
+                self._generate_node(node.statement)
         elif isinstance(node, CallNode):
             self._generate_call(node)
         elif isinstance(node, ScheduleNode):
@@ -572,6 +659,38 @@ use hal_rt::*;
             f"HAL/S Compool (shared global memory): {node.name}"
         )
         for decl in node.declarations:
+            ts = decl.type_spec
+            # ARRAY-typed shared data -> Mutex<[T; n]> (nested for multi-dim).
+            if (ts is not None and ts.array_dims is not None
+                    and ts.element_type is not None):
+                ets = ts.element_type
+                if ets.data_type == DataType.STRUCTURE:
+                    et = self._struct_name(ets.type_name or "")
+                    edef = f"{et}::new()"
+                else:
+                    et = self.type_mapper.map_type(ets)
+                    edef = self.type_mapper.get_default_value(ets)
+                rust_type = et
+                for d in reversed(ts.array_dims):
+                    rust_type = f"[{rust_type}; {d}]"
+                init_vals = (decl.attributes or {}).get("initial")
+                if init_vals is not None and len(ts.array_dims) == 1:
+                    init = "[" + ", ".join(
+                        self._generate_expression(v) for v in init_vals) + "]"
+                else:
+                    init = edef
+                    for d in reversed(ts.array_dims):
+                        init = f"[{init}; {d}]"
+                for ident in decl.identifiers:
+                    name = ident.upper()
+                    if decl.is_constant:
+                        self.emitter.emit_line(
+                            f"const {name}: {rust_type} = {init};")
+                    else:
+                        self.emitter.emit_line(
+                            f"static {name}: std::sync::Mutex<{rust_type}> = "
+                            f"std::sync::Mutex::new({init});")
+                continue
             rust_type = self.type_mapper.map_type(decl.type_spec)
             if decl.initial_value is not None:
                 init = self._generate_expression(decl.initial_value)
@@ -679,13 +798,96 @@ use hal_rt::*;
         if declarations:
             self.emitter.emit_line()
 
-        for stmt in statements:
-            self._generate_node(stmt)
+        # A body containing statement labels / GO TO lowers to a dispatch loop
+        # (state machine): Rust has no goto, but `continue 'dispatch` from inside
+        # nested loops reproduces a branch out to any label.
+        if self._has_labels(statements):
+            # Hoist declarations to function scope so every segment can see
+            # them (HAL/S requires declarations first, so they lead the body).
+            hoisted = [s for s in statements if isinstance(s, DeclareNode)]
+            rest = [s for s in statements if not isinstance(s, DeclareNode)]
+            for d in hoisted:
+                self._generate_node(d)
+            if hoisted:
+                self.emitter.emit_line()
+            self._generate_dispatch(rest)
+        else:
+            for stmt in statements:
+                self._generate_node(stmt)
 
         if threaded:
             self.emitter.emit_line()
             self.emitter.emit_comment("join scheduled tasks before exit")
             self.emitter.emit_line("for __h in __tasks { let _ = __h.join(); }")
+
+    @staticmethod
+    def _has_labels(statements: list) -> bool:
+        return any(isinstance(s, (LabelNode, GotoNode)) for s in statements)
+
+    def _split_segments(self, statements: list):
+        """Split a statement list into (label, [stmts]) segments at each label.
+        Segment 0 (label None) holds everything before the first label."""
+        segments = [(None, [])]
+        for stmt in statements:
+            if isinstance(stmt, LabelNode):
+                inner = stmt.statement
+                seg = [inner] if inner is not None else []
+                # Unwrap a directly-nested label (A: B: stmt).
+                while seg and isinstance(seg[0], LabelNode):
+                    ln = seg[0]
+                    segments.append((stmt.name, []))
+                    stmt = ln
+                    seg = [ln.statement] if ln.statement is not None else []
+                segments.append((stmt.name, seg))
+            else:
+                segments[-1][1].append(stmt)
+        return segments
+
+    def _generate_dispatch(self, statements: list) -> None:
+        """Emit a labelled body as `'dispatch: loop { match __pc { ... } }`."""
+        segments = self._split_segments(statements)
+        # Map each label to its segment (state) index.
+        self._label_states = {
+            name: i for i, (name, _) in enumerate(segments) if name is not None
+        }
+        last = len(segments) - 1
+        self.emitter.emit_line("let mut __pc: usize = 0;")
+        self.emitter.emit_line("'dispatch: loop {")
+        self.emitter.indent()
+        self.emitter.emit_line("match __pc {")
+        self.emitter.indent()
+        for i, (name, stmts) in enumerate(segments):
+            label_note = f"  // {name}" if name else ""
+            self.emitter.emit_line(f"{i} => {{{label_note}")
+            self.emitter.indent()
+            for stmt in stmts:
+                self._generate_node(stmt)
+            # Fall-through: skip if the segment ends in an unconditional GO TO
+            # (its `continue 'dispatch` already transferred control).
+            ends_in_goto = bool(stmts) and isinstance(stmts[-1], GotoNode)
+            if not ends_in_goto:
+                if i < last:
+                    self.emitter.emit_line(f"__pc = {i + 1};")
+                else:
+                    self.emitter.emit_line("break 'dispatch;")
+            self.emitter.dedent()
+            self.emitter.emit_line("}")
+        self.emitter.emit_line("_ => break 'dispatch,")
+        self.emitter.dedent()
+        self.emitter.emit_line("}")
+        self.emitter.dedent()
+        self.emitter.emit_line("}")
+        self._label_states = {}
+
+    def _generate_goto(self, node: GotoNode) -> None:
+        """GO TO <label> -> set the dispatch state and branch out via the
+        labelled loop, which unwinds any enclosing loops on the way."""
+        state = getattr(self, "_label_states", {}).get(node.label)
+        if state is None:
+            self.emitter.emit_comment(
+                f"GO TO {node.label} (unresolved label -- no matching target)")
+            return
+        self.emitter.emit_line(f"{{ __pc = {state}; continue 'dispatch; }}")
 
     def _generate_task(self, node: TaskNode) -> None:
         """
@@ -1301,6 +1503,42 @@ use hal_rt::*;
         # Convert HAL/S UPPER_CASE to Rust snake_case
         return node.name.lower()
     
+    def _shift_direction(self, node):
+        """Classify a SHIFT count's compile-time sign.
+        Returns ('right', mag) / ('left', mag) / (None, None) for runtime."""
+        if isinstance(node, UnaryOpNode) and node.operator == "-":
+            return ("right", self._generate_expression(node.operand))
+        if isinstance(node, LiteralNode) and isinstance(node.value, int) \
+                and not isinstance(node.value, bool):
+            if node.value < 0:
+                return ("right", str(-node.value))
+            return ("left", str(node.value))
+        return (None, None)
+
+    def _is_boolean_expr(self, node) -> bool:
+        """True if an expression is BOOLEAN-typed (so AND/OR are logical, not
+        bitwise). Best-effort, mirroring _numeric_kind."""
+        if isinstance(node, LiteralNode):
+            lt = (node.literal_type or "").upper()
+            if lt == "BOOLEAN":
+                return True
+            return isinstance(node.value, bool)
+        if isinstance(node, IdentifierNode):
+            ts = self._var_info.get(node.name.lower())
+            return ts is not None and ts.data_type == DataType.BOOLEAN
+        if isinstance(node, UnaryOpNode):
+            if node.operator in ("NOT", "¬", "~"):
+                return True
+            return self._is_boolean_expr(node.operand)
+        if isinstance(node, BinaryOpNode):
+            o = node.operator
+            if o in ("=", "==", "¬=", "~=", "<", ">", "<=", ">="):
+                return True  # comparisons yield bool
+            if o in ("AND", "OR"):
+                return (self._is_boolean_expr(node.left)
+                        and self._is_boolean_expr(node.right))
+        return False
+
     def _generate_binary_op(self, node: BinaryOpNode) -> str:
         """
         Generate Rust binary operation with minimal, correct parentheses.
@@ -1325,6 +1563,14 @@ use hal_rt::*;
             "AND": "&", "OR": "|", "XOR": "^",
         }
         rust_op = op_map.get(op, op)
+
+        # AND/OR are logical on BOOLEAN operands (&&/||) and bitwise on BIT/
+        # INTEGER operands (&/|). Default (above) is bitwise; upgrade to logical
+        # only when both sides are boolean.
+        if op in ("AND", "OR"):
+            if (self._is_boolean_expr(node.left)
+                    and self._is_boolean_expr(node.right)):
+                rust_op = "&&" if op == "AND" else "||"
 
         # Power has no Rust infix operator. f32 uses .powi(i32); integer
         # bases use .pow(u32). Default to the float form (common in HAL/S math).
@@ -1391,7 +1637,7 @@ use hal_rt::*;
             return "unknown"
         if isinstance(node, FunctionCallNode):
             nm = node.name.upper()
-            if nm in ("ABVAL", "DOT", "SCALAR") or nm in self._MATH_METHODS \
+            if nm in ("ABVAL", "DOT", "SCALAR", "DETERM") or nm in self._MATH_METHODS \
                     or nm == "ARCTAN2":
                 return "float"
             if nm == "INTEGER":
@@ -1698,14 +1944,29 @@ use hal_rt::*;
             y = self._generate_expression(node.arguments[0])
             x = self._generate_expression(node.arguments[1])
             return f"({y}).atan2({x})"
+        # SHIFT(val, n): HAL/S signed shift -- n < 0 shifts right, n > 0 left.
+        # A compile-time-known sign lowers to a direct >> / <<; a runtime count
+        # branches at runtime.
+        if node.name.upper() == "SHIFT" and len(node.arguments) == 2:
+            val = self._generate_expression(node.arguments[0])
+            direction, mag = self._shift_direction(node.arguments[1])
+            if direction == "right":
+                return f"({val} >> {mag})"
+            if direction == "left":
+                return f"({val} << {mag})"
+            n = self._generate_expression(node.arguments[1])
+            return (f"{{ let __n = ({n}) as i32; "
+                    f"if __n >= 0 {{ {val} << __n }} "
+                    f"else {{ {val} >> (-__n) }} }}")
         # If the name is a declared MATRIX/VECTOR, parenthesized indices are
         # element access (1-indexed), not a function call.
         ts = self._var_info.get(node.name.lower())
         if ts is not None:
+            base = self._var_base(node.name)
             # Plain ARRAY element access: A(i) -> a[(i) as usize - 1],
             # A(i,j) -> a[..][..]. 1-indexed HAL/S -> 0-indexed Rust.
             if ts.array_size is not None and len(node.arguments) >= 1:
-                out = node.name.lower()
+                out = base
                 for a in node.arguments:
                     ci = self._const_int(a)
                     if ci is not None:
@@ -1716,13 +1977,25 @@ use hal_rt::*;
             if ts.data_type == DataType.MATRIX and len(node.arguments) == 2:
                 r = self._generate_expression(node.arguments[0])
                 c = self._generate_expression(node.arguments[1])
-                return (f"{node.name.lower()}.0[({r}) as usize - 1]"
+                return (f"{base}.0[({r}) as usize - 1]"
                         f"[({c}) as usize - 1]")
             if ts.data_type == DataType.VECTOR and len(node.arguments) == 1:
                 i = self._generate_expression(node.arguments[0])
-                return f"{node.name.lower()}.0[({i}) as usize - 1]"
+                return f"{base}.0[({i}) as usize - 1]"
         args = ", ".join(self._generate_expression(a) for a in node.arguments)
         return f"{node.name.lower()}({args})"
+
+    def _var_base(self, name: str) -> str:
+        """Base accessor for a variable used as a subscript/element operand:
+        a locked deref for mutable COMPOOL globals, the bare name for global
+        constants, an ASSIGN-param deref, else snake_case."""
+        up = name.upper()
+        if up in self._globals:
+            kind, _ = self._globals[up]
+            return up if kind == "const" else f"(*{up}.lock().unwrap())"
+        if name.lower() in getattr(self, "_assign_params", set()):
+            return f"(*{name.lower()})"
+        return name.lower()
 
     def _generate_if(self, node: IfNode) -> None:
         """Generate an IF / THEN / ELSE statement."""
@@ -1815,6 +2088,13 @@ use hal_rt::*;
             if node.priority is not None
             else "0"
         )
+        if node.period is not None:
+            # Cyclic-at-priority: host build runs one representative cycle.
+            self.emitter.emit_comment(
+                f"SCHEDULE {node.task_name} PRIORITY({priority}) REPEAT EVERY "
+                f"{self._generate_expression(node.period)} "
+                "(period advisory on host; runs one cycle)"
+            )
         if task_fn in self._task_names:
             self.emitter.emit_line(
                 f'__tasks.push(schedule("{node.task_name}", {priority}, {task_fn}));'

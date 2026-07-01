@@ -12,6 +12,8 @@ from rply import ParserGenerator
 from resnik.exceptions import ParserError, SemanticError
 from resnik.lexer import Lexer, Token
 from resnik.parser.ast_nodes import (
+    GotoNode,
+    LabelNode,
     ASTNode,
     ProgramNode,
     TaskNode,
@@ -100,6 +102,7 @@ class Parser:
                 "KEYWORD_CASE",
                 "KEYWORD_FOR",
                 "KEYWORD_TO",
+                "KEYWORD_GO",
                 "KEYWORD_BY",
                 "KEYWORD_INITIAL",
                 "KEYWORD_WRITE",
@@ -138,6 +141,8 @@ class Parser:
                 "DIVIDE",
                 "POWER",
                 "CONCAT",
+                "VBAR",
+                "AMPERSAND",
                 "LT",
                 "GT",
                 "LE",
@@ -158,9 +163,9 @@ class Parser:
                 ("nonassoc", ["KEYWORD_THEN"]),
                 ("nonassoc", ["KEYWORD_ELSE"]),
                 # Logical / bitwise operators (lowest): OR < XOR < AND
-                ("left", ["KEYWORD_OR"]),
+                ("left", ["KEYWORD_OR", "VBAR"]),
                 ("left", ["KEYWORD_XOR"]),
-                ("left", ["KEYWORD_AND"]),
+                ("left", ["KEYWORD_AND", "AMPERSAND"]),
                 # `=` as equality in expressions
                 ("left", ["ASSIGN"]),
                 ("left", ["LT", "GT", "LE", "GE", "NE"]),
@@ -181,12 +186,18 @@ class Parser:
         self.parser = self.pg.build()
 
     def _find_nested_declares(self, node: ASTNode, out: list) -> None:
-        """Collect DeclareNodes anywhere inside a node's child statements."""
+        """Collect DeclareNodes inside a node's nested executable blocks
+        (DO/IF/FOR). Scope-defining blocks (TASK/PROCEDURE/COMPOOL/PROGRAM)
+        own their declaration regions and are order-checked separately, so we
+        do not descend into them here."""
+        scope_blocks = (ProgramNode, TaskNode, ProcedureNode, CompoolNode)
         for value in vars(node).values():
             children = (value if isinstance(value, list)
                         else [value] if isinstance(value, ASTNode) else [])
             for child in children:
                 if not isinstance(child, ASTNode):
+                    continue
+                if isinstance(child, scope_blocks):
                     continue
                 if isinstance(child, DeclareNode):
                     out.append(child)
@@ -197,8 +208,14 @@ class Parser:
         statement in a block, and forbids declarations inside nested
         executable blocks (DO/IF/FOR). Flag both."""
         declarative = (DeclareNode, StructureDefNode)
+        scope_blocks = (TaskNode, ProcedureNode, CompoolNode)
         seen_executable = False
         for stmt in body:
+            # Nested unit definitions (TASK/PROCEDURE/COMPOOL) have their own
+            # declaration regions, checked separately. They are neither a
+            # declaration nor executable code for ordering purposes.
+            if isinstance(stmt, scope_blocks):
+                continue
             if isinstance(stmt, declarative):
                 if seen_executable:
                     self.errors.append(
@@ -553,6 +570,7 @@ class Parser:
         # into the unit's `tasks` collection by _build_unit.
         @self.pg.production("statement : task_block")
         @self.pg.production("statement : procedure_block")
+        @self.pg.production("statement : compool_block")
         @self.pg.production("statement : structure_def")
         @self.pg.production("statement : on_error_block")
         @self.pg.production("statement : resume_statement")
@@ -571,6 +589,29 @@ class Parser:
         @self.pg.production("statement : read_statement")
         def statement(p: List[Any]) -> ASTNode:
             return p[0]
+
+        # GO TO <label>;  -- HAL/S unconditional branch.
+        @self.pg.production(
+            "statement : KEYWORD_GO KEYWORD_TO IDENTIFIER SEMICOLON"
+        )
+        def goto_statement(p: List[Any]) -> GotoNode:
+            return GotoNode(
+                label=p[2].value,
+                line=getattr(p[0], "line", 0),
+                column=getattr(p[0], "column", 0),
+            )
+
+        # Labelled statement: <name>: <statement>. The block keywords
+        # (TASK/COMPOOL/PROCEDURE/FUNCTION) are not in FIRST(statement), so this
+        # does not collide with the `NAME: PROGRAM`-style block headers.
+        @self.pg.production("statement : IDENTIFIER COLON statement")
+        def labeled_statement(p: List[Any]) -> LabelNode:
+            return LabelNode(
+                name=p[0].value,
+                statement=p[2],
+                line=getattr(p[0], "line", 0),
+                column=getattr(p[0], "column", 0),
+            )
 
         # ---- DECLARE ----------------------------------------------------
         @self.pg.production(
@@ -1230,6 +1271,24 @@ class Parser:
                 column=getattr(p[0], "column", 0),
             )
 
+        # Cyclic at a priority: SCHEDULE T PRIORITY(p) REPEAT EVERY <period>;
+        # A periodic task dispatched at a fixed priority (e.g. a 25 Hz display
+        # loop). The host build runs one representative cycle; the period is
+        # advisory (see the RTOS backend for faithful cyclic dispatch).
+        @self.pg.production(
+            "schedule_statement : KEYWORD_SCHEDULE IDENTIFIER KEYWORD_PRIORITY "
+            "LPAREN expression RPAREN KEYWORD_REPEAT KEYWORD_EVERY expression "
+            "SEMICOLON"
+        )
+        def schedule_priority_cyclic(p: List[Any]) -> ScheduleNode:
+            return ScheduleNode(
+                task_name=p[1].value,
+                priority=p[4],
+                period=p[8],
+                line=getattr(p[0], "line", 0),
+                column=getattr(p[0], "column", 0),
+            )
+
         # Timed/cyclic: SCHEDULE T IN <delay> REPEAT EVERY <period>;
         @self.pg.production(
             "schedule_statement : KEYWORD_SCHEDULE IDENTIFIER KEYWORD_IN "
@@ -1385,6 +1444,8 @@ class Parser:
         @self.pg.production("expression : expression KEYWORD_AND expression")
         @self.pg.production("expression : expression KEYWORD_OR expression")
         @self.pg.production("expression : expression KEYWORD_XOR expression")
+        @self.pg.production("expression : expression VBAR expression")
+        @self.pg.production("expression : expression AMPERSAND expression")
         @self.pg.production("expression : expression CONCAT expression")
         def expr_binop(p: List[Any]) -> BinaryOpNode:
             return BinaryOpNode(
@@ -1700,33 +1761,63 @@ class Parser:
 
     def _insert_implicit_multiply(self, tokens: List[Token]) -> List[Token]:
         """HAL/S multiplies adjacent operands by juxtaposition (e.g. `I W` means
-        `I * W`). Rather than make the grammar ambiguous (a generative
+        `I * W`, and `ATTITUDE(1) RAD_TO_DEG` means the element times the scalar).
+        Rather than make the grammar ambiguous (a generative
         `expression : expression expression` rule yields dozens of reduce/reduce
         conflicts), synthesize an explicit MULTIPLY token between two adjacent
         operand tokens so the parser uses its existing multiply rule.
 
-        Scoped to IDENTIFIER/NUMBER followed by IDENTIFIER/NUMBER, and SUPPRESSED
-        inside DECLARE statements -- there a variable name sits next to a
-        structure-template name (`DECLARE PRIMARY_ALARM NODE STRUCTURE;`) or a
-        type, which is not a product. Paren juxtaposition (`(A) B`, `A (B)`) is
-        intentionally NOT handled, since it collides with grouping, calls, and
-        subscripts.
+        The left operand may end in IDENTIFIER, NUMBER, or RPAREN (a subscript,
+        call, or grouped expression); the right must START an operand, so it is
+        IDENTIFIER or NUMBER. Insertion is SUPPRESSED:
+          * inside DECLARE statements -- a variable name sits next to a
+            structure-template name (`DECLARE PRIMARY_ALARM NODE STRUCTURE;`);
+          * immediately after a WRITE/READ channel `)` -- there the following
+            token is the first I/O item (`WRITE(6) X`), not a multiplicand.
+        Paren-start juxtaposition (`A (B)`, `(A)(B)`) is still not handled, as it
+        collides with calls and subscripts.
         """
-        operand = {"IDENTIFIER", "NUMBER"}
+        left_ops = {"IDENTIFIER", "NUMBER", "RPAREN"}
+        right_ops = {"IDENTIFIER", "NUMBER"}
         out: List[Token] = []
         in_declare = False
+        io_pending = False   # just saw WRITE/READ, awaiting its channel '('
+        io_depth = 0         # paren depth within the channel spec
+        suppress_next = False  # do not insert before the immediate next token
         for tok in tokens:
-            if tok.type == "KEYWORD_DECLARE":
+            t = tok.type
+            if t == "KEYWORD_DECLARE":
                 in_declare = True
-            elif tok.type == "SEMICOLON":
+            elif t == "SEMICOLON":
                 in_declare = False
-            if (not in_declare and out
-                    and out[-1].type in operand and tok.type in operand):
+                io_pending = False
+                io_depth = 0
+
+            do_suppress = suppress_next
+            suppress_next = False
+            if (not in_declare and not do_suppress and out
+                    and out[-1].type in left_ops and t in right_ops):
                 out.append(Token(
                     type="MULTIPLY", lexeme="*",
                     line=tok.line, column=tok.column, file=tok.file,
                 ))
             out.append(tok)
+
+            # Track the WRITE/READ channel paren group so the first I/O item
+            # after the channel `)` is not treated as a multiplicand.
+            if t in ("KEYWORD_WRITE", "KEYWORD_READ"):
+                io_pending = True
+                io_depth = 0
+            elif io_pending and t == "LPAREN":
+                io_pending = False
+                io_depth = 1
+            elif io_depth > 0:
+                if t == "LPAREN":
+                    io_depth += 1
+                elif t == "RPAREN":
+                    io_depth -= 1
+                    if io_depth == 0:
+                        suppress_next = True
         return out
 
     def _make_based_literal(self, tok: Any) -> LiteralNode:

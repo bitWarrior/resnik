@@ -65,6 +65,10 @@ class Lexer:
         self.lg.add("ASSIGN", r"=")
         self.lg.add("LT", r"<")
         self.lg.add("GT", r">")
+        # HAL/S bitwise/logical OR (|) and AND (&). CONCAT (||) is registered
+        # earlier, so a doubled bar still tokenizes as concatenation.
+        self.lg.add("VBAR", r"\|")
+        self.lg.add("AMPERSAND", r"&")
 
         # Special notation
         self.lg.add("DOT", r"\.")
@@ -354,7 +358,6 @@ class Lexer:
             )
 
         return self.tokens
-
     def tokenize_file(self, filepath: str) -> List[Token]:
         """
         Tokenize a HAL/S source file.

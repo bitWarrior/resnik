@@ -1,0 +1,227 @@
+THREE_AXIS_DAP: PROGRAM;
+
+/* ****************************************************************
+   Primary Avionics Software System (PASS)
+   GN&C OPS-2 On-Orbit RCS Digital Autopilot -- 3-Axis + FDIR
+   Target: IBM AP-101S General Purpose Computer
+
+   Full pitch/yaw/roll phase-plane attitude controller with
+   triple-redundant rate gyro assembly (RGA) management.
+
+   FDIR (Fault Detection, Identification, Reconfiguration):
+     - DETECT:      each channel is compared to the mid-value;
+                    a deviation past the miscompare I-LOAD is a fault.
+     - IDENTIFY:    a per-axis channel mask records WHICH gyro failed
+                    (bit 0=A, 1=B, 2=C).
+     - RECONFIGURE: the mid-value select already outvotes the failed
+                    channel, so control continues on the valid set;
+                    a per-axis fault summary is latched for downlink.
+**************************************************************** */
+
+/* ----------------------------------------------------------------
+   Shared flight data (memory-mapped COMPOOL in the real AP-101)
+---------------------------------------------------------------- */
+GNC_POOL: COMPOOL;
+    /* Triple-redundant RGA body rates (deg/s) -- pitch axis */
+    DECLARE RGA_PA SCALAR INITIAL(0.0);
+    DECLARE RGA_PB SCALAR INITIAL(0.0);
+    DECLARE RGA_PC SCALAR INITIAL(0.0);
+    /* yaw axis */
+    DECLARE RGA_YA SCALAR INITIAL(0.0);
+    DECLARE RGA_YB SCALAR INITIAL(0.0);
+    DECLARE RGA_YC SCALAR INITIAL(0.0);
+    /* roll axis */
+    DECLARE RGA_RA SCALAR INITIAL(0.0);
+    DECLARE RGA_RB SCALAR INITIAL(0.0);
+    DECLARE RGA_RC SCALAR INITIAL(0.0);
+
+    /* Per-axis attitude errors (deg) */
+    DECLARE ATT_ERR_P SCALAR INITIAL(0.0);
+    DECLARE ATT_ERR_Y SCALAR INITIAL(0.0);
+    DECLARE ATT_ERR_R SCALAR INITIAL(0.0);
+
+    /* Thruster command register and minor-cycle counter */
+    DECLARE JET_FIRE  BIT(8) INITIAL(BIN '00000000');
+    DECLARE DAP_CYCLE INTEGER INITIAL(0);
+
+    /* Latched RGA fault summary -- one bit per axis (0=pitch,1=yaw,2=roll) */
+    DECLARE FAULT_WORD BIT(8) INITIAL(BIN '00000000');
+
+    /* I-LOADs: phase-plane + FDIR constants, uplinked pre-flight */
+    DECLARE ATT_DEADBAND CONSTANT(0.50);   /* attitude deadband, deg */
+    DECLARE RATE_LIMIT   CONSTANT(0.20);   /* rate deadband, deg/s */
+    DECLARE RGA_MISCOMP  CONSTANT(1.00);   /* RGA miscompare limit, deg/s */
+CLOSE GNC_POOL;
+
+/* ================================================================
+   Redundancy Management: mid-value select of three rate gyros.
+   Returns the median, immune to one extreme (failed) channel.
+================================================================ */
+MID_SELECT: PROCEDURE(A, B, C) ASSIGN(MID);
+    DECLARE A SCALAR;
+    DECLARE B SCALAR;
+    DECLARE C SCALAR;
+    DECLARE MID SCALAR;
+
+    IF A >= B THEN
+        DO;
+            IF B >= C THEN
+                MID = B;
+            ELSE
+                DO;
+                    IF A >= C THEN
+                        MID = C;
+                    ELSE
+                        MID = A;
+                END;
+        END;
+    ELSE
+        DO;
+            IF A >= C THEN
+                MID = A;
+            ELSE
+                DO;
+                    IF B >= C THEN
+                        MID = C;
+                    ELSE
+                        MID = B;
+                END;
+        END;
+CLOSE MID_SELECT;
+
+/* ================================================================
+   Per-axis control law + FDIR. Selects a valid rate, identifies
+   any miscomparing gyro, forms the switching curve, and returns:
+       JET   = 0 coast / 1 positive jets / 2 negative jets
+       FAULT = channel miscompare mask (bit 0=A, 1=B, 2=C)
+================================================================ */
+AXIS_DAP: PROCEDURE(RA, RB, RC, ERR) ASSIGN(JET, SEL_RATE, FAULT);
+    DECLARE RA  SCALAR;
+    DECLARE RB  SCALAR;
+    DECLARE RC  SCALAR;
+    DECLARE ERR SCALAR;
+    DECLARE JET INTEGER;
+    DECLARE SEL_RATE SCALAR;
+    DECLARE FAULT BIT(8);
+    DECLARE RATE_EST     SCALAR;
+    DECLARE SWITCH_CURVE SCALAR;
+    DECLARE DEV_A SCALAR;
+    DECLARE DEV_B SCALAR;
+    DECLARE DEV_C SCALAR;
+
+    /* RM: mid-value select rejects a single failed gyro */
+    CALL MID_SELECT(RA, RB, RC) ASSIGN(RATE_EST);
+    SEL_RATE = RATE_EST;
+
+    /* FDIR detect + identify: any channel too far from the mid is failed */
+    DEV_A = ABS(RA - RATE_EST);
+    DEV_B = ABS(RB - RATE_EST);
+    DEV_C = ABS(RC - RATE_EST);
+    FAULT = BIN '00000000';
+    IF DEV_A > RGA_MISCOMP THEN FAULT = FAULT | BIN '00000001';
+    IF DEV_B > RGA_MISCOMP THEN FAULT = FAULT | BIN '00000010';
+    IF DEV_C > RGA_MISCOMP THEN FAULT = FAULT | BIN '00000100';
+
+    /* Phase-plane switching curve drives (error, rate) toward origin */
+    SWITCH_CURVE = ERR + RATE_EST ABS(RATE_EST) / (2 RATE_LIMIT);
+
+    IF SWITCH_CURVE > ATT_DEADBAND THEN
+        JET = 1;
+    ELSE
+        DO;
+            IF SWITCH_CURVE < -ATT_DEADBAND THEN
+                JET = 2;
+            ELSE
+                JET = 0;
+        END;
+CLOSE AXIS_DAP;
+
+/* ================================================================
+   RCS Digital Autopilot -- runs all three axes each minor cycle,
+   assembles the thruster command register, and annunciates any
+   RGA faults found by FDIR.
+   Jet bits: 0 pitch+  1 pitch-  2 yaw+  3 yaw-  4 roll+  5 roll-
+================================================================ */
+RCS_DAP: TASK;
+    DECLARE P_JET INTEGER;
+    DECLARE Y_JET INTEGER;
+    DECLARE R_JET INTEGER;
+    DECLARE P_RATE SCALAR;
+    DECLARE Y_RATE SCALAR;
+    DECLARE R_RATE SCALAR;
+    DECLARE P_FAULT BIT(8);
+    DECLARE Y_FAULT BIT(8);
+    DECLARE R_FAULT BIT(8);
+    DECLARE CMD BIT(8);
+    DECLARE SUMMARY BIT(8);
+
+    CALL AXIS_DAP(RGA_PA, RGA_PB, RGA_PC, ATT_ERR_P) ASSIGN(P_JET, P_RATE, P_FAULT);
+    CALL AXIS_DAP(RGA_YA, RGA_YB, RGA_YC, ATT_ERR_Y) ASSIGN(Y_JET, Y_RATE, Y_FAULT);
+    CALL AXIS_DAP(RGA_RA, RGA_RB, RGA_RC, ATT_ERR_R) ASSIGN(R_JET, R_RATE, R_FAULT);
+
+    /* Assemble the jet command register from per-axis decisions */
+    CMD = BIN '00000000';
+    IF P_JET = 1 THEN CMD = CMD | BIN '00000001';
+    IF P_JET = 2 THEN CMD = CMD | BIN '00000010';
+    IF Y_JET = 1 THEN CMD = CMD | BIN '00000100';
+    IF Y_JET = 2 THEN CMD = CMD | BIN '00001000';
+    IF R_JET = 1 THEN CMD = CMD | BIN '00010000';
+    IF R_JET = 2 THEN CMD = CMD | BIN '00100000';
+    JET_FIRE = CMD;
+
+    /* FDIR reconfigure/latch: roll a per-axis fault summary for downlink */
+    SUMMARY = BIN '00000000';
+    IF P_FAULT > 0 THEN SUMMARY = SUMMARY | BIN '00000001';
+    IF Y_FAULT > 0 THEN SUMMARY = SUMMARY | BIN '00000010';
+    IF R_FAULT > 0 THEN SUMMARY = SUMMARY | BIN '00000100';
+    FAULT_WORD = SUMMARY;
+
+    DAP_CYCLE = DAP_CYCLE + 1;
+
+    WRITE(6) 'RCS DAP MINOR CYCLE: ', DAP_CYCLE;
+    WRITE(6) '  PITCH  RATE/CMD/FAULT: ', P_RATE, P_JET, P_FAULT;
+    WRITE(6) '  YAW    RATE/CMD/FAULT: ', Y_RATE, Y_JET, Y_FAULT;
+    WRITE(6) '  ROLL   RATE/CMD/FAULT: ', R_RATE, R_JET, R_FAULT;
+    WRITE(6) '  JET COMMAND REGISTER:  ', JET_FIRE;
+
+    /* Annunciate FDIR results (channel mask: 1=A 2=B 4=C) */
+    IF P_FAULT > 0 THEN
+        WRITE(6) '  *** FDIR: PITCH RGA MISCOMPARE, CHANNEL MASK = ', P_FAULT;
+    IF Y_FAULT > 0 THEN
+        WRITE(6) '  *** FDIR: YAW RGA MISCOMPARE, CHANNEL MASK = ', Y_FAULT;
+    IF R_FAULT > 0 THEN
+        WRITE(6) '  *** FDIR: ROLL RGA MISCOMPARE, CHANNEL MASK = ', R_FAULT;
+    IF FAULT_WORD = 0 THEN
+        WRITE(6) '  FDIR: ALL RGA CHANNELS NOMINAL';
+
+    TERMINATE;
+CLOSE RCS_DAP;
+
+/* ----------------------------------------------------------------
+   GN&C Executive: load a representative RGA frame and run one pass.
+---------------------------------------------------------------- */
+WRITE(6) 'PASS GN&C -- 3-AXIS RCS DAP + FDIR INITIALIZING';
+
+/* Pitch: channel C failed high -> FDIR should flag mask 4, mid 0.48 */
+RGA_PA = 0.45;
+RGA_PB = 0.48;
+RGA_PC = 8.90;
+ATT_ERR_P = 0.65;
+
+/* Yaw: healthy gyros; median -0.30, large negative error */
+RGA_YA = -0.30;
+RGA_YB = -0.28;
+RGA_YC = -0.31;
+ATT_ERR_Y = -0.55;
+
+/* Roll: healthy gyros; small error -> stays inside deadband */
+RGA_RA = 0.05;
+RGA_RB = 0.04;
+RGA_RC = 0.06;
+ATT_ERR_R = 0.10;
+
+SCHEDULE RCS_DAP PRIORITY(40);
+
+WRITE(6) 'PASS GN&C -- MINOR CYCLE COMPLETE';
+
+CLOSE THREE_AXIS_DAP;

@@ -819,3 +819,26 @@ class CancelNode(ASTNode):
         result = super().to_dict()
         result.update({"task_name": self.task_name})
         return result
+
+
+@dataclass
+class GotoNode(ASTNode):
+    """GO TO <label>; unconditional branch."""
+
+    label: str = ""
+
+    def __post_init__(self) -> None:
+        self.node_type = NodeType.GOTO
+
+
+@dataclass
+class LabelNode(ASTNode):
+    """A statement label: <name>: <statement>. `statement` is the single
+    statement the label directly prefixes; in a labelled body the label also
+    marks the start of a segment that runs until the next label."""
+
+    name: str = ""
+    statement: Optional[ASTNode] = None
+
+    def __post_init__(self) -> None:
+        self.node_type = NodeType.LABEL

@@ -57,6 +57,7 @@ class NodeType(Enum):
     RETURN = "Return"
     EXIT = "Exit"
     GOTO = "Goto"
+    LABEL = "Label"
     REPEAT = "Repeat"
     WRITE = "Write"
     READ = "Read"

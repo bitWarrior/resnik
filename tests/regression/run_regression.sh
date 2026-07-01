@@ -172,6 +172,10 @@ run_regression_case "Hello World" \
     "Verify Resnik can compile a very simple hal source code example." \
     "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/hello_word/hello_world.hal --emit-exe
 
+run_regression_case "Abort Monitor" \
+    "Verify Resnik parses HAL/S GOTO Statements (yuck!)." \
+    "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/abort_monitor/abort_monitor.hal --emit-exe
+
 run_regression_case "Attitude Control" \
     "Verify Resnik correctly handles assignments between calculated linear algebra nodes and statically declared dummy vectors." \
     "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/attitude_control/attitude_control.hal --emit-exe
@@ -212,6 +216,10 @@ run_regression_case "First Contact" \
     "Verify Resnik's conversion of vectors as primitive types." \
     "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/first_contact/first_contact.hal --emit-exe
 
+run_regression_case "GN and C" \
+    "Verify Resnik's ability to lex and parse COMPOOL and '|' operator for bitwise OR." \
+    "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/gn_and_c/gn_and_c.hal --emit-exe
+
 run_regression_case "GNC Correction" \
     "Verify Resnik's ability to process asynchronous tasks." \
     "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/gnc_correction/gnc_correction.hal --emit-exe
@@ -219,6 +227,10 @@ run_regression_case "GNC Correction" \
 run_regression_case "JSTAR Telemetry" \
     "Verify Resnik ability to process HAL/S includes native error-trapping constructs (ON ERROR block) on divide-by-zero error." \
     "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/jstar_telemetry/jstar_telemetry.hal --emit-exe
+
+run_regression_case "Kalman Filter" \
+    "Verify Resnik ability to generated rust code uses fixed-size matrices so the inversion happens entirely on the stack, preventing dynamic heap allocations." \
+    "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/kalman_filter/kalman_filter.hal --emit-exe
 
 run_regression_case "Linear Algebra Test" \
     "Verify Resnik's ability to apply adjacency multiplication across complex data structures, rather than just scalars." \
@@ -232,6 +244,10 @@ run_regression_case "ORBITAL KINEMATICS" \
     "Verify Resnik's ability to handle mixed-type arithmetic—specifically, scalar-to-vector broadcasting and exponentiation." \
     "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/orbital_kinematics/orbital_kinematics.hal --emit-exe
 
+run_regression_case "Pitch DAP" \
+    "Verify Resnik's lowerering of nested tasks to separate top-level Rust functions. " \
+    "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/pitch_dap/pitch_dap.hal --emit-exe
+
 run_regression_case "Sat Mon" \
     "Verify Resnik's parsing with the REPLACE keyword before or during AST generation and Bit Slicing." \
     "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/sat_mon/sat_mon.hal --emit-exe
@@ -239,6 +255,10 @@ run_regression_case "Sat Mon" \
 run_regression_case "Scope Test" \
     "Verify Resnik's Abstract Syntax Tree (AST) handles localized scopes. It defines a function with its own local variables before the main program logic begins." \
     "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/scope_test/scope_test.hal --emit-exe
+
+run_regression_case "Shuttle HUD Driver" \
+    "Verify Resnik's support for HAL/S dat buffer packing" \
+    "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/shuttle_hud_driver/shuttle_hud_driver.hal --emit-exe
 
 run_regression_case "Shuttle State" \
     "Verify Resnik does not perform dyanmic memory allocation - all global data shared between different tasks and programs must be statically allocated in a COMPOOL." \

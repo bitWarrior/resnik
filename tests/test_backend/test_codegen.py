@@ -819,7 +819,7 @@ class TestBitOperations:
         cond = BinaryOpNode(operator="AND", left=left, right=right)
         node = IfNode(condition=cond, then_block=DoBlockNode(statements=[]))
         code = generator.generate(ProgramNode(name="P", statements=[node]))
-        assert "(a == 1) & (b == 0)" in code
+        assert "(a == 1) && (b == 0)" in code
 
 
 class TestCompool:
@@ -2033,3 +2033,241 @@ class TestArrayDeclAndAccess:
             "Y = LN(X); CLOSE T;")
         assert not errs
         assert "(x).ln()" in code
+
+
+class TestBitwiseOperatorsAndNestedCompool:
+    """Single | (OR) and & (AND) operators; COMPOOL nested in a PROGRAM."""
+
+    def _run(self, src: str):
+        from resnik import Lexer, Parser
+        p = Parser()
+        ast = p.parse(Lexer().tokenize(src, "t"))
+        code = RustCodeGenerator().generate(ast) if not p.errors else ""
+        return p.errors, code
+
+    def test_pipe_is_bitwise_or(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE A BIT(8); DECLARE B BIT(8); "
+            "A = A | B; CLOSE T;")
+        assert not errs
+        assert "a = a | b;" in code
+
+    def test_ampersand_is_bitwise_and(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE A BIT(8); DECLARE B BIT(8); "
+            "A = A & B; CLOSE T;")
+        assert not errs
+        assert "a = a & b;" in code
+
+    def test_double_bar_still_concat(self) -> None:
+        # || must remain string concatenation, not two ORs.
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE S CHARACTER(20); "
+            "S = 'a' || 'b'; CLOSE T;")
+        assert not errs
+        assert "format!" in code
+
+    def test_compool_nested_in_program_emits_module_static(self) -> None:
+        errs, code = self._run(
+            "MAIN: PROGRAM; "
+            "FD: COMPOOL; DECLARE G BIT(8); CLOSE FD; "
+            "G = 5; CLOSE MAIN;")
+        assert not errs
+        # static must be module-level (before fn main), not inside it.
+        assert "static G:" in code
+        main_idx = code.index("fn main")
+        assert code.index("static G:") < main_idx
+
+
+class TestSubscriptAdjacencyAndGlobalElements:
+    """RPAREN-left adjacency, WRITE-channel suppression, SCHEDULE cyclic-at-
+    priority, and global vector/array element access."""
+
+    def _run(self, src: str):
+        from resnik import Lexer, Parser
+        from resnik.backend.codegen import RustCodeGenerator
+        p = Parser()
+        ast = p.parse(Lexer().tokenize(src, "t"))
+        code = RustCodeGenerator().generate(ast) if not p.errors else ""
+        return p.errors, code
+
+    def test_subscript_then_identifier_is_multiply(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE V VECTOR(3); DECLARE K SCALAR; "
+            "DECLARE X SCALAR; X = V(1) K; CLOSE T;")
+        assert not errs
+        assert "v.0[(1) as usize - 1] * k" in code
+
+    def test_paren_group_then_identifier_is_multiply(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE A SCALAR; DECLARE B SCALAR; DECLARE C SCALAR; "
+            "DECLARE X SCALAR; X = (A + B) C; CLOSE T;")
+        assert not errs
+        assert "(a + b) * c" in code
+
+    def test_write_channel_identifier_item_not_multiplied(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE X SCALAR; WRITE(6) X; CLOSE T;")
+        assert not errs
+        assert "* x" not in code
+
+    def test_schedule_priority_repeat_every(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; C: TASK; TERMINATE; CLOSE C; "
+            "SCHEDULE C PRIORITY(40) REPEAT EVERY(0.04); CLOSE T;")
+        assert not errs
+
+    def test_global_vector_element_read_locks(self) -> None:
+        errs, code = self._run(
+            "M: PROGRAM; P: COMPOOL; DECLARE V VECTOR(3); CLOSE P; "
+            "DECLARE X SCALAR; X = V(1); CLOSE M;")
+        assert not errs
+        assert "(*V.lock().unwrap()).0[(1) as usize - 1]" in code
+
+    def test_compool_array_global_is_array_typed_static(self) -> None:
+        errs, code = self._run(
+            "M: PROGRAM; P: COMPOOL; DECLARE BUF ARRAY(10) SCALAR; CLOSE P; "
+            "BUF(1) = 3.0; CLOSE M;")
+        assert not errs
+        assert "static BUF: std::sync::Mutex<[f32; 10]>" in code
+        assert "(*BUF.lock().unwrap())[0] = 3.0;" in code
+
+
+class TestMatrixIntrinsics:
+    """DETERM/INVERSE/TRANSPOSE matrix built-ins + matrix-matrix multiply."""
+
+    def _run(self, src: str):
+        from resnik import Lexer, Parser
+        from resnik.backend.codegen import RustCodeGenerator
+        p = Parser()
+        ast = p.parse(Lexer().tokenize(src, "t"))
+        code = RustCodeGenerator().generate(ast) if not p.errors else ""
+        return p.errors, code
+
+    def test_determ_lowers_and_prelude_emitted(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE M MATRIX(3,3); DECLARE D SCALAR; "
+            "D = DETERM(M); CLOSE T;")
+        assert not errs
+        assert "determ(m)" in code
+        assert "pub fn determ" in code
+
+    def test_transpose_and_inverse_lower(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE M MATRIX(3,3); DECLARE R MATRIX(3,3); "
+            "R = TRANSPOSE(M); R = INVERSE(M); CLOSE T;")
+        assert not errs
+        assert "transpose(m)" in code and "inverse(m)" in code
+
+    def test_matrix_matrix_multiply(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE A MATRIX(3,3); DECLARE B MATRIX(3,3); "
+            "DECLARE C MATRIX(3,3); C = A B; CLOSE T;")
+        assert not errs
+        assert "a * b" in code
+        assert "Mul<Matrix<C, K>> for Matrix<R, C>" in code
+
+    def test_determ_is_float_for_promotion(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE M MATRIX(3,3); DECLARE N INTEGER; "
+            "DECLARE X SCALAR; X = DETERM(M) + N; CLOSE T;")
+        assert not errs
+        assert "(n as f32)" in code
+
+
+class TestGotoAndLabels:
+    """HAL/S GO TO <label> + statement labels lower to a dispatch state machine."""
+
+    def _run(self, src: str):
+        from resnik import Lexer, Parser
+        from resnik.backend.codegen import RustCodeGenerator
+        p = Parser()
+        ast = p.parse(Lexer().tokenize(src, "t"))
+        code = RustCodeGenerator().generate(ast) if not p.errors else ""
+        return p.errors, code
+
+    def test_goto_lowers_to_dispatch_loop(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE X SCALAR; GO TO DONE; "
+            "DONE: WRITE(6) 'end'; CLOSE T;")
+        assert not errs
+        assert "'dispatch: loop {" in code
+        assert "match __pc {" in code
+        assert "continue 'dispatch;" in code
+
+    def test_goto_out_of_nested_loops(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE I INTEGER; DECLARE J INTEGER; "
+            "DO FOR I = 1 TO 3; DO FOR J = 1 TO 3; GO TO OUT; END; END; "
+            "OUT: WRITE(6) 'out'; CLOSE T;")
+        assert not errs
+        # the goto sits inside two for-loops but branches to the dispatch loop
+        assert "continue 'dispatch;" in code
+
+    def test_label_becomes_dispatch_state(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE X SCALAR; GO TO SECOND; "
+            "FIRST: WRITE(6) 'a'; SECOND: WRITE(6) 'b'; CLOSE T;")
+        assert not errs
+        assert "// FIRST" in code and "// SECOND" in code
+
+    def test_no_dispatch_without_labels(self) -> None:
+        # A plain program must NOT get wrapped in a dispatch loop.
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE X SCALAR; X = 1.0; CLOSE T;")
+        assert not errs
+        assert "'dispatch" not in code
+
+
+class TestShiftAndLogicalOps:
+    """SHIFT intrinsic (<< / >> by sign) and type-sensitive AND/OR."""
+
+    def _run(self, src: str):
+        from resnik import Lexer, Parser
+        from resnik.backend.codegen import RustCodeGenerator
+        p = Parser()
+        ast = p.parse(Lexer().tokenize(src, "t"))
+        code = RustCodeGenerator().generate(ast) if not p.errors else ""
+        return p.errors, code
+
+    def test_shift_negative_is_right(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE X BIT(16); DECLARE R BIT(16); "
+            "R = SHIFT(X, -4); CLOSE T;")
+        assert not errs
+        assert "(x >> 4)" in code
+
+    def test_shift_positive_is_left(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE X BIT(16); DECLARE R BIT(16); "
+            "R = SHIFT(X, 3); CLOSE T;")
+        assert not errs
+        assert "(x << 3)" in code
+
+    def test_shift_runtime_count_branches(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE X BIT(16); DECLARE N INTEGER; "
+            "DECLARE R BIT(16); R = SHIFT(X, N); CLOSE T;")
+        assert not errs
+        assert "if __n >= 0" in code and "<<" in code and ">>" in code
+
+    def test_and_on_booleans_is_logical(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE A BOOLEAN; DECLARE B BOOLEAN; "
+            "DECLARE R BOOLEAN; R = A AND B; CLOSE T;")
+        assert not errs
+        assert "a && b" in code
+
+    def test_and_on_bits_is_bitwise(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE A BIT(8); DECLARE B BIT(8); "
+            "DECLARE R BIT(8); R = A AND B; CLOSE T;")
+        assert not errs
+        assert "a & b" in code
+
+    def test_or_on_booleans_is_logical(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE A BOOLEAN; DECLARE B BOOLEAN; "
+            "DECLARE R BOOLEAN; R = A OR B; CLOSE T;")
+        assert not errs
+        assert "a || b" in code

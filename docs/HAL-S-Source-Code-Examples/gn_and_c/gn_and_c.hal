@@ -1,0 +1,98 @@
+GN_AND_C: PROGRAM;
+
+/* ****************************************************************
+   Primary Avionics Software System (PASS) - RCS DAP Submodule
+   Authentic Space Shuttle AP-101 Architecture
+   
+   Features demonstrated:
+     - COMPOOL declarations for global memory mapping
+     - TASK blocks with RTOS lifecycle keywords
+     - Bit string manipulation for hardware valve commands
+     - Vector subscripting to extract axis errors
+     - Built-in ABS function for scalar magnitude
+**************************************************************** */
+
+/* ----------------------------------------------------------------
+   Flight Software State (Memory mapped in real AP-101)
+---------------------------------------------------------------- */
+FLIGHT_DATA: COMPOOL;
+    DECLARE ATTITUDE VECTOR(3);          /* Current Pitch, Yaw, Roll */
+    DECLARE TARGET_ATT VECTOR(3);        /* Desired attitude */
+    DECLARE JET_CMD BIT(8);              /* Hardware command register */
+CLOSE FLIGHT_DATA;
+
+/* ----------------------------------------------------------------
+   Reaction Control System Digital Autopilot Task
+---------------------------------------------------------------- */
+RCS_DAP: TASK;
+
+    /* Phase Plane deadband limit (Degrees) */
+    DECLARE DEADBAND CONSTANT(2.0);      
+    
+    /* Local calculation variables */
+    DECLARE ATT_ERROR VECTOR(3);
+    DECLARE PITCH_ERR SCALAR;
+    DECLARE YAW_ERR SCALAR;
+    DECLARE ROLL_ERR SCALAR;
+    
+    DECLARE FIRE_CMD BIT(8) INITIAL(BIN '00000000');
+    
+    /* Calculate attitude error vector */
+    ATT_ERROR = TARGET_ATT - ATTITUDE;
+    
+    /* Extract individual axis errors using vector subscripting */
+    PITCH_ERR = ATT_ERROR(1);
+    YAW_ERR   = ATT_ERROR(2);
+    ROLL_ERR  = ATT_ERROR(3);
+    
+    /* 
+       Phase plane logic: 
+       Check if error exceeds deadband limits.
+       Bit positions simulate forward, aft, left, right thruster manifolds.
+       The vertical bar (|) is the HAL/S bitwise OR operator.
+    */
+    
+    /* Pitch Axis Logic */
+    IF ABS(PITCH_ERR) > DEADBAND THEN
+        DO;
+            IF PITCH_ERR > 0.0 THEN
+                FIRE_CMD = FIRE_CMD | BIN '10000000';  /* Nose up */
+            ELSE
+                FIRE_CMD = FIRE_CMD | BIN '01000000';  /* Nose down */
+        END;
+        
+    /* Yaw Axis Logic */
+    IF ABS(YAW_ERR) > DEADBAND THEN
+        DO;
+            IF YAW_ERR > 0.0 THEN
+                FIRE_CMD = FIRE_CMD | BIN '00100000';  /* Nose right */
+            ELSE
+                FIRE_CMD = FIRE_CMD | BIN '00010000';  /* Nose left */
+        END;
+        
+    /* Commit commands to the simulated hardware register */
+    JET_CMD = FIRE_CMD;
+    
+    WRITE(6) 'RCS DAP Cycle Complete. Jet Command Register: ', JET_CMD;
+    
+    /* Task terminates itself until the 80ms FSW cycle wakes it again */
+    TERMINATE;
+    
+CLOSE RCS_DAP;
+
+/* ----------------------------------------------------------------
+   Main Initialization Routine
+---------------------------------------------------------------- */
+WRITE(6) 'PASS System Initializing...';
+
+/* Initialize Compool Data */
+ATTITUDE = (1.5, -3.2, 0.4);
+TARGET_ATT = (0.0, 0.0, 0.0);
+JET_CMD = BIN '00000000';
+
+/* Schedule the DAP task to run immediately at priority 50 */
+SCHEDULE RCS_DAP PRIORITY(50);
+
+WRITE(6) 'System safely entered operational mode.';
+
+CLOSE GN_AND_C;

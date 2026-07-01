@@ -1,0 +1,125 @@
+SHUTTLE_HUD_DRIVER: PROGRAM;
+
+/* ****************************************************************
+   Space Shuttle Cockpit Display System - HUD Controller
+   
+   Features demonstrated:
+     - Multi-COMPOOL data sharing (Nav inputs vs Hardware outputs)
+     - Trigonometric built-in functions (ARCTAN)
+     - Adjacency multiplication for unit conversions
+     - Bitwise operations for HUD symbology warnings
+     - Cyclic RTOS scheduling
+**************************************************************** */
+
+/* ----------------------------------------------------------------
+   Input: Primary Navigation State
+---------------------------------------------------------------- */
+NAV_STATE: COMPOOL;
+    DECLARE ATTITUDE VECTOR(3);       /* Pitch, Yaw, Roll (radians) */
+    DECLARE VELOCITY VECTOR(3);       /* Body-frame velocity (ft/s) */
+    DECLARE ALT_RADAR SCALAR;         /* Radar altimeter (ft) */
+    DECLARE AIRSPEED_KEAS SCALAR;     /* Knots Equivalent Airspeed */
+    DECLARE GEAR_DEPLOYED BOOLEAN;
+CLOSE NAV_STATE;
+
+/* ----------------------------------------------------------------
+   Output: Hardware Interface Buffer to Display Electronics Unit
+---------------------------------------------------------------- */
+DEU_INTERFACE: COMPOOL;
+    /* 10-word telemetry block sent to the display processor */
+    DECLARE HUD_BUFFER ARRAY(10) SCALAR;
+    
+    /* Hardware bit-mask to trigger specific HUD warning lights */
+    DECLARE HUD_WARNINGS BIT(8);
+CLOSE DEU_INTERFACE;
+
+/* ----------------------------------------------------------------
+   Main HUD Update Task (Runs at 25 Hz)
+---------------------------------------------------------------- */
+HUD_UPDATE: TASK;
+
+    /* Constants for unit conversion */
+    DECLARE RAD_TO_DEG CONSTANT (57.2957795);
+    
+    /* Local calculation variables */
+    DECLARE PITCH_DEG SCALAR;
+    DECLARE ROLL_DEG SCALAR;
+    DECLARE FPA_RAD SCALAR;           /* Flight Path Angle */
+    DECLARE FPA_DEG SCALAR;
+    DECLARE X_VEL SCALAR;
+    DECLARE Z_VEL SCALAR;
+    DECLARE SYMBOLOGY_MASK BIT(8) INITIAL(BIN '00000000');
+
+    /* 1. Extract and convert attitude using adjacency multiplication */
+    PITCH_DEG = ATTITUDE(1) RAD_TO_DEG;
+    ROLL_DEG  = ATTITUDE(3) RAD_TO_DEG;
+
+    /* 2. Calculate the Flight Path Marker (Velocity Vector) */
+    /* Z_VEL is descent rate, X_VEL is forward speed */
+    X_VEL = VELOCITY(1);
+    Z_VEL = VELOCITY(3);
+    
+    /* Avoid division by zero on the pad */
+    IF X_VEL > 1.0 THEN
+        DO;
+            FPA_RAD = ARCTAN(Z_VEL / X_VEL);
+            FPA_DEG = FPA_RAD RAD_TO_DEG;
+        END;
+    ELSE
+        FPA_DEG = 0.0;
+
+    /* 3. Pack the data array for the display renderer */
+    HUD_BUFFER(1) = AIRSPEED_KEAS;    /* Left speed tape */
+    HUD_BUFFER(2) = ALT_RADAR;        /* Right altitude tape */
+    HUD_BUFFER(3) = PITCH_DEG;        /* Center pitch ladder */
+    HUD_BUFFER(4) = ROLL_DEG;         /* Roll indicator */
+    HUD_BUFFER(5) = FPA_DEG;          /* Flight path marker position */
+
+    /* 4. Landing Gear Warning Logic */
+    /* If below 300 feet and gear is not down, flash the "GEAR" warning */
+    IF ALT_RADAR < 300.0 THEN
+        IF GEAR_DEPLOYED = FALSE THEN
+            /* Bitwise OR sets the 1st bit to trigger the warning */
+            SYMBOLOGY_MASK = SYMBOLOGY_MASK | BIN '10000000';
+            
+    /* Commit warnings to the hardware register */
+    HUD_WARNINGS = SYMBOLOGY_MASK;
+
+    /* 5. Echo the assembled display frame to the console */
+    WRITE(6) 'HUD FRAME UPDATE ---------------------';
+    WRITE(6) '  PITCH LADDER (DEG): ', PITCH_DEG;
+    WRITE(6) '  ROLL INDEX  (DEG):  ', ROLL_DEG;
+    WRITE(6) '  FLIGHT PATH (DEG):  ', FPA_DEG;
+    WRITE(6) '  AIRSPEED  (KEAS):   ', HUD_BUFFER(1);
+    WRITE(6) '  RADAR ALT   (FT):   ', HUD_BUFFER(2);
+    WRITE(6) '  WARNING REGISTER:   ', HUD_WARNINGS;
+    IF HUD_WARNINGS > 0 THEN
+        WRITE(6) '  *** GEAR: WARNING - GEAR NOT DOWN ***';
+
+    /* Task completes its cycle and yields back to the OS */
+    TERMINATE;
+
+CLOSE HUD_UPDATE;
+
+/* ----------------------------------------------------------------
+   System Initialization
+---------------------------------------------------------------- */
+WRITE(6) 'HUD Display Driver Initializing...';
+
+/* Load a representative approach-phase navigation frame:
+   pitch 10 deg, roll 20 deg; 600 ft/s forward, 45 ft/s descent;
+   250 ft radar altitude with the gear still up. */
+ATTITUDE = VECTOR(0.1745, 0.0, 0.3491);
+VELOCITY = VECTOR(600.0, 0.0, -45.0);
+ALT_RADAR = 250.0;
+AIRSPEED_KEAS = 195.0;
+GEAR_DEPLOYED = FALSE;
+
+/* 
+   In the real AP-101 Flight Computer Operating System (FCOS), 
+   display loops were scheduled cyclically. This tells the OS 
+   to run the HUD task every 0.04 seconds (25 frames per second).
+*/
+SCHEDULE HUD_UPDATE PRIORITY(40) REPEAT EVERY(0.04);
+
+CLOSE SHUTTLE_HUD_DRIVER;
