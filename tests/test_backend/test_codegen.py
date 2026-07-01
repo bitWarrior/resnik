@@ -1066,7 +1066,8 @@ class TestMatrixOps:
                               operand=LiteralNode(value=0.6, literal_type="SCALAR")),
         )
         code = generator.generate(self._prog([assign]))
-        assert "-(0.6)" in code
+        # unary minus on a literal folds to the literal -0.6
+        assert "-0.6" in code
 
 
 class TestMatrixElementAccess:
@@ -1770,13 +1771,13 @@ class TestEventSignalWaitHostStub:
     def test_event_declaration_parses_to_bool_flag(self) -> None:
         errs, code = self._gen("T: PROGRAM; DECLARE E EVENT; CLOSE T;")
         assert not errs
-        assert "let mut e: bool = false;" in code
+        assert "static E: std::sync::atomic::AtomicBool" in code
 
     def test_signal_sets_flag_and_emits_advisory(self) -> None:
         errs, code = self._gen(
             "T: PROGRAM; DECLARE E EVENT; SIGNAL E; CLOSE T;")
         assert not errs
-        assert "e = true;" in code
+        assert "E.store(true, std::sync::atomic::Ordering::SeqCst);" in code
         assert "advisory host stub" in code and "SIGNAL E" in code
 
     def test_wait_event_is_nonblocking_advisory(self) -> None:
@@ -2271,3 +2272,294 @@ class TestShiftAndLogicalOps:
             "DECLARE R BOOLEAN; R = A OR B; CLOSE T;")
         assert not errs
         assert "a || b" in code
+
+
+class TestNamePointers:
+    """HAL/S NAME (pointer) types: ASSIGN...TO binding + implicit deref."""
+
+    def _run(self, src: str):
+        from resnik import Lexer, Parser
+        from resnik.backend.codegen import RustCodeGenerator
+        p = Parser()
+        ast = p.parse(Lexer().tokenize(src, "t"))
+        code = RustCodeGenerator().generate(ast) if not p.errors else ""
+        return p.errors, code
+
+    def test_name_decl_is_raw_pointer(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE G SCALAR; DECLARE P NAME SCALAR; CLOSE T;")
+        assert not errs
+        assert "let mut p: *mut f32 = std::ptr::null_mut();" in code
+
+    def test_assign_to_binds_pointer(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE G SCALAR; DECLARE P NAME SCALAR; "
+            "ASSIGN P TO G; CLOSE T;")
+        assert not errs
+        assert "p = std::ptr::addr_of_mut!(g);" in code
+
+    def test_mutation_through_pointer_is_unsafe_deref(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE G SCALAR; DECLARE P NAME SCALAR; "
+            "ASSIGN P TO G; P = P + 0.5; CLOSE T;")
+        assert not errs
+        assert "unsafe { *p = (*p) + 0.5; }" in code
+
+    def test_name_read_into_scalar_is_deref(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE G SCALAR; DECLARE X SCALAR; "
+            "DECLARE P NAME SCALAR; ASSIGN P TO G; X = P; CLOSE T;")
+        assert not errs
+        # reading a NAME into a normal var still dereferences (in unsafe)
+        assert "unsafe { x = (*p); }" in code
+
+    def test_assign_to_not_confused_with_value_assign(self) -> None:
+        # `X = Y` stays a value assignment even when a NAME exists in scope.
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE A SCALAR; DECLARE B SCALAR; "
+            "DECLARE P NAME SCALAR; A = B; CLOSE T;")
+        assert not errs
+        assert "a = b;" in code
+        assert "addr_of_mut!(b)" not in code
+
+
+class TestRepetitionIdentityTrace:
+    """Repetition literal (count#value), context-sensitive IDENTITY, TRACE."""
+
+    def _run(self, src: str):
+        from resnik import Lexer, Parser
+        from resnik.backend.codegen import RustCodeGenerator
+        p = Parser()
+        ast = p.parse(Lexer().tokenize(src, "t"))
+        code = RustCodeGenerator().generate(ast) if not p.errors else ""
+        return p.errors, code
+
+    def test_repetition_expands_copies(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE V VECTOR(6); V = VECTOR(6#0.0); CLOSE T;")
+        assert not errs
+        assert "Vector([0.0, 0.0, 0.0, 0.0, 0.0, 0.0])" in code
+
+    def test_repetition_mixed_with_plain_args(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE V VECTOR(4); V = VECTOR(1.0, 3#2.0); CLOSE T;")
+        assert not errs
+        assert "Vector([1.0, 2.0, 2.0, 2.0])" in code
+
+    def test_identity_matrix_sized_to_target(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE M MATRIX(3,3); M = IDENTITY; CLOSE T;")
+        assert not errs
+        assert "Matrix([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])" in code
+
+    def test_trace_lowers_to_prelude(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE M MATRIX(3,3); DECLARE S SCALAR; "
+            "S = TRACE(M); CLOSE T;")
+        assert not errs
+        assert "trace(m)" in code and "pub fn trace" in code
+
+
+class TestWaitForEventExpression:
+    """WAIT FOR <boolean expression> over EVENT operands; EVENTs as shared
+    AtomicBool statics."""
+
+    def _run(self, src: str):
+        from resnik import Lexer, Parser
+        from resnik.backend.codegen import RustCodeGenerator
+        p = Parser()
+        ast = p.parse(Lexer().tokenize(src, "t"))
+        code = RustCodeGenerator().generate(ast) if not p.errors else ""
+        return p.errors, code
+
+    def test_event_is_atomic_static(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE E EVENT; CLOSE T;")
+        assert not errs
+        assert "static E: std::sync::atomic::AtomicBool" in code
+
+    def test_signal_stores_true(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE E EVENT; SIGNAL E; CLOSE T;")
+        assert not errs
+        assert "E.store(true, std::sync::atomic::Ordering::SeqCst);" in code
+
+    def test_wait_for_builds_boolean_tree(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE A EVENT; DECLARE B EVENT; DECLARE C EVENT; "
+            "WAIT FOR (A AND B) OR C; CLOSE T;")
+        assert not errs
+        # AND/OR over EVENT leaves become && / || with atomic loads
+        assert "A.load(std::sync::atomic::Ordering::SeqCst) &&" in code
+        assert "|| C.load(std::sync::atomic::Ordering::SeqCst)" in code
+        assert "while !(" in code
+
+    def test_event_condition_in_if(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE E EVENT; IF E THEN WRITE(6) 'x'; CLOSE T;")
+        assert not errs
+        assert "if E.load(std::sync::atomic::Ordering::SeqCst)" in code
+
+
+class TestAssignByReferenceAndDimCheck:
+    """ASSIGN passes arrays by &mut reference; dimension/type verification."""
+
+    def _run(self, src: str):
+        from resnik import Lexer, Parser
+        from resnik.backend.codegen import RustCodeGenerator
+        p = Parser()
+        ast = p.parse(Lexer().tokenize(src, "t"))
+        code = RustCodeGenerator().generate(ast) if not p.errors else ""
+        return p.errors, code
+
+    def test_array_assign_param_is_mut_ref(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE B ARRAY(3) OF VECTOR(3); "
+            "P: PROCEDURE ASSIGN(X); DECLARE X ARRAY(3) OF VECTOR(3); "
+            "CLOSE P; CALL P ASSIGN(B); CLOSE T;")
+        assert not errs
+        assert "fn p(x: &mut [Vector<3>; 3])" in code
+
+    def test_call_site_injects_mut_ref(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE B ARRAY(3) OF VECTOR(3); "
+            "P: PROCEDURE ASSIGN(X); DECLARE X ARRAY(3) OF VECTOR(3); "
+            "CLOSE P; CALL P ASSIGN(B); CLOSE T;")
+        assert not errs
+        assert "p(&mut b);" in code
+
+    def test_unit_intrinsic(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE V VECTOR(3); DECLARE W VECTOR(3); "
+            "W = UNIT(V); CLOSE T;")
+        assert not errs
+        assert "unit(v)" in code and "pub fn unit" in code
+
+    def test_dimension_mismatch_is_error(self) -> None:
+        from resnik import Lexer, Parser
+        p = Parser()
+        p.parse(Lexer().tokenize(
+            "T: PROGRAM; DECLARE B ARRAY(4) OF VECTOR(3); "
+            "P: PROCEDURE ASSIGN(X); DECLARE X ARRAY(3) OF VECTOR(3); "
+            "CLOSE P; CALL P ASSIGN(B); CLOSE T;", "t"))
+        assert any("does not match" in str(e) for e in p.errors)
+
+
+class TestMatrixFromVectorRows:
+    """MATRIX(v1, v2, v3) built from VECTOR rows vs scalar cells."""
+
+    def _run(self, src: str):
+        from resnik import Lexer, Parser
+        from resnik.backend.codegen import RustCodeGenerator
+        p = Parser()
+        ast = p.parse(Lexer().tokenize(src, "t"))
+        code = RustCodeGenerator().generate(ast) if not p.errors else ""
+        return p.errors, code
+
+    def test_matrix_from_vector_rows(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE A VECTOR(3); DECLARE B VECTOR(3); "
+            "DECLARE C VECTOR(3); DECLARE M MATRIX(3,3); "
+            "M = MATRIX(A, B, C); CLOSE T;")
+        assert not errs
+        assert "Matrix([(a).0, (b).0, (c).0])" in code
+
+    def test_matrix_from_scalars_still_chunks(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE M MATRIX(2,2); "
+            "M = MATRIX(1.0, 2.0, 3.0, 4.0); CLOSE T;")
+        assert not errs
+        assert "Matrix([[1.0, 2.0], [3.0, 4.0]])" in code
+
+    def test_matrix_from_vector_literals(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE M MATRIX(2,2); "
+            "M = MATRIX(VECTOR(1.0, 0.0), VECTOR(0.0, 1.0)); CLOSE T;")
+        assert not errs
+        assert "Matrix([(Vector([1.0, 0.0])).0, (Vector([0.0, 1.0])).0])" in code
+
+
+class TestConstantFolding:
+    """Compile-time constant folding: constant math is reduced to literals."""
+
+    def _run(self, src: str):
+        from resnik import Lexer, Parser
+        from resnik.backend.codegen import RustCodeGenerator
+        p = Parser()
+        ast = p.parse(Lexer().tokenize(src, "t"))
+        code = RustCodeGenerator().generate(ast) if not p.errors else ""
+        return p.errors, code
+
+    def test_constant_expression_folds(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE PI CONSTANT SCALAR(3.14159265); "
+            "DECLARE HALF CONSTANT SCALAR(PI / 2.0); "
+            "DECLARE R SCALAR INITIAL(0.0); R = HALF * 2.0; CLOSE T;")
+        assert not errs
+        # HALF*2.0 = PI folds to a single literal (no `half * 2.0` at runtime)
+        assert "r = 3.1415927" in code or "r = 3.14159265" in code
+        assert "half * 2.0" not in code
+
+    def test_intrinsic_folds_at_compile_time(self) -> None:
+        # ARCSIN isn't const-evaluable in Rust; folding makes it a literal.
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE A CONSTANT SCALAR(ARCSIN(1.0)); "
+            "DECLARE R SCALAR INITIAL(0.0); R = A; CLOSE T;")
+        assert not errs
+        assert ".asin()" not in code
+        assert "1.5707963" in code
+
+    def test_integer_constant_stays_integer(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE N CONSTANT INTEGER(2 + 3); "
+            "DECLARE X INTEGER; X = N * 4; CLOSE T;")
+        assert not errs
+        assert "let n: i32 = 5;" in code
+        assert "x = 20;" in code
+
+    def test_runtime_variable_not_folded(self) -> None:
+        # An expression touching a runtime variable must be left intact.
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE V SCALAR INITIAL(1.0); DECLARE R SCALAR; "
+            "R = V * 2.0 + 1.0; CLOSE T;")
+        assert not errs
+        assert "v * 2.0 + 1.0" in code
+
+
+class TestCharacterFixedLength:
+    """HAL/S CHARACTER(n) fixed-length assignment: truncate / pad."""
+
+    def _run(self, src: str):
+        from resnik import Lexer, Parser
+        from resnik.backend.codegen import RustCodeGenerator
+        p = Parser()
+        ast = p.parse(Lexer().tokenize(src, "t"))
+        code = RustCodeGenerator().generate(ast) if not p.errors else ""
+        return p.errors, code
+
+    def test_oversized_source_truncates(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE S CHARACTER(5); DECLARE L CHARACTER(20); "
+            "S = L; CLOSE T;")
+        assert not errs
+        assert "s = l.chars().take(5).collect::<String>();" in code
+
+    def test_undersized_source_pads(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE S CHARACTER(5); DECLARE L CHARACTER(15); "
+            "L = S; CLOSE T;")
+        assert not errs
+        assert 'l = format!("{:<15}", s);' in code
+
+    def test_equal_length_is_direct(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE A CHARACTER(5); DECLARE B CHARACTER(5); "
+            "A = B; CLOSE T;")
+        assert not errs
+        assert "a = b;" in code
+
+    def test_string_literal_shorter_than_target_pads(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE S CHARACTER(10); S = 'HI'; CLOSE T;")
+        assert not errs
+        assert 'format!("{:<10}", "HI")' in code

@@ -842,3 +842,16 @@ class LabelNode(ASTNode):
 
     def __post_init__(self) -> None:
         self.node_type = NodeType.LABEL
+
+
+@dataclass
+class NameAssignNode(ASTNode):
+    """ASSIGN <pointer> TO <target>; -- HAL/S NAME (pointer) binding. Binds the
+    NAME variable `pointer` to the address of `target`, distinct from a value
+    assignment (=)."""
+
+    pointer: str = ""
+    target: str = ""
+
+    def __post_init__(self) -> None:
+        self.node_type = NodeType.ASSIGNMENT

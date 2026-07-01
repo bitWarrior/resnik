@@ -12,6 +12,7 @@ from rply import ParserGenerator
 from resnik.exceptions import ParserError, SemanticError
 from resnik.lexer import Lexer, Token
 from resnik.parser.ast_nodes import (
+    NameAssignNode,
     GotoNode,
     LabelNode,
     ASTNode,
@@ -103,6 +104,8 @@ class Parser:
                 "KEYWORD_FOR",
                 "KEYWORD_TO",
                 "KEYWORD_GO",
+                "KEYWORD_NAME",
+                "HASH",
                 "KEYWORD_BY",
                 "KEYWORD_INITIAL",
                 "KEYWORD_WRITE",
@@ -181,6 +184,7 @@ class Parser:
         self.errors: List[ParserError] = []
         self.ast: Optional[ASTNode] = None
         self._proc_signatures: Dict[str, tuple] = {}
+        self._proc_assign_types: Dict[str, list] = {}
 
         self._define_grammar()
         self.parser = self.pg.build()
@@ -242,12 +246,31 @@ class Parser:
                         )
                     )
 
+    def _type_shape(self, ts):
+        """A comparable structural signature of a type (data type, vector/matrix
+        dimensions, array dimensions, and element shape) for verifying that a
+        CALL argument matches the PROCEDURE parameter it binds to."""
+        if ts is None:
+            return None
+        dims = tuple(ts.dimensions) if getattr(ts, "dimensions", None) else ()
+        adims = tuple(ts.array_dims) if getattr(ts, "array_dims", None) else ()
+        elem = self._type_shape(ts.element_type) \
+            if getattr(ts, "element_type", None) else None
+        return (ts.data_type, dims, adims, elem)
+
     def _check_call_signatures(self, body: list) -> None:
         """Enforce that each CALL matches its PROCEDURE's input/output
         structure: same number of input arguments and ASSIGN (output)
         arguments. HAL/S separates the two at the syntax level, so a CALL
         that supplies the wrong count of either is an error."""
         calls: list = []
+        # Declared variable types in this scope, for dimension checking of
+        # ASSIGN arguments. Procedure parameters mask (shadow) these names.
+        var_types: dict = {}
+        for stmt in body:
+            if isinstance(stmt, DeclareNode):
+                for ident in stmt.identifiers:
+                    var_types[ident.lower()] = stmt.type_spec
 
         def collect(node: ASTNode) -> None:
             for value in vars(node).values():
@@ -286,6 +309,27 @@ class Parser:
                         getattr(call, "line", 0), getattr(call, "column", 0),
                     )
                 )
+            # Dimension/type check: each ASSIGN argument that is a plain
+            # variable must match the shape of the parameter it binds to.
+            ptypes = self._proc_assign_types.get(call.name.upper())
+            if ptypes and len(call.assign_args) == len(ptypes):
+                for arg, pts in zip(call.assign_args, ptypes):
+                    name = getattr(arg, "name", None)
+                    if name is None or pts is None:
+                        continue
+                    ats = var_types.get(name.lower())
+                    if ats is None:
+                        continue
+                    if self._type_shape(ats) != self._type_shape(pts):
+                        self.errors.append(
+                            SemanticError(
+                                f"CALL {call.name} ASSIGN argument "
+                                f"'{name}' does not match the type/dimensions "
+                                f"of the corresponding PROCEDURE parameter",
+                                getattr(call, "line", 0),
+                                getattr(call, "column", 0),
+                            )
+                        )
 
     def _build_unit(
         self,
@@ -360,6 +404,11 @@ class Parser:
         # Record the signature (input arity, output arity) so CALL sites can be
         # checked for the same input/output structure HAL/S enforces.
         self._proc_signatures[name.upper()] = (len(params), len(assign_params))
+        _bd = {d.identifiers[0].lower(): d.type_spec
+               for d in statements if isinstance(d, DeclareNode)
+               and len(d.identifiers) == 1}
+        self._proc_assign_types[name.upper()] = [
+            _bd.get(a.lower()) for a in assign_params]
         # Procedure bodies may not nest further tasks/procedures here; keep all
         # body items as statements (declarations are extracted by codegen).
         self._check_declaration_order(
@@ -590,6 +639,22 @@ class Parser:
         def statement(p: List[Any]) -> ASTNode:
             return p[0]
 
+        # ASSIGN <pointer> TO <target>;  -- NAME (pointer) binding, distinct
+        # from value assignment (=). KEYWORD_ASSIGN is otherwise always followed
+        # by '(' (procedure/CALL output lists), so an IDENTIFIER after it is
+        # unambiguous.
+        @self.pg.production(
+            "statement : KEYWORD_ASSIGN IDENTIFIER KEYWORD_TO IDENTIFIER "
+            "SEMICOLON"
+        )
+        def name_assign_statement(p: List[Any]) -> NameAssignNode:
+            return NameAssignNode(
+                pointer=p[1].value,
+                target=p[3].value,
+                line=getattr(p[0], "line", 0),
+                column=getattr(p[0], "column", 0),
+            )
+
         # GO TO <label>;  -- HAL/S unconditional branch.
         @self.pg.production(
             "statement : KEYWORD_GO KEYWORD_TO IDENTIFIER SEMICOLON"
@@ -621,6 +686,22 @@ class Parser:
             return DeclareNode(
                 identifiers=[p[1].value],
                 type_spec=p[2],
+                line=getattr(p[0], "line", 0),
+                column=getattr(p[0], "column", 0),
+            )
+
+        # NAME (pointer) declaration: DECLARE X NAME <type>; -- X is a pointer
+        # to a value of <type>, bound later with ASSIGN X TO Y.
+        @self.pg.production(
+            "declare_statement : KEYWORD_DECLARE IDENTIFIER KEYWORD_NAME "
+            "type_spec SEMICOLON"
+        )
+        def declare_name(p: List[Any]) -> DeclareNode:
+            ts = p[3]
+            ts.is_name = True
+            return DeclareNode(
+                identifiers=[p[1].value],
+                type_spec=ts,
                 line=getattr(p[0], "line", 0),
                 column=getattr(p[0], "column", 0),
             )
@@ -1212,6 +1293,20 @@ class Parser:
                 column=getattr(p[0], "column", 0),
             )
 
+        # CALL <proc> ASSIGN(<outputs>);  (no input parameters)
+        @self.pg.production(
+            "call_statement : KEYWORD_CALL IDENTIFIER KEYWORD_ASSIGN "
+            "LPAREN arg_list RPAREN SEMICOLON"
+        )
+        def call_statement_assign_noinput(p: List[Any]) -> CallNode:
+            return CallNode(
+                name=p[1].value,
+                arguments=[],
+                assign_args=p[4],
+                line=getattr(p[0], "line", 0),
+                column=getattr(p[0], "column", 0),
+            )
+
         @self.pg.production(
             "call_statement : KEYWORD_CALL IDENTIFIER LPAREN RPAREN SEMICOLON"
         )
@@ -1321,6 +1416,19 @@ class Parser:
             "wait_statement : KEYWORD_WAIT KEYWORD_UNTIL expression SEMICOLON"
         )
         def wait_statement(p: List[Any]) -> WaitNode:
+            return WaitNode(
+                condition=p[2],
+                line=getattr(p[0], "line", 0),
+                column=getattr(p[0], "column", 0),
+            )
+
+        # WAIT FOR <boolean expression>;  -- blocks until an expression over
+        # EVENT operands holds. Routed through the standard expression parser,
+        # so `(A AND B) OR C` builds the usual AND/OR tree with EVENT leaves.
+        @self.pg.production(
+            "wait_statement : KEYWORD_WAIT KEYWORD_FOR expression SEMICOLON"
+        )
+        def wait_for_statement(p: List[Any]) -> WaitNode:
             return WaitNode(
                 condition=p[2],
                 line=getattr(p[0], "line", 0),
@@ -1667,13 +1775,27 @@ class Parser:
                 column=getattr(p[0], "column", 0),
             )
 
-        @self.pg.production("arg_list : arg_list COMMA expression")
+        @self.pg.production("arg_list : arg_list COMMA arg_element")
         def arg_list(p: List[Any]) -> list:
-            return p[0] + [p[2]]
+            return p[0] + p[2]
 
-        @self.pg.production("arg_list : expression")
+        @self.pg.production("arg_list : arg_element")
         def arg_list_single(p: List[Any]) -> list:
+            return p[0]
+
+        # An argument is one expression, or a HAL/S repetition literal
+        # <count>#<value> that expands to <count> copies during AST construction.
+        @self.pg.production("arg_element : expression")
+        def arg_element_single(p: List[Any]) -> list:
             return [p[0]]
+
+        @self.pg.production("arg_element : NUMBER HASH expression")
+        def arg_element_repeat(p: List[Any]) -> list:
+            try:
+                count = int(p[0].value)
+            except (TypeError, ValueError):
+                count = 0
+            return [p[2]] * count
 
         @self.pg.production("expression : STRING")
         def expr_string(p: List[Any]) -> LiteralNode:
@@ -1861,6 +1983,7 @@ class Parser:
         """
         self.errors = []
         self._proc_signatures = {}
+        self._proc_assign_types = {}
         self.symbol_table = SymbolTable()
 
         # Expand REPLACE ... BY ...; macros (HAL/S preprocessor) at the token

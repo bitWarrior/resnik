@@ -10,6 +10,7 @@ from typing import Optional, List
 from pathlib import Path
 
 from resnik.parser.ast_nodes import (
+    NameAssignNode,
     GotoNode,
     LabelNode,
     ASTNode,
@@ -80,6 +81,143 @@ class CargoProjectResult:
     executable: Optional[str] = None
     stdout: str = ""
     stderr: str = ""
+
+
+class ConstantFolder:
+    """AST optimization pass: fold compile-time-constant expressions to
+    literals, so the flight computer spends no cycles recomputing values fixed
+    at build time. Runs after parsing and before code generation. A subtree
+    folds when every leaf is a numeric literal or a CONSTANT whose value is
+    itself foldable; intrinsic calls are evaluated with Python's math module.
+    Anything referencing a runtime variable is left untouched.
+    """
+
+    import math as _math
+
+    _UNARY_INTRINSICS = {
+        "SQRT": _math.sqrt, "SIN": _math.sin, "COS": _math.cos,
+        "TAN": _math.tan, "ARCSIN": _math.asin, "ARCCOS": _math.acos,
+        "ARCTAN": _math.atan, "SINH": _math.sinh, "COSH": _math.cosh,
+        "TANH": _math.tanh, "EXP": _math.exp, "LOG": _math.log,
+        "LN": _math.log, "ABS": abs,
+    }
+
+    def __init__(self) -> None:
+        self.constants: dict = {}
+        self.folded_count = 0
+
+    def run(self, ast):
+        if ast is None:
+            return ast
+        # Pass 1: collect CONSTANT values in declaration order (a later constant
+        # may be defined from an earlier one), folding each definition.
+        for node in self._walk(ast):
+            if (isinstance(node, DeclareNode) and node.is_constant
+                    and node.initial_value is not None
+                    and len(node.identifiers) == 1):
+                val = self._eval(node.initial_value)
+                if val is not None:
+                    dt = node.type_spec.data_type if node.type_spec else None
+                    if dt == DataType.SCALAR:
+                        val = float(val)
+                    elif dt == DataType.INTEGER:
+                        val = int(val)
+                    self.constants[node.identifiers[0].lower()] = val
+                    node.initial_value = self._literal(val)
+        # Pass 2: fold every other expression in the tree.
+        self._transform(ast)
+        return ast
+
+    def _eval(self, node):
+        if isinstance(node, LiteralNode):
+            v = node.value
+            if isinstance(v, bool):
+                return None
+            if isinstance(v, (int, float)):
+                return v
+            return None
+        if isinstance(node, IdentifierNode):
+            return self.constants.get(node.name.lower())
+        if isinstance(node, UnaryOpNode):
+            o = self._eval(node.operand)
+            if o is None:
+                return None
+            if node.operator == "-":
+                return -o
+            if node.operator == "+":
+                return o
+            return None
+        if isinstance(node, BinaryOpNode):
+            lo = self._eval(node.left)
+            ro = self._eval(node.right)
+            if lo is None or ro is None:
+                return None
+            op = node.operator
+            try:
+                if op == "+":
+                    return lo + ro
+                if op == "-":
+                    return lo - ro
+                if op == "*":
+                    return lo * ro
+                if op == "/":
+                    return lo / ro if ro != 0 else None
+                if op == "**":
+                    return float(lo) ** float(ro)
+            except (ValueError, OverflowError, ZeroDivisionError):
+                return None
+            return None
+        if isinstance(node, FunctionCallNode):
+            args = [self._eval(a) for a in node.arguments]
+            if any(a is None for a in args):
+                return None
+            nm = node.name.upper()
+            try:
+                if nm in self._UNARY_INTRINSICS and len(args) == 1:
+                    return float(self._UNARY_INTRINSICS[nm](args[0]))
+                if nm == "ARCTAN2" and len(args) == 2:
+                    return self._math.atan2(args[0], args[1])
+            except (ValueError, OverflowError):
+                return None
+        return None
+
+    def _literal(self, value) -> LiteralNode:
+        self.folded_count += 1
+        if isinstance(value, int) and not isinstance(value, bool):
+            return LiteralNode(value=value, literal_type="INTEGER")
+        return LiteralNode(value=float(value), literal_type="SCALAR")
+
+    def _transform(self, node) -> None:
+        for fname, fval in list(vars(node).items()):
+            if isinstance(fval, ASTNode):
+                folded = self._eval(fval)
+                if folded is not None and not isinstance(fval, LiteralNode):
+                    setattr(node, fname, self._literal(folded))
+                else:
+                    self._transform(fval)
+            elif isinstance(fval, list):
+                new_list = []
+                for item in fval:
+                    if isinstance(item, ASTNode):
+                        folded = self._eval(item)
+                        if folded is not None and not isinstance(
+                                item, LiteralNode):
+                            new_list.append(self._literal(folded))
+                        else:
+                            self._transform(item)
+                            new_list.append(item)
+                    else:
+                        new_list.append(item)
+                setattr(node, fname, new_list)
+
+    def _walk(self, node):
+        yield node
+        for fval in vars(node).values():
+            children = (fval if isinstance(fval, list)
+                        else [fval] if isinstance(fval, ASTNode) else [])
+            for child in children:
+                if isinstance(child, ASTNode):
+                    yield from self._walk(child)
 
 
 class RustCodeGenerator:
@@ -161,6 +299,7 @@ class RustCodeGenerator:
         self._error_handlers = {}
         self._panic_hook_emitted = False
         self._equates = {}
+        self._name_vars = {}
         for node in self._walk(ast):
             if isinstance(node, StructureDefNode):
                 self._structs[node.name.upper()] = node
@@ -178,10 +317,29 @@ class RustCodeGenerator:
         # up front wherever it appears -- a top-level unit OR nested inside a
         # PROGRAM -- and record it so it is not re-emitted inside a function.
         self._emitted_compools: set = set()
+        # Optimization pass: fold compile-time-constant expressions to literals
+        # before code generation, so no constant math runs on the flight CPU.
+        ConstantFolder().run(ast)
         for node in self._walk(ast):
             if isinstance(node, CompoolNode):
                 self._generate_compool(node)
                 self._emitted_compools.add(id(node))
+
+        # EVENT variables are shared synchronization flags: a task may SIGNAL an
+        # event that main (or another task) WAITs on. Lower them to module-level
+        # AtomicBool statics so they are visible across every generated function.
+        self._event_vars: set = set()
+        for node in self._walk(ast):
+            if (isinstance(node, DeclareNode) and node.type_spec is not None
+                    and node.type_spec.data_type == DataType.EVENT):
+                for ident in node.identifiers:
+                    self._event_vars.add(ident.lower())
+                    self.emitter.emit_line(
+                        f"static {ident.upper()}: "
+                        "std::sync::atomic::AtomicBool = "
+                        "std::sync::atomic::AtomicBool::new(false);")
+        if self._event_vars:
+            self.emitter.emit_line()
 
         # Generate code from AST
         self._generate_node(ast)
@@ -371,10 +529,26 @@ class RustCodeGenerator:
         acc
     }
 
+    // Unit vector: v scaled to length 1 (a zero vector is returned unchanged).
+    pub fn unit<const N: usize>(v: Vector<N>) -> Vector<N> {
+        let m = abval(v);
+        if m == 0.0 { return v; }
+        let mut out = [0.0f32; N];
+        for i in 0..N { out[i] = v.0[i] / m; }
+        Vector(out)
+    }
+
     pub fn transpose<const R: usize, const C: usize>(m: Matrix<R, C>) -> Matrix<C, R> {
         let mut out = [[0.0f32; R]; C];
         for i in 0..R { for j in 0..C { out[j][i] = m.0[i][j]; } }
         Matrix(out)
+    }
+
+    // Trace: sum of the leading-diagonal elements of a square matrix.
+    pub fn trace<const N: usize>(m: Matrix<N, N>) -> f32 {
+        let mut s = 0.0f32;
+        for i in 0..N { s += m.0[i][i]; }
+        s
     }
 
     // Square-matrix determinant via Gaussian elimination with partial pivoting.
@@ -489,8 +663,9 @@ use hal_rt::*;
 
     # Intrinsics that lower to hal_rt prelude functions (so their use requires
     # the prelude). User-defined functions and inline casts are NOT here.
-    _PRELUDE_INTRINSICS = {"ABVAL", "CROSS", "DOT",
-                           "DETERM", "INVERSE", "TRANSPOSE"}
+    _PRELUDE_INTRINSICS = {"ABVAL", "CROSS", "DOT", "UNIT",
+                           "DETERM", "INVERSE", "TRANSPOSE",
+                           "TRACE"}
 
     # HAL/S scalar math built-ins that lower to Rust f32 methods (no prelude
     # needed -- they're inherent on f32). Single-argument: SQRT(x) -> (x).sqrt().
@@ -585,6 +760,8 @@ use hal_rt::*;
             self._generate_declare(node)
         elif isinstance(node, ProcedureNode):
             self._generate_procedure(node)
+        elif isinstance(node, NameAssignNode):
+            self._generate_name_assign(node)
         elif isinstance(node, AssignmentNode):
             self._generate_assignment(node)
         elif isinstance(node, WriteNode):
@@ -939,6 +1116,25 @@ use hal_rt::*;
         """
         rust_type = self.type_mapper.map_type(node.type_spec)
 
+        # EVENT variables are module-level AtomicBool statics (emitted in the
+        # generate() pre-pass); no per-scope local is declared.
+        if node.type_spec is not None \
+                and node.type_spec.data_type == DataType.EVENT:
+            return
+
+        # NAME (pointer) declaration -> a raw pointer (`*mut T`). HAL/S NAMEs are
+        # addresses that can be re-bound; a raw pointer models that faithfully
+        # and avoids the borrow checker's aliasing restrictions. It starts null
+        # and is bound with ASSIGN X TO Y.
+        if node.type_spec is not None and getattr(
+                node.type_spec, "is_name", False):
+            for ident in node.identifiers:
+                name = ident.lower()
+                self._name_vars[name] = rust_type
+                self.emitter.emit_line(
+                    f"let mut {name}: *mut {rust_type} = std::ptr::null_mut();")
+            return
+
         # EQUATE overlay: VIEW aliases TARGET's storage. No separate binding;
         # accesses are rewritten onto the target with bit-preserving casts.
         equate = node.attributes.get("equate") if node.attributes else None
@@ -1089,7 +1285,7 @@ use hal_rt::*;
         param_types = {}
         for d in body_decls:
             if len(d.identifiers) == 1 and d.identifiers[0].lower() in param_set:
-                param_types[d.identifiers[0].lower()] = self.type_mapper.map_type(
+                param_types[d.identifiers[0].lower()] = self._full_rust_type(
                     d.type_spec
                 )
 
@@ -1263,6 +1459,45 @@ use hal_rt::*;
         ]
         self.emitter.emit_line(f"{node.name.lower()}({', '.join(parts)});")
     
+    def _generate_name_assign(self, node: NameAssignNode) -> None:
+        """ASSIGN <pointer> TO <target> -> bind the raw pointer to the target's
+        address (addr_of_mut! avoids forming an intermediate &mut borrow)."""
+        ptr = node.pointer.lower()
+        tgt = node.target.lower()
+        self.emitter.emit_line(
+            f"{ptr} = std::ptr::addr_of_mut!({tgt});")
+
+    def _expr_uses_name(self, node) -> bool:
+        """True if the expression reads any NAME (pointer) variable."""
+        for n in self._walk(node):
+            if isinstance(n, IdentifierNode) \
+                    and n.name.lower() in getattr(self, "_name_vars", {}):
+                return True
+        return False
+
+    def _char_length(self, node):
+        """Declared CHARACTER length of an expression: dimensions[0] for a
+        CHARACTER variable, or the literal length for a string literal."""
+        if isinstance(node, IdentifierNode):
+            ts = self._var_info.get(node.name.lower())
+            if (ts is not None and ts.data_type == DataType.CHARACTER
+                    and ts.dimensions):
+                return ts.dimensions[0]
+            return None
+        if isinstance(node, LiteralNode) and isinstance(node.value, str):
+            return len(node.value)
+        return None
+
+    def _is_char_source(self, node) -> bool:
+        """True if an expression yields a CHARACTER (String) value that a
+        fixed-length assignment should normalize."""
+        if isinstance(node, LiteralNode) and isinstance(node.value, str):
+            return True
+        if isinstance(node, IdentifierNode):
+            ts = self._var_info.get(node.name.lower())
+            return ts is not None and ts.data_type == DataType.CHARACTER
+        return False
+
     def _generate_assignment(self, node: AssignmentNode) -> None:
         """
         Generate Rust code for assignment.
@@ -1277,6 +1512,68 @@ use hal_rt::*;
             node: AssignmentNode to generate
         """
         if node.target and node.value:
+            # HAL/S CHARACTER is fixed-length: assigning to CHARACTER(n) right-
+            # truncates an oversized source and right-pads (with spaces) an
+            # undersized one, decided from the declared lengths at compile time.
+            if isinstance(node.target, IdentifierNode):
+                tlen = self._char_length(node.target)
+                if tlen is not None and self._is_char_source(node.value):
+                    tgt = node.target.name.lower()
+                    src = self._generate_expression(node.value)
+                    slen = self._char_length(node.value)
+                    if slen is not None and slen > tlen:
+                        self.emitter.emit_line(
+                            f"{tgt} = {src}.chars().take({tlen})"
+                            ".collect::<String>();")
+                    elif slen is not None and slen < tlen:
+                        self.emitter.emit_line(
+                            f'{tgt} = format!("{{:<{tlen}}}", {src});')
+                    elif slen is not None:
+                        self.emitter.emit_line(f"{tgt} = {src};")
+                    else:
+                        # Unknown source length: normalize to exactly tlen at
+                        # runtime (truncate if longer, pad if shorter).
+                        self.emitter.emit_line(
+                            f"{tgt} = {{ let __s: String = {src}; "
+                            f"if __s.chars().count() > {tlen} "
+                            f"{{ __s.chars().take({tlen}).collect() }} "
+                            f'else {{ format!("{{:<{tlen}$}}", __s, '
+                            f"{tlen} = {tlen}) }} }};")
+                    return
+            # Context-sensitive IDENTITY: `M = IDENTITY` builds an identity
+            # matrix sized to the (square) target's declared dimensions.
+            if (isinstance(node.value, IdentifierNode)
+                    and node.value.name.upper() == "IDENTITY"
+                    and isinstance(node.target, IdentifierNode)):
+                ts = self._var_info.get(node.target.name.lower())
+                dims = ts.dimensions if ts is not None else None
+                if (ts is not None and ts.data_type == DataType.MATRIX
+                        and dims and len(dims) == 2):
+                    r, c = dims[0], dims[1]
+                    rows = ", ".join(
+                        "[" + ", ".join(
+                            "1.0" if i == j else "0.0" for j in range(c)
+                        ) + "]" for i in range(r)
+                    )
+                    self.emitter.emit_line(
+                        f"{node.target.name.lower()} = Matrix([{rows}]);")
+                    return
+            # NAME (pointer) deref assignment. If the target is a NAME, write
+            # through the pointer; if either side reads a NAME, the whole
+            # statement runs in one `unsafe` block (so reads are bare derefs and
+            # there is no nested/duplicate unsafe).
+            target_is_name = (isinstance(node.target, IdentifierNode)
+                              and node.target.name.lower() in self._name_vars)
+            if target_is_name or self._expr_uses_name(node.value):
+                self._unsafe_ctx = True
+                rhs = self._generate_expression(node.value)
+                if target_is_name:
+                    lhs = f"*{node.target.name.lower()}"
+                else:
+                    lhs = self._generate_expression(node.target)
+                self._unsafe_ctx = False
+                self.emitter.emit_line(f"unsafe {{ {lhs} = {rhs}; }}")
+                return
             # EQUATE overlay write: VIEW = expr  ->  target = (expr) as target_type
             # (bit-preserving, so the alias and the target stay byte-identical).
             if (isinstance(node.target, IdentifierNode)
@@ -1486,6 +1783,17 @@ use hal_rt::*;
             return "true"
         if up == "FALSE":
             return "false"
+        # EVENT read -> atomic load of its shared flag.
+        if node.name.lower() in getattr(self, "_event_vars", set()):
+            return (f"{node.name.upper()}"
+                    ".load(std::sync::atomic::Ordering::SeqCst)")
+        # `unsafe` the bare deref suffices; elsewhere use an inline unsafe block
+        # so the expression is valid on its own.
+        if node.name.lower() in getattr(self, "_name_vars", {}):
+            nm = node.name.lower()
+            if getattr(self, "_unsafe_ctx", False):
+                return f"(*{nm})"
+            return f"(unsafe {{ *{nm} }})"
         # COMPOOL globals: const -> NAME; mutable -> locked access
         if up in self._globals:
             kind, _ = self._globals[up]
@@ -1525,6 +1833,8 @@ use hal_rt::*;
             return isinstance(node.value, bool)
         if isinstance(node, IdentifierNode):
             ts = self._var_info.get(node.name.lower())
+            if node.name.lower() in getattr(self, "_event_vars", set()):
+                return True
             return ts is not None and ts.data_type == DataType.BOOLEAN
         if isinstance(node, UnaryOpNode):
             if node.operator in ("NOT", "¬", "~"):
@@ -1637,7 +1947,7 @@ use hal_rt::*;
             return "unknown"
         if isinstance(node, FunctionCallNode):
             nm = node.name.upper()
-            if nm in ("ABVAL", "DOT", "SCALAR", "DETERM") or nm in self._MATH_METHODS \
+            if nm in ("ABVAL", "DOT", "SCALAR", "DETERM", "TRACE") or nm in self._MATH_METHODS \
                     or nm == "ARCTAN2":
                 return "float"
             if nm == "INTEGER":
@@ -1822,12 +2132,30 @@ use hal_rt::*;
         vals = ", ".join(self._generate_expression(v) for v in node.values)
         return f"Vector([{vals}])"
 
+    def _is_vector_expr(self, node) -> bool:
+        """True if an expression yields a Vector (used to build a MATRIX from
+        vector rows rather than scalar cells)."""
+        if isinstance(node, VectorLiteralNode):
+            return True
+        if isinstance(node, IdentifierNode):
+            ts = self._var_info.get(node.name.lower())
+            return ts is not None and ts.data_type == DataType.VECTOR
+        if isinstance(node, FunctionCallNode):
+            if node.name.upper() in ("CROSS", "UNIT", "VECTOR"):
+                return True
+        return False
+
     def _generate_matrix_literal(self, node: MatrixLiteralNode,
                                  dims=None) -> str:
         """MATRIX(v1..vn) -> Matrix([[..],[..],..]). Dimensions come from the
         assignment/declaration target when known, else a square is inferred."""
         vals = [self._generate_expression(v) for v in node.values]
         n = len(vals)
+        # MATRIX(v1, v2, ...) from VECTOR rows: each vector's backing array is a
+        # row. Vector<C>.0 is [f32; C], so [v1.0, v2.0, ...] is [[f32;C];R].
+        if node.values and all(self._is_vector_expr(v) for v in node.values):
+            rows = [f"({self._generate_expression(v)}).0" for v in node.values]
+            return f"Matrix([{', '.join(rows)}])"
         if dims and len(dims) >= 2:
             rows, cols = dims[0], dims[1]
         else:
@@ -1985,6 +2313,18 @@ use hal_rt::*;
         args = ", ".join(self._generate_expression(a) for a in node.arguments)
         return f"{node.name.lower()}({args})"
 
+    def _full_rust_type(self, ts) -> str:
+        """Complete Rust type including array dimensions, e.g.
+        ARRAY(3) OF VECTOR(3) -> [Vector<3>; 3]. map_type alone collapses an
+        array to its element type, which is wrong for a parameter signature."""
+        if (ts is not None and ts.array_dims is not None
+                and ts.element_type is not None):
+            inner = self._full_rust_type(ts.element_type)
+            for d in reversed(ts.array_dims):
+                inner = f"[{inner}; {d}]"
+            return inner
+        return self.type_mapper.map_type(ts)
+
     def _var_base(self, name: str) -> str:
         """Base accessor for a variable used as a subscript/element operand:
         a locked deref for mutable COMPOOL globals, the bare name for global
@@ -2114,13 +2454,18 @@ use hal_rt::*;
         would, pending an interrupt or another task clearing the condition).
         """
         if node.event is not None:
-            ev = node.event.lower()
+            ev = node.event
             self.emitter.emit_comment(
-                f"WAIT {node.event} (host stub: advisory, non-blocking)")
+                f"WAIT {ev} (host stub: advisory, non-blocking)")
             self.emitter.emit_line(
-                f'eprintln!("[hal_rt] WAIT {node.event} '
+                f'eprintln!("[hal_rt] WAIT {ev} '
                 '(advisory host stub; not real-time, does not block)");')
-            self.emitter.emit_line(f"let _ = {ev};")
+            if ev.lower() in getattr(self, "_event_vars", set()):
+                self.emitter.emit_line(
+                    f"let _ = {ev.upper()}"
+                    ".load(std::sync::atomic::Ordering::SeqCst);")
+            else:
+                self.emitter.emit_line(f"let _ = {ev.lower()};")
             return
         cond = self._generate_expression(node.condition)
         self.emitter.emit_comment("WAIT UNTIL <cond> (blocks until satisfied)")
@@ -2140,7 +2485,12 @@ use hal_rt::*;
         ev = node.name.lower()
         self.emitter.emit_comment(
             f"SIGNAL {node.name} (host stub: advisory, latched flag)")
-        self.emitter.emit_line(f"{ev} = true;")
+        if ev in getattr(self, "_event_vars", set()):
+            self.emitter.emit_line(
+                f"{node.name.upper()}.store(true, "
+                "std::sync::atomic::Ordering::SeqCst);")
+        else:
+            self.emitter.emit_line(f"{ev} = true;")
         self.emitter.emit_line(
             f'eprintln!("[hal_rt] SIGNAL {node.name} '
             '(advisory host stub; not real-time)");')

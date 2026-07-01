@@ -105,6 +105,7 @@ class TypeSpec:
     array_size: Optional[int] = None  # element count, when an ARRAY(n) OF ...
     array_dims: Optional[List[int]] = None  # multi-dim ARRAY(d1, d2, ...)
     element_type: Optional["TypeSpec"] = None  # ARRAY element type
+    is_name: bool = False  # HAL/S NAME (pointer) declaration
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
@@ -119,6 +120,7 @@ class TypeSpec:
             "element_type": (
                 self.element_type.to_dict() if self.element_type else None
             ),
+            "is_name": self.is_name,
         }
 
 
