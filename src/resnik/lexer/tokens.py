@@ -50,6 +50,8 @@ KEYWORDS = {
     # Declarations
     "DECLARE",
     "REPLACE",
+    "MACRO",
+    "MEND",
     "STRUCTURE",
     "TEMPLATE",
     # Data types

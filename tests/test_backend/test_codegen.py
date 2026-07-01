@@ -1222,7 +1222,9 @@ class TestDoCase:
 
 
 class TestOnErrorResume:
-    """ON ERROR(n) registers a handler; division is trapped via catch_unwind."""
+    """ON ERROR(n) registers a scope handler. A same-scope division fault is
+    handled inline (RESUME falls through, skipping the assignment); no panic
+    machinery is used."""
 
     def _prog(self):
         handler = DoBlockNode(statements=[
@@ -1247,25 +1249,25 @@ class TestOnErrorResume:
                            declarations=[decl_d, decl_r, decl_f],
                            statements=[on_err, div])
 
-    def test_handler_registered_and_division_trapped(self) -> None:
+    def test_same_scope_handler_inline(self) -> None:
         code = RustCodeGenerator().generate(self._prog())
-        assert "std::panic::set_hook" in code
-        assert "catch_unwind" in code
-        assert "std::panic::panic_any(5i32)" in code
-        assert "is_finite()" in code
-        assert "__e.downcast_ref::<i32>()" in code
-        assert "resume_unwind" in code      # unhandled codes re-raised
-        # handler body runs in the matching-code arm
+        # New model: no panic/catch_unwind machinery.
+        assert "catch_unwind" not in code
+        assert "panic_any" not in code
+        assert "set_hook" not in code
+        # Zero-divisor guard runs the handler inline; RESUME falls through.
+        assert "if __d == 0 as f32 {" in code
         assert "fault = true;" in code
-        # the ON ERROR block itself is not emitted inline as sequential code
-        assert "if __code == 5" in code
+        # The division only happens on the non-fault path.
+        assert "r = 100" in code and "/ __d;" in code
 
     def test_no_trap_without_handler(self) -> None:
-        # Same division but no ON ERROR -> plain assignment, no catch_unwind.
+        # Same division but no ON ERROR -> plain assignment, no fault lowering.
         prog = self._prog()
         prog.statements = prog.statements[1:]   # drop the OnErrorNode
         code = RustCodeGenerator().generate(prog)
         assert "catch_unwind" not in code
+        assert "HalFault" not in code
         assert "r = 100" in code
 
 

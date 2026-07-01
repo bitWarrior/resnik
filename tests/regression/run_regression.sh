@@ -172,6 +172,8 @@ run_regression_case "Hello World" \
     "Verify Resnik can compile a very simple hal source code example." \
     "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/hello_word/hello_world.hal --emit-exe
 
+# -----------------------
+
 run_regression_case "Abort Monitor" \
     "Verify Resnik parses HAL/S GOTO Statements (yuck!)." \
     "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/abort_monitor/abort_monitor.hal --emit-exe
@@ -236,7 +238,7 @@ run_regression_case "Escape Velocity" \
     "Verify Resnik's ability to handle standard mathematical built-in functions (like SQRT), extremely large scientific notation literals, and complex adjacency multiplication grouped by parentheses." \
     "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/escape_vel/escape_vel.hal --emit-exe
 
-run_regression_case "EULER" \
+run_regression_case "Euler" \
     "Verify Resnik's conversion of vectors as primitive types." \
     "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/euler/euler.hal --emit-exe
 
@@ -268,6 +270,14 @@ run_regression_case "Linear Algebra Test" \
     "Verify Resnik's ability to apply adjacency multiplication across complex data structures, rather than just scalars." \
     "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/linear_algebra_test/linear_algebra_test.hal --emit-exe
 
+run_regression_case "Macro Check Bit" \
+    "Verify Resnik's ability to parse multi-line MACRO blocks that accept parameters." \
+    "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/macro_check_bit/macro_check_bit.hal --emit-exe
+
+run_regression_case "Macro Hygiene" \
+    "Verify Resnik's ability to handler local MACRO declaration whose name collides with the caller's." \
+    "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/macro_hygiene/macro_hygiene.hal --emit-exe
+
 run_regression_case "Matrix Builder" \
     "Verify Resnik strictly enforce that the input vectors match the dimensions of the target matrix." \
     "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/matrix_builder/matrix_builder.hal --emit-exe
@@ -296,7 +306,7 @@ run_regression_case "PTR Resolution" \
     "Verify Resnik parses pass references to pre-allocated memory using the NAME keyword. This acts as a strictly controlled pointer. " \
     "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/ptr_resolution/ptr_resolution.hal --emit-exe
 
-run_regression_case "Sat Mon" \
+run_regression_case "SAT Mon" \
     "Verify Resnik's parsing with the REPLACE keyword before or during AST generation and Bit Slicing." \
     "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/sat_mon/sat_mon.hal --emit-exe
 
@@ -312,6 +322,10 @@ run_regression_case "Shuttle State" \
     "Verify Resnik does not perform dyanmic memory allocation - all global data shared between different tasks and programs must be statically allocated in a COMPOOL." \
     "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/shuttle_state/shuttle_state.hal --emit-exe
 
+run_regression_case "Same Scope Fault" \
+    "Verify Resnik ability to trap fault within the scope of the handler." \
+    "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/same_scope_fault/same_scope_fault.hal --emit-exe
+
 run_regression_case "Sensor Init" \
     "Verify Resnik's ability to process standard DO FOR loop and dynamic 1-dimensional subscripting." \
     "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/sensor_init/sensor_init.hal --emit-exe
@@ -324,8 +338,12 @@ run_regression_case "Spw Security" \
     "Verify Resnik's compliance adherence to operator precedence parsing for complex boolean and bitwise expressions." \
     "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/spw_security/spw_security.hal --emit-exe
 
+run_regression_case "Stack Bubbling" \
+    "Verify Resnik's stack fault processing when an error occurs deeply nested in a procedure w/o ON ERROR block." \
+    "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/stack_bubbling/stack_bubbling.hal --emit-exe
+
 run_regression_case "Star Tracker" \
-    "Verify Resnik's ability to to handle deeply nested data types—specifically, arrays where each element is a complex structure." \
+    "Verify Resnik's ability to handle deeply nested data types—specifically, arrays where each element is a complex structure." \
     "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/star_tracker/star_tracker.hal --emit-exe
 
 run_regression_case "String Truncation" \

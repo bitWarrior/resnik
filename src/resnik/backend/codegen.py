@@ -55,7 +55,7 @@ from resnik.parser.ast_nodes import (
 )
 from resnik.backend.rust_emitter import RustEmitter
 from resnik.backend.type_mapper import TypeMapper
-from resnik.types import NodeType, DataType
+from resnik.types import NodeType, DataType, Precision
 
 
 @dataclass
@@ -236,7 +236,12 @@ class RustCodeGenerator:
         >>> rust_code = generator.generate(ast)
         >>> generator.write_to_file("output.rs", rust_code)
     """
-    
+
+    # HAL/S runtime fault code for divide-by-zero, as used by ON ERROR(n).
+    # NOTE: a full implementation would map each HAL/S runtime error to its
+    # real (group:code); this is the single code the current lowering raises.
+    _DIVIDE_FAULT_CODE = 5
+
     def __init__(self):
         """Initialize code generator."""
         self.emitter = RustEmitter()
@@ -250,6 +255,13 @@ class RustCodeGenerator:
         self._error_handlers: dict = {}
         self._panic_hook_emitted: bool = False
         self._equates: dict = {}
+        # ON ERROR fault model (populated by _analyze_faults each generate()):
+        self._uses_faults: bool = False
+        self._unit_handlers: dict = {}     # unit key -> {code: handler body}
+        self._proc_raises: dict = {}       # proc -> set of codes it may propagate
+        self._faulting_procs: set = set()  # procs that get a Result signature
+        self._cur_unit: str = "@main"      # "@main" or a procedure name
+        self._cur_unit_is_result: bool = False
     
     def generate(self, ast: Optional[ASTNode]) -> str:
         """
@@ -303,6 +315,11 @@ class RustCodeGenerator:
         for node in self._walk(ast):
             if isinstance(node, StructureDefNode):
                 self._structs[node.name.upper()] = node
+
+        # Pre-pass: ON ERROR scope analysis (which procedures propagate faults,
+        # and which handlers are active in each scope). Drives the Result-based
+        # stack-unwinding lowering.
+        self._analyze_faults(ast)
 
         # Emit file header
         self._emit_file_header()
@@ -798,11 +815,16 @@ use hal_rt::*;
             self._generate_multi_assign(node)
         elif isinstance(node, ReturnNode):
             if node.value is not None:
-                self.emitter.emit_line(
-                    f"return {self._generate_expression(node.value)};"
-                )
+                inner = self._generate_expression(node.value)
+                if self._cur_unit_is_result:
+                    self.emitter.emit_line(f"return Ok({inner});")
+                else:
+                    self.emitter.emit_line(f"return {inner};")
             else:
-                self.emitter.emit_line("return;")
+                if self._cur_unit_is_result:
+                    self.emitter.emit_line("return Ok(());")
+                else:
+                    self.emitter.emit_line("return;")
         elif isinstance(node, ForNode):
             self._generate_for(node)
         elif isinstance(node, GotoNode):
@@ -923,6 +945,14 @@ use hal_rt::*;
         self.emitter.emit_comment(f"HAL/S Program: {node.name}")
         self._task_names = {t.name.lower() for t in node.tasks}
 
+        # A fault code carried out of a faulting procedure via Result<_, HalFault>.
+        if self._uses_faults:
+            self.emitter.emit_comment(
+                "Fault code propagated out of faulting procedures (ON ERROR)")
+            self.emitter.emit_line("#[derive(Clone, Copy)]")
+            self.emitter.emit_line("struct HalFault { code: i32 }")
+            self.emitter.emit_line()
+
         # Structure templates -> module-level Rust structs.
         structures = [s for s in node.statements
                       if isinstance(s, StructureDefNode)]
@@ -945,6 +975,8 @@ use hal_rt::*;
         # Generate main function
         self.emitter.emit_function_header("main", [], None, is_public=False)
         self.in_main = True
+        self._cur_unit = "@main"
+        self._cur_unit_is_result = False
         self._generate_unit_body(node.declarations, body)
         self.in_main = False
         self.emitter.emit_block_end()
@@ -1316,11 +1348,22 @@ use hal_rt::*;
         ]
 
         # Emit procedure (or function, when it carries a return type)
-        ret = (self.type_mapper.map_type(node.return_type)
-               if node.return_type is not None else None)
-        kind = "Function" if ret is not None else "Procedure"
+        base_ret = (self.type_mapper.map_type(node.return_type)
+                    if node.return_type is not None else None)
+        is_result = self._uses_faults and rust_name in self._faulting_procs
+        if is_result:
+            inner = base_ret if base_ret is not None else "()"
+            ret = f"Result<{inner}, HalFault>"
+        else:
+            ret = base_ret
+        kind = "Function" if base_ret is not None else "Procedure"
         self.emitter.emit_comment(f"HAL/S {kind}: {node.name}")
         self.emitter.emit_function_header(rust_name, params, ret, is_public=False)
+
+        prev_unit = self._cur_unit
+        prev_is_result = self._cur_unit_is_result
+        self._cur_unit = rust_name
+        self._cur_unit_is_result = is_result
 
 
         def _is_param_decl(n: ASTNode) -> bool:
@@ -1347,6 +1390,12 @@ use hal_rt::*;
                 continue
             self._generate_node(stmt)
 
+        # A faulting procedure returns Result; its normal path ends in Ok(()).
+        if is_result and base_ret is None:
+            self.emitter.emit_line("Ok(())")
+
+        self._cur_unit = prev_unit
+        self._cur_unit_is_result = prev_is_result
         self._assign_params = prev_assign
         self.emitter.emit_block_end()
 
@@ -1395,17 +1444,12 @@ use hal_rt::*;
         self.emitter.emit_line("}")
 
     def _generate_on_error(self, node: OnErrorNode) -> None:
-        """Register an ON ERROR(code) handler. The body is NOT emitted here;
-        it is invoked from the catch_unwind trap around a faulting operation."""
-        if not self._panic_hook_emitted:
-            # Suppress the default panic stderr output; the trap routes faults
-            # to the registered handler instead of crashing/printing.
-            self.emitter.emit_line("std::panic::set_hook(Box::new(|_| {}));")
-            self._panic_hook_emitted = True
-        self._error_handlers[node.code] = node.body
+        """ON ERROR(code) is a declaration, not sequential code. Its handler
+        body is emitted at the fault site (same-scope handler) or at the CALL
+        that unwinds into this scope (cross-scope). Handler registration is
+        done in the _analyze_faults pre-pass, so nothing is emitted inline."""
         self.emitter.emit_comment(
-            f"ON ERROR({node.code}): fault handler registered (callback)"
-        )
+            f"ON ERROR({node.code}): handler active in this scope")
 
     def _generate_handler_body(self, body: ASTNode) -> None:
         """Emit a registered handler's statements (a DO; ... END; group),
@@ -1414,56 +1458,181 @@ use hal_rt::*;
         for stmt in stmts:
             self._generate_node(stmt)
 
-    def _generate_trapped_division(self, target: ASTNode,
-                                   binop: BinaryOpNode) -> None:
-        """Lower `target = left / right` under an active ON ERROR handler into a
-        catch_unwind trap that carries the HAL/S fault code as the panic payload.
-
-        Integer divide-by-zero panics directly; float divide-by-zero yields a
-        non-finite value, so an explicit is_finite() check raises the same trap.
-        The handler whose code matches runs; any other code is re-raised.
-        """
-        code = 5 if 5 in self._error_handlers else next(iter(self._error_handlers))
-        body = self._error_handlers[code]
+    def _generate_fault_division(self, target: ASTNode,
+                                 binop: BinaryOpNode) -> None:
+        """Lower `target = left / right` in a fault-aware program (one that uses
+        ON ERROR). A zero divisor raises HAL/S fault code 5, which is either
+        handled inline by a same-scope ON ERROR (RESUME falls through, skipping
+        the assignment) or unwound to the caller via `return Err(..)` so an
+        enclosing handler in the calling scope runs."""
+        code = self._DIVIDE_FAULT_CODE
         tname = target.name.lower()
         ts = self._var_info.get(tname)
         rust_t = self.type_mapper.map_type(ts) if ts is not None else "f32"
         left = self._generate_expression(binop.left)
         right = self._generate_expression(binop.right)
+        unit_handlers = self._unit_handlers.get(self._cur_unit, {})
 
         self.emitter.emit_line("{")
         self.emitter.indent()
-        self.emitter.emit_line(
-            "let __r = std::panic::catch_unwind("
-            "std::panic::AssertUnwindSafe(|| {"
-        )
-        self.emitter.indent()
-        self.emitter.emit_line(f"let __v = {left} / ({right} as {rust_t});")
-        self.emitter.emit_line(
-            f"if !(__v as f64).is_finite() {{ std::panic::panic_any({code}i32); }}"
-        )
-        self.emitter.emit_line("__v")
-        self.emitter.dedent()
-        self.emitter.emit_line("}));")
-        self.emitter.emit_line("match __r {")
-        self.emitter.indent()
-        self.emitter.emit_line(f"Ok(__v) => {{ {tname} = __v; }}")
-        self.emitter.emit_line("Err(__e) => {")
-        self.emitter.indent()
-        self.emitter.emit_line(
-            "let __code = *__e.downcast_ref::<i32>().unwrap_or(&-1);"
-        )
-        self.emitter.emit_line(f"if __code == {code} {{")
-        self.emitter.indent()
-        self._generate_handler_body(body)
-        self.emitter.dedent()
-        self.emitter.emit_line("} else { std::panic::resume_unwind(__e); }")
-        self.emitter.dedent()
-        self.emitter.emit_line("}")
-        self.emitter.dedent()
-        self.emitter.emit_line("}")
+        self.emitter.emit_line(f"let __d = ({right}) as {rust_t};")
+        if code in unit_handlers:
+            # Same-scope handler: run it inline; RESUME continues after this
+            # statement, so the assignment is skipped on a fault.
+            self.emitter.emit_line(f"if __d == 0 as {rust_t} {{")
+            self.emitter.indent()
+            self._generate_handler_body(unit_handlers[code])
+            self.emitter.dedent()
+            self.emitter.emit_line("} else {")
+            self.emitter.indent()
+            self.emitter.emit_line(f"{tname} = {left} / __d;")
+            self.emitter.dedent()
+            self.emitter.emit_line("}")
+        elif self._cur_unit_is_result:
+            # No local handler: unwind this procedure so the caller's handler
+            # runs. Statements after the fault are skipped by the early return.
+            self.emitter.emit_line(
+                f"if __d == 0 as {rust_t} {{ "
+                f"return Err(HalFault {{ code: {code} }}); }}")
+            self.emitter.emit_line(f"{tname} = {left} / __d;")
+        else:
+            # Unhandled fault at top level -> HAL/S terminates the program.
+            self.emitter.emit_line(
+                f"if __d == 0 as {rust_t} {{ "
+                f"eprintln!(\"HAL/S fault {code} (unhandled)\"); "
+                f"std::process::exit({code}); }}")
+            self.emitter.emit_line(f"{tname} = {left} / __d;")
         self.emitter.dedent()
         self.emitter.emit_line("}")
+
+    def _generate_faulting_call(self, call_expr: str, callee: str) -> None:
+        """Lower a CALL to a procedure that may raise a fault. If the current
+        scope has a matching ON ERROR handler, dispatch to it (RESUME falls
+        through past the call); otherwise propagate the fault outward."""
+        codes = self._proc_raises.get(callee, set())
+        unit_handlers = self._unit_handlers.get(self._cur_unit, {})
+        handled = [c for c in sorted(codes) if c in unit_handlers]
+        if handled:
+            self.emitter.emit_line(f"match {call_expr} {{")
+            self.emitter.indent()
+            self.emitter.emit_line("Ok(()) => {}")
+            for c in handled:
+                self.emitter.emit_line(f"Err(__f) if __f.code == {c} => {{")
+                self.emitter.indent()
+                self._generate_handler_body(unit_handlers[c])
+                self.emitter.dedent()
+                self.emitter.emit_line("}")
+            # Exhaustiveness arm: re-raise any code not handled in this scope.
+            self.emitter.emit_line("Err(__f) => {")
+            self.emitter.indent()
+            self._emit_reraise("__f")
+            self.emitter.dedent()
+            self.emitter.emit_line("}")
+            self.emitter.dedent()
+            self.emitter.emit_line("}")
+        elif self._cur_unit_is_result:
+            # No handler here; propagate to our caller.
+            self.emitter.emit_line(f"{call_expr}?;")
+        else:
+            # No handler anywhere up to main -> unhandled fault terminates.
+            self.emitter.emit_line(f"if let Err(__f) = {call_expr} {{")
+            self.emitter.indent()
+            self.emitter.emit_line(
+                "eprintln!(\"HAL/S fault {} (unhandled)\", __f.code);")
+            self.emitter.emit_line("std::process::exit(__f.code);")
+            self.emitter.dedent()
+            self.emitter.emit_line("}")
+
+    def _emit_reraise(self, fvar: str) -> None:
+        """Propagate a fault the current scope does not handle."""
+        if self._cur_unit_is_result:
+            self.emitter.emit_line(f"return Err({fvar});")
+        else:
+            self.emitter.emit_line(
+                f"eprintln!(\"HAL/S fault {{}} (unhandled)\", {fvar}.code);")
+            self.emitter.emit_line(f"std::process::exit({fvar}.code);")
+
+    def _unit_body_nodes(self, unit):
+        """Walk the nodes of a unit's own body (declarations + statements),
+        without descending into nested PROCEDURE/TASK definitions."""
+        body = (list(getattr(unit, "declarations", []))
+                + list(getattr(unit, "statements", [])))
+        for stmt in body:
+            yield from self._walk(stmt)
+
+    def _collect_unit_handlers(self, unit) -> dict:
+        """{fault code: handler body} for ON ERROR handlers declared directly
+        in this unit's scope."""
+        handlers = {}
+        for n in self._unit_body_nodes(unit):
+            if isinstance(n, OnErrorNode):
+                handlers[n.code] = n.body
+        return handlers
+
+    @staticmethod
+    def _is_trappable_division(node) -> bool:
+        return (isinstance(node, AssignmentNode)
+                and isinstance(node.value, BinaryOpNode)
+                and node.value.operator == "/"
+                and isinstance(node.target, IdentifierNode))
+
+    def _analyze_faults(self, ast) -> None:
+        """Scope pre-pass for the ON ERROR fault model.
+
+        Records each unit's active handlers and computes, via a fixpoint over
+        the call graph, the set of fault codes each procedure may propagate to
+        its caller (own faulting ops plus callees', minus anything it handles
+        locally). Procedures with a non-empty set get a `Result<_, HalFault>`
+        signature so a fault unwinds to the nearest enclosing handler."""
+        self._uses_faults = any(
+            isinstance(n, OnErrorNode) for n in self._walk(ast))
+        self._unit_handlers = {}
+        self._proc_raises = {}
+        self._faulting_procs = set()
+        if not self._uses_faults:
+            return
+
+        procs = {
+            n.name.lower(): n
+            for n in self._walk(ast)
+            if isinstance(n, ProcedureNode) and not getattr(n, "is_external", False)
+        }
+
+        if isinstance(ast, ProgramNode):
+            self._unit_handlers["@main"] = self._collect_unit_handlers(ast)
+        for name, proc in procs.items():
+            self._unit_handlers[name] = self._collect_unit_handlers(proc)
+
+        own_codes = {}
+        callees = {}
+        for name, proc in procs.items():
+            oc = set()
+            cl = set()
+            for n in self._unit_body_nodes(proc):
+                if self._is_trappable_division(n):
+                    oc.add(self._DIVIDE_FAULT_CODE)
+                if isinstance(n, CallNode):
+                    cl.add(n.name.lower())
+            own_codes[name] = oc
+            callees[name] = cl
+
+        # Fixpoint: raised = (own U raised(callees)) - handled-locally.
+        raises = {name: set() for name in procs}
+        changed = True
+        while changed:
+            changed = False
+            for name in procs:
+                handled = set(self._unit_handlers.get(name, {}).keys())
+                new = set(own_codes[name])
+                for callee in callees[name]:
+                    new |= raises.get(callee, set())
+                new -= handled
+                if new != raises[name]:
+                    raises[name] = new
+                    changed = True
+
+        self._proc_raises = raises
+        self._faulting_procs = {n for n, c in raises.items() if c}
 
     def _generate_call(self, node: CallNode) -> None:
         """Generate a CALL as a Rust function call. Input arguments pass by
@@ -1473,7 +1642,12 @@ use hal_rt::*;
         parts += [
             f"&mut {self._generate_expression(a)}" for a in node.assign_args
         ]
-        self.emitter.emit_line(f"{node.name.lower()}({', '.join(parts)});")
+        call_expr = f"{node.name.lower()}({', '.join(parts)})"
+        callee = node.name.lower()
+        if self._uses_faults and callee in self._faulting_procs:
+            self._generate_faulting_call(call_expr, callee)
+        else:
+            self.emitter.emit_line(f"{call_expr};")
     
     def _generate_name_assign(self, node: NameAssignNode) -> None:
         """ASSIGN <pointer> TO <target> -> bind the raw pointer to the target's
@@ -1598,17 +1772,16 @@ use hal_rt::*;
                 rhs = self._generate_expression(node.value)
                 self.emitter.emit_line(f"{target} = ({rhs}) as {target_type};")
                 return
-            # If a fault handler is registered and this assignment performs a
-            # division, route it through a catch_unwind trap (see
-            # _generate_trapped_division) so a divide-by-zero invokes the
-            # registered ON ERROR handler instead of producing inf/panicking.
+            # In a fault-aware program (one that uses ON ERROR), a division is
+            # lowered so a zero divisor raises HAL/S fault 5 -- handled inline
+            # by a same-scope handler, or unwound to the caller.
             if (
-                self._error_handlers
+                self._uses_faults
                 and isinstance(node.value, BinaryOpNode)
                 and node.value.operator == "/"
                 and isinstance(node.target, IdentifierNode)
             ):
-                self._generate_trapped_division(node.target, node.value)
+                self._generate_fault_division(node.target, node.value)
                 return
             # A MATRIX(...) constructor needs the target's dimensions.
             if isinstance(node.value, MatrixLiteralNode) \
@@ -1988,8 +2161,7 @@ use hal_rt::*;
             if ts is None:
                 return None
             if ts.data_type == DataType.SCALAR:
-                return ("double" if "DOUBLE" in str(getattr(
-                    ts, "precision", "")).upper() else "single")
+                return "double" if ts.precision == Precision.DOUBLE else "single"
             if ts.data_type in (DataType.VECTOR, DataType.MATRIX):
                 return "single"
             return None

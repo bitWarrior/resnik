@@ -1,0 +1,21 @@
+MACRO_HYGIENE: PROGRAM;
+  DECLARE TEMP INTEGER INITIAL(99);      /* caller's TEMP - must survive */
+  DECLARE RESULT INTEGER INITIAL(0);
+
+  /* Macro with a LOCAL declaration whose name collides with the caller's */
+  MACRO DOUBLE_IT(X, OUT);
+    DECLARE TEMP INTEGER;                 /* macro-local TEMP */
+    TEMP = X + X;
+    OUT = TEMP;
+  MEND;
+
+  DOUBLE_IT(5, RESULT);
+
+  IF RESULT = 10 THEN
+  DO;
+    IF TEMP = 99 THEN
+    DO;
+      WRITE(6) 'HYGIENE PRESERVED';
+    END;
+  END;
+CLOSE MACRO_HYGIENE;

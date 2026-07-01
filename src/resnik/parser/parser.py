@@ -55,7 +55,7 @@ from resnik.parser.ast_nodes import (
     LiteralNode,
     IdentifierNode,
 )
-from resnik.types import DataType, TypeSpec
+from resnik.types import DataType, Precision, TypeSpec
 from resnik.parser.symbol_table import SymbolTable
 
 
@@ -1134,11 +1134,11 @@ class Parser:
         # can be promoted to the wider type.
         @self.pg.production("type_spec : KEYWORD_SCALAR KEYWORD_SINGLE")
         def type_scalar_single(p: List[Any]) -> TypeSpec:
-            return TypeSpec(data_type=DataType.SCALAR, precision="single")
+            return TypeSpec(data_type=DataType.SCALAR, precision=Precision.SINGLE)
 
         @self.pg.production("type_spec : KEYWORD_SCALAR KEYWORD_DOUBLE")
         def type_scalar_double(p: List[Any]) -> TypeSpec:
-            return TypeSpec(data_type=DataType.SCALAR, precision="double")
+            return TypeSpec(data_type=DataType.SCALAR, precision=Precision.DOUBLE)
 
         @self.pg.production("type_spec : KEYWORD_BOOLEAN")
         def type_boolean(p: List[Any]) -> TypeSpec:
@@ -1976,6 +1976,227 @@ class Parser:
             else:
                 self.errors.append(ParserError("Unexpected end of input"))
 
+    # ------------------------------------------------------------------
+    # Parameterized MACRO ... MEND expansion (token-stream preprocessor)
+    # ------------------------------------------------------------------
+    #
+    # HAL/S parameterized macros are expanded *before* parsing: definitions are
+    # captured and removed from the stream, and each invocation is replaced by
+    # the macro body with formal parameters substituted by the call's argument
+    # token-lists. Because expansion happens on tokens, the resulting stream is
+    # exactly what the user would have written inline, so the parser and code
+    # generator need no macro awareness at all.
+    #
+    # Lexical hygiene: identifiers DECLAREd inside a macro body (which HAL/S
+    # macros are not really supposed to have, but users try) are alpha-renamed
+    # with a per-expansion suffix so they cannot collide with -- or clobber --
+    # like-named variables in the caller's scope.
+
+    _MACRO_MAX_DEPTH = 64
+
+    def _clone_tok(self, t: Token, lexeme=None, line=None, column=None) -> Token:
+        """Copy a token, optionally overriding its lexeme/position."""
+        return Token(
+            type=t.type,
+            lexeme=t.lexeme if lexeme is None else lexeme,
+            line=t.line if line is None else line,
+            column=t.column if column is None else column,
+            file=t.file,
+        )
+
+    def _read_paren_args(self, tokens, lp):
+        """Given tokens[lp] == LPAREN, split the parenthesized, comma-separated
+        argument list into one token-list per argument (respecting nested
+        parens). Returns (list_of_token_lists, index_after_matching_RPAREN),
+        or (None, None) if the parentheses are unbalanced."""
+        n = len(tokens)
+        depth = 0
+        cur: List[Token] = []
+        args: List[List[Token]] = []
+        i = lp
+        while i < n:
+            t = tokens[i]
+            if t.type == "LPAREN":
+                depth += 1
+                if depth > 1:
+                    cur.append(t)
+            elif t.type == "RPAREN":
+                depth -= 1
+                if depth == 0:
+                    if cur or args:
+                        args.append(cur)
+                    return args, i + 1
+                cur.append(t)
+            elif t.type == "COMMA" and depth == 1:
+                args.append(cur)
+                cur = []
+            else:
+                cur.append(t)
+            i += 1
+        return None, None
+
+    def _collect_macro_defs(self, tokens):
+        """Capture and strip `MACRO name(params); <body> MEND;` definitions.
+        Returns (macros, remaining_tokens) where macros maps an upper-cased
+        name to (param_names_upper, body_tokens)."""
+        macros: dict = {}
+        out: List[Token] = []
+        i = 0
+        n = len(tokens)
+        while i < n:
+            t = tokens[i]
+            if t.type != "KEYWORD_MACRO":
+                out.append(t)
+                i += 1
+                continue
+
+            # Header: MACRO IDENTIFIER ( params ) ;
+            if i + 1 >= n or tokens[i + 1].type != "IDENTIFIER":
+                self.errors.append(ParserError(
+                    "Malformed MACRO: expected a name", t.line, t.column))
+                i += 1
+                continue
+            name = tokens[i + 1].lexeme.upper()
+            k = i + 2
+            params: List[str] = []
+            if k < n and tokens[k].type == "LPAREN":
+                argls, end = self._read_paren_args(tokens, k)
+                if argls is None:
+                    self.errors.append(ParserError(
+                        f"Malformed parameter list for MACRO '{name}'",
+                        t.line, t.column))
+                    i += 1
+                    continue
+                for a in argls:
+                    if len(a) == 1 and a[0].type == "IDENTIFIER":
+                        params.append(a[0].lexeme.upper())
+                    else:
+                        self.errors.append(ParserError(
+                            f"MACRO '{name}' parameters must be identifiers",
+                            t.line, t.column))
+                k = end
+            if k < n and tokens[k].type == "SEMICOLON":
+                k += 1  # skip the header terminator
+
+            # Body: everything up to MEND.
+            body: List[Token] = []
+            while k < n and tokens[k].type != "KEYWORD_MEND":
+                if tokens[k].type == "KEYWORD_MACRO":
+                    self.errors.append(ParserError(
+                        "Nested MACRO definitions are not supported",
+                        tokens[k].line, tokens[k].column))
+                    break
+                body.append(tokens[k])
+                k += 1
+            if k >= n or tokens[k].type != "KEYWORD_MEND":
+                self.errors.append(ParserError(
+                    f"MACRO '{name}' is missing its MEND", t.line, t.column))
+                i = k
+                continue
+            k += 1  # skip MEND
+            if k < n and tokens[k].type == "SEMICOLON":
+                k += 1  # skip the MEND terminator
+
+            macros[name] = (params, body)
+            i = k
+        return macros, out
+
+    def _macro_local_decls(self, body, params):
+        """Identifiers DECLAREd inside a macro body that are not parameters,
+        as {upper_name: original_lexeme} for hygienic renaming."""
+        locals_: dict = {}
+        n = len(body)
+        for k in range(n):
+            if body[k].type != "KEYWORD_DECLARE":
+                continue
+            j = k + 1
+            expect_id = True
+            while j < n:
+                tj = body[j]
+                if expect_id and tj.type == "IDENTIFIER":
+                    up = tj.lexeme.upper()
+                    if up not in params and up not in locals_:
+                        locals_[up] = tj.lexeme
+                    expect_id = False
+                    j += 1
+                elif (not expect_id) and tj.type == "COMMA":
+                    expect_id = True
+                    j += 1
+                else:
+                    break
+        return locals_
+
+    def _expand_one_macro(self, call_tok, params, body, args):
+        """Produce the token list for a single invocation: substitute formals
+        with argument token-lists and alpha-rename macro-local declarations."""
+        param_map = {p: a for p, a in zip(params, args)}
+        locals_ = self._macro_local_decls(body, set(params))
+        rename = {}
+        if locals_:
+            suffix = f"__m{self._macro_uid}"
+            self._macro_uid += 1
+            rename = {up: f"{orig}{suffix}" for up, orig in locals_.items()}
+
+        out: List[Token] = []
+        for t in body:
+            up = t.lexeme.upper() if t.type == "IDENTIFIER" else None
+            if up is not None and up in param_map:
+                # Splice the argument's tokens in place of the formal parameter.
+                for a in param_map[up]:
+                    out.append(self._clone_tok(
+                        a, line=call_tok.line, column=call_tok.column))
+            elif up is not None and up in rename:
+                out.append(self._clone_tok(t, lexeme=rename[up]))
+            else:
+                out.append(self._clone_tok(t))
+        return out
+
+    def _apply_macros(self, tokens, macros, depth=0):
+        """Replace each macro invocation with its expanded body, recursively
+        (so a macro may invoke another), bounded by _MACRO_MAX_DEPTH."""
+        if depth > self._MACRO_MAX_DEPTH:
+            self.errors.append(ParserError(
+                "Macro expansion too deep (recursive macro?)"))
+            return tokens
+        out: List[Token] = []
+        i = 0
+        n = len(tokens)
+        while i < n:
+            t = tokens[i]
+            if (t.type == "IDENTIFIER" and t.lexeme.upper() in macros
+                    and i + 1 < n and tokens[i + 1].type == "LPAREN"):
+                params, body = macros[t.lexeme.upper()]
+                args, end = self._read_paren_args(tokens, i + 1)
+                if args is None:
+                    out.append(t)
+                    i += 1
+                    continue
+                j = end
+                if j < n and tokens[j].type == "SEMICOLON":
+                    j += 1  # a statement-form invocation swallows its ';'
+                if len(args) != len(params):
+                    self.errors.append(ParserError(
+                        f"Macro '{t.lexeme}' expects {len(params)} argument(s), "
+                        f"got {len(args)}", t.line, t.column))
+                    out.append(t)
+                    i += 1
+                    continue
+                expanded = self._expand_one_macro(t, params, body, args)
+                out.extend(self._apply_macros(expanded, macros, depth + 1))
+                i = j
+                continue
+            out.append(t)
+            i += 1
+        return out
+
+    def _expand_macros(self, tokens: List[Token]) -> List[Token]:
+        """Full parameterized-macro pass: capture definitions, then expand all
+        invocations in the remaining stream."""
+        macros, stripped = self._collect_macro_defs(tokens)
+        if not macros:
+            return stripped
+        return self._apply_macros(stripped, macros)
+
     def _expand_replace(self, tokens: List[Token]) -> List[Token]:
         """Apply HAL/S REPLACE <name> BY <tokens>; macro substitution.
 
@@ -2115,9 +2336,12 @@ class Parser:
         self._proc_assign_types = {}
         self.symbol_table = SymbolTable()
 
-        # Expand REPLACE ... BY ...; macros (HAL/S preprocessor) at the token
-        # level before parsing. Definitions are removed; later uses of a macro
-        # name are substituted with the definition's tokens.
+        # Token-level preprocessor passes, before parsing:
+        #   1. parameterized MACRO ... MEND expansion (with lexical hygiene)
+        #   2. REPLACE <name> BY ...; textual macros
+        #   3. implicit multiply by juxtaposition
+        self._macro_uid = 0
+        tokens = self._expand_macros(tokens)
         tokens = self._expand_replace(tokens)
         tokens = self._insert_implicit_multiply(tokens)
 
