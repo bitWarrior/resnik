@@ -341,6 +341,18 @@ class RustCodeGenerator:
         if self._event_vars:
             self.emitter.emit_line()
 
+        # NONHAL external functions -> module-level `extern "C"` FFI bindings;
+        # the linker resolves the actual (assembly/C) implementation. Calls to
+        # them are wrapped in `unsafe` below.
+        self._extern_fns: set = set()
+        for node in self._walk(ast):
+            if isinstance(node, ProcedureNode) and getattr(
+                    node, "is_external", False):
+                self._extern_fns.add(node.name.lower())
+                self._generate_extern(node)
+        if self._extern_fns:
+            self.emitter.emit_line()
+
         # Generate code from AST
         self._generate_node(ast)
         
@@ -1271,6 +1283,10 @@ use hal_rt::*;
         Args:
             node: ProcedureNode to generate
         """
+        # NONHAL external functions are emitted as `extern "C"` bindings in the
+        # generate() pre-pass; there is no HAL/S body to lower here.
+        if getattr(node, "is_external", False):
+            return
         rust_name = node.name.lower()
         all_param_names = list(node.parameters) + list(node.assign_params)
         param_set = {p.lower() for p in all_param_names}
@@ -1849,6 +1865,33 @@ use hal_rt::*;
                         and self._is_boolean_expr(node.right))
         return False
 
+    def _bit_width_expr(self, node):
+        """Declared BIT width of an expression (None if not a BIT). Used to
+        lower `||` bit concatenation; a nested `||` sums its operands' widths."""
+        if isinstance(node, IdentifierNode):
+            w = self._bit_widths.get(node.name.lower())
+            if w is not None:
+                return w
+            ts = self._var_info.get(node.name.lower())
+            if (ts is not None and ts.data_type == DataType.BIT
+                    and ts.dimensions):
+                return ts.dimensions[0]
+            return None
+        if isinstance(node, BinaryOpNode) and node.operator == "||":
+            lw = self._bit_width_expr(node.left)
+            rw = self._bit_width_expr(node.right)
+            if lw is not None and rw is not None:
+                return lw + rw
+        return None
+
+    def _is_array_expr(self, node) -> bool:
+        """True if an expression is a plain ARRAY value (not an element access).
+        Used to unroll array +/-/* into element-wise loops."""
+        if isinstance(node, IdentifierNode):
+            ts = self._var_info.get(node.name.lower())
+            return ts is not None and ts.array_size is not None
+        return False
+
     def _generate_binary_op(self, node: BinaryOpNode) -> str:
         """
         Generate Rust binary operation with minimal, correct parentheses.
@@ -1860,11 +1903,30 @@ use hal_rt::*;
             Rust binary expression
         """
         op = node.operator
-        # String concatenation: build a new String via format! (handles
-        # String and &str operands uniformly, any nesting depth).
+
+        # Array arithmetic. Rust cannot `+`/`*` fixed arrays, so element-wise
+        # operations (and scalar broadcasting) unroll to std::array::from_fn,
+        # which builds a [T; N] sized to the assignment target.
+        if op in ("+", "-", "*", "/"):
+            l_arr = self._is_array_expr(node.left)
+            r_arr = self._is_array_expr(node.right)
+            if l_arr or r_arr:
+                left = self._generate_expression(node.left)
+                right = self._generate_expression(node.right)
+                lt = f"{left}[i]" if l_arr else left
+                rt = f"{right}[i]" if r_arr else right
+                return f"std::array::from_fn(|i| {lt} {op} {rt})"
+        # `||` is overloaded: bit concatenation for BIT operands (shift the
+        # left operand up by the right operand's width and OR in the right), and
+        # string concatenation otherwise. BIT lowers to u32 here, so no width
+        # cast is needed (the u8/u16 casts in the spec are for narrower types).
         if op == "||":
+            lw = self._bit_width_expr(node.left)
+            rw = self._bit_width_expr(node.right)
             left = self._generate_expression(node.left)
             right = self._generate_expression(node.right)
+            if lw is not None and rw is not None:
+                return f"(({left}) << {rw}) | ({right})"
             return f'format!("{{}}{{}}", {left}, {right})'
         op_map = {
             "+": "+", "-": "-", "*": "*", "/": "/",
@@ -1895,17 +1957,53 @@ use hal_rt::*;
         left = self._operand(node.left, my_prec, right_side=False)
         right = self._operand(node.right, my_prec, right_side=True)
 
-        # HAL/S promotes mixed integer/scalar arithmetic to scalar; Rust has no
-        # implicit numeric coercion, so cast the integer operand to f32 when the
-        # other side is float (e.g. INTEGER * SCALAR -> (i as f32) * s).
+        # HAL/S promotes mixed arithmetic to the wider operand. Rust has no
+        # implicit numeric coercion, so cast: an integer operand to the float
+        # type, and a single-precision (f32) operand to f64 when the other side
+        # is double-precision (e.g. SINGLE * DOUBLE -> (s as f64) * d).
         if op in ("+", "-", "*", "/"):
             lk = self._numeric_kind(node.left)
             rk = self._numeric_kind(node.right)
+            lp = self._float_precision(node.left)
+            rp = self._float_precision(node.right)
+            is_double = (lp == "double" or rp == "double")
+            ftype = "f64" if is_double else "f32"
             if lk == "int" and rk == "float":
-                left = f"({left} as f32)"
+                left = f"({left} as {ftype})"
             elif rk == "int" and lk == "float":
-                right = f"({right} as f32)"
+                right = f"({right} as {ftype})"
+            if is_double:
+                if lp == "single" and rp == "double":
+                    left = f"({left} as f64)"
+                elif rp == "single" and lp == "double":
+                    right = f"({right} as f64)"
         return f"{left} {rust_op} {right}"
+
+    def _float_precision(self, node):
+        """'double' / 'single' / None for a scalar expression's precision, used
+        to promote mixed-precision arithmetic. Literals return None (they adapt
+        to context in Rust)."""
+        if isinstance(node, IdentifierNode):
+            ts = self._var_info.get(node.name.lower())
+            if ts is None:
+                return None
+            if ts.data_type == DataType.SCALAR:
+                return ("double" if "DOUBLE" in str(getattr(
+                    ts, "precision", "")).upper() else "single")
+            if ts.data_type in (DataType.VECTOR, DataType.MATRIX):
+                return "single"
+            return None
+        if isinstance(node, UnaryOpNode):
+            return self._float_precision(node.operand)
+        if isinstance(node, BinaryOpNode) and node.operator in (
+                "+", "-", "*", "/"):
+            lp = self._float_precision(node.left)
+            rp = self._float_precision(node.right)
+            if lp == "double" or rp == "double":
+                return "double"
+            if lp == "single" or rp == "single":
+                return "single"
+        return None
 
     def _numeric_kind(self, node) -> str:
         """Best-effort numeric classification of an expression: 'int', 'float',
@@ -2311,7 +2409,26 @@ use hal_rt::*;
                 i = self._generate_expression(node.arguments[0])
                 return f"{base}.0[({i}) as usize - 1]"
         args = ", ".join(self._generate_expression(a) for a in node.arguments)
+        # NONHAL external calls cross the FFI boundary and are unsafe to call.
+        if node.name.lower() in getattr(self, "_extern_fns", set()):
+            return f"unsafe {{ {node.name.lower()}({args}) }}"
         return f"{node.name.lower()}({args})"
+
+    def _generate_extern(self, node) -> None:
+        """Emit a NONHAL function as an `extern "C"` FFI signature."""
+        name = node.name.lower()
+        ptypes = {
+            d.identifiers[0].lower(): d.type_spec
+            for d in node.statements
+            if isinstance(d, DeclareNode) and len(d.identifiers) == 1
+        }
+        params = ", ".join(
+            f"{pn.lower()}: {self._full_rust_type(ptypes.get(pn.lower()))}"
+            for pn in node.parameters
+        )
+        ret = (f" -> {self._full_rust_type(node.return_type)}"
+               if node.return_type is not None else "")
+        self.emitter.emit_line(f'extern "C" {{ fn {name}({params}){ret}; }}')
 
     def _full_rust_type(self, ts) -> str:
         """Complete Rust type including array dimensions, e.g.

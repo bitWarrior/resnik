@@ -36,9 +36,12 @@ class TypeMapper:
         DataType.CHARACTER: "String",
     }
     
-    def _scalar_type(self, precision: Optional[Precision]) -> str:
-        """Resolve SCALAR element type from precision (f32 single, f64 double)."""
-        return "f64" if precision == Precision.DOUBLE else "f32"
+    def _scalar_type(self, precision) -> str:
+        """Resolve SCALAR element type from precision (f32 single, f64 double).
+        Accepts the Precision enum or a plain string."""
+        if precision in (Precision.DOUBLE, "double", "DOUBLE"):
+            return "f64"
+        return "f32"
 
     def map_type(self, type_spec: Optional[TypeSpec]) -> str:
         """

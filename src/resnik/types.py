@@ -98,7 +98,7 @@ class TypeSpec:
     """Type specification for declarations."""
 
     data_type: DataType
-    precision: Optional[Precision] = None
+    precision: str = "single"  # SCALAR precision: "single" (f32) or "double" (f64)
     dimensions: List[int] = field(default_factory=list)
     length: Optional[int] = None
     type_name: Optional[str] = None  # structure template name, when STRUCTURE
@@ -109,9 +109,15 @@ class TypeSpec:
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
+        # precision is normally a string ("single"/"double"), but tolerate a
+        # Precision enum in case a caller sets one.
+        precision = self.precision
+        if precision is not None and hasattr(precision, "value"):
+            precision = precision.value
+
         return {
             "data_type": self.data_type.value,
-            "precision": self.precision.value if self.precision else None,
+            "precision": precision,
             "dimensions": self.dimensions,
             "length": self.length,
             "type_name": self.type_name,

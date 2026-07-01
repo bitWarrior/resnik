@@ -105,6 +105,9 @@ class Parser:
                 "KEYWORD_TO",
                 "KEYWORD_GO",
                 "KEYWORD_NAME",
+                "KEYWORD_NONHAL",
+                "KEYWORD_DOUBLE",
+                "KEYWORD_SINGLE",
                 "HASH",
                 "KEYWORD_BY",
                 "KEYWORD_INITIAL",
@@ -258,6 +261,103 @@ class Parser:
             if getattr(ts, "element_type", None) else None
         return (ts.data_type, dims, adims, elem)
 
+    def _check_bit_concat(self, body: list) -> None:
+        """`||` on BIT operands concatenates their bit widths. Assigning the
+        result to a BIT target whose declared width differs is a compile-time
+        size mismatch."""
+        var_types: dict = {}
+        for stmt in body:
+            if isinstance(stmt, DeclareNode):
+                for ident in stmt.identifiers:
+                    var_types[ident.lower()] = stmt.type_spec
+
+        def bit_width(node):
+            if isinstance(node, IdentifierNode):
+                ts = var_types.get(node.name.lower())
+                if (ts is not None and ts.data_type == DataType.BIT
+                        and ts.dimensions):
+                    return ts.dimensions[0]
+                return None
+            if isinstance(node, BinaryOpNode) and node.operator == "||":
+                lw = bit_width(node.left)
+                rw = bit_width(node.right)
+                if lw is not None and rw is not None:
+                    return lw + rw
+            return None
+
+        for node in self._walk_nodes(body):
+            if not isinstance(node, AssignmentNode):
+                continue
+            val = node.value
+            if not (isinstance(val, BinaryOpNode) and val.operator == "||"):
+                continue
+            concat_w = bit_width(val)
+            if concat_w is None:
+                continue  # not a BIT concatenation (string concat, etc.)
+            tgt = node.target
+            if isinstance(tgt, IdentifierNode):
+                tts = var_types.get(tgt.name.lower())
+                if (tts is not None and tts.data_type == DataType.BIT
+                        and tts.dimensions):
+                    tw = tts.dimensions[0]
+                    if tw != concat_w:
+                        self.errors.append(
+                            SemanticError(
+                                f"BIT concatenation produces BIT({concat_w}) "
+                                f"but target '{tgt.name}' is BIT({tw})",
+                                getattr(node, "line", 0),
+                                getattr(node, "column", 0),
+                            )
+                        )
+
+    def _check_array_dims(self, body: list) -> None:
+        """Element-wise array arithmetic (+, -, *, /) requires both array
+        operands to have the same length. Scalar broadcasting (array op scalar)
+        is allowed. Mismatched array dimensions are a semantic error."""
+        var_types: dict = {}
+        for stmt in body:
+            if isinstance(stmt, DeclareNode):
+                for ident in stmt.identifiers:
+                    var_types[ident.lower()] = stmt.type_spec
+
+        def array_size(node):
+            if isinstance(node, IdentifierNode):
+                ts = var_types.get(node.name.lower())
+                if ts is not None and ts.array_size is not None:
+                    return ts.array_size
+            return None
+
+        for node in self._walk_nodes(body):
+            if isinstance(node, BinaryOpNode) and node.operator in (
+                    "+", "-", "*", "/"):
+                ls = array_size(node.left)
+                rs = array_size(node.right)
+                if ls is not None and rs is not None and ls != rs:
+                    self.errors.append(
+                        SemanticError(
+                            f"array dimension mismatch: ARRAY({ls}) "
+                            f"{node.operator} ARRAY({rs}) -- element-wise "
+                            "operations require equal lengths",
+                            getattr(node, "line", 0),
+                            getattr(node, "column", 0),
+                        )
+                    )
+
+    def _walk_nodes(self, root):
+        """Yield every AST node under a list of statements (or a single node)."""
+        stack = list(root) if isinstance(root, list) else [root]
+        seen = set()
+        while stack:
+            n = stack.pop()
+            if not hasattr(n, "__dict__") or id(n) in seen:
+                continue
+            seen.add(id(n))
+            yield n
+            for v in vars(n).values():
+                for x in (v if isinstance(v, list) else [v]):
+                    if hasattr(x, "__dict__"):
+                        stack.append(x)
+
     def _check_call_signatures(self, body: list) -> None:
         """Enforce that each CALL matches its PROCEDURE's input/output
         structure: same number of input arguments and ASSIGN (output)
@@ -366,6 +466,8 @@ class Parser:
 
         self._check_declaration_order(body, kind)
         self._check_call_signatures(body)
+        self._check_array_dims(body)
+        self._check_bit_concat(body)
 
         return node_cls(
             name=name,
@@ -387,6 +489,7 @@ class Parser:
     def _build_procedure(
         self, name_tok: Any, params: list, statements: list, close_tok: Any,
         return_type: Any = None, assign_params: Any = None,
+        is_external: bool = False,
     ) -> ProcedureNode:
         """Build a ProcedureNode and check the CLOSE name matches the label."""
         name = name_tok.value
@@ -419,6 +522,7 @@ class Parser:
             assign_params=assign_params,
             statements=statements,
             return_type=return_type,
+            is_external=is_external,
             line=getattr(name_tok, "line", 0),
             column=getattr(name_tok, "column", 0),
         )
@@ -561,6 +665,20 @@ class Parser:
         def procedure_block_noparams(p: List[Any]) -> ProcedureNode:
             return self._build_procedure(
                 name_tok=p[0], params=[], statements=p[4], close_tok=p[6]
+            )
+
+        # NONHAL: opaque external (FFI) function -- a signature with no HAL/S
+        # body. The body holds only parameter declarations; the code generator
+        # emits an `extern "C"` binding and leaves resolution to the linker.
+        @self.pg.production(
+            "procedure_block : IDENTIFIER COLON KEYWORD_FUNCTION "
+            "LPAREN param_list RPAREN type_spec KEYWORD_NONHAL SEMICOLON "
+            "statement_list KEYWORD_CLOSE IDENTIFIER SEMICOLON"
+        )
+        def function_block_nonhal(p: List[Any]) -> ProcedureNode:
+            return self._build_procedure(
+                name_tok=p[0], params=p[4], statements=p[9],
+                close_tok=p[11], return_type=p[6], is_external=True,
             )
 
         # FUNCTION: like a procedure but with an explicit return type.
@@ -1010,6 +1128,17 @@ class Parser:
         @self.pg.production("type_spec : KEYWORD_SCALAR")
         def type_scalar(p: List[Any]) -> TypeSpec:
             return TypeSpec(data_type=DataType.SCALAR)
+
+        # Explicit precision: SCALAR SINGLE -> f32 (32-bit), SCALAR DOUBLE ->
+        # f64 (64-bit). The precision is tracked so mixed-precision arithmetic
+        # can be promoted to the wider type.
+        @self.pg.production("type_spec : KEYWORD_SCALAR KEYWORD_SINGLE")
+        def type_scalar_single(p: List[Any]) -> TypeSpec:
+            return TypeSpec(data_type=DataType.SCALAR, precision="single")
+
+        @self.pg.production("type_spec : KEYWORD_SCALAR KEYWORD_DOUBLE")
+        def type_scalar_double(p: List[Any]) -> TypeSpec:
+            return TypeSpec(data_type=DataType.SCALAR, precision="double")
 
         @self.pg.production("type_spec : KEYWORD_BOOLEAN")
         def type_boolean(p: List[Any]) -> TypeSpec:

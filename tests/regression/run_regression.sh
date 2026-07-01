@@ -176,6 +176,10 @@ run_regression_case "Abort Monitor" \
     "Verify Resnik parses HAL/S GOTO Statements (yuck!)." \
     "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/abort_monitor/abort_monitor.hal --emit-exe
 
+run_regression_case "Array Math" \
+    "Verify Resnik's AST parses type overloading and generates proper Rust backend code." \
+    "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/array_math/array_math.hal --emit-exe
+
 run_regression_case "Attitude Control" \
     "Verify Resnik correctly handles assignments between calculated linear algebra nodes and statically declared dummy vectors." \
     "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/attitude_control/attitude_control.hal --emit-exe
@@ -187,6 +191,10 @@ run_regression_case "Attitude Error" \
 run_regression_case "Attitude Math" \
     "Verify Resnik parser's ability to build and resolve a deeply nested expression tree of geometric intrinsics." \
     "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/attitude_math/attitude_math.hal --emit-exe
+
+run_regression_case "Bit Assembler" \
+    "Verify Resnik's ability to handle the || (concatenate) operator on raw bit arrays, generating dynamically sized integer types on the fly." \
+    "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/basic_math_test/basic_math_test.hal --emit-exe
 
 run_regression_case "Basic Math Test" \
     "Verify Resnik's compatability with HAL/S Adjacency Multiplication 'feature'. Resnik must recognize that two adjacent operand tokens (with no explicit operator like + or / between them) form a multiplication expression." \
@@ -209,12 +217,20 @@ run_regression_case "Compile Time Math" \
     "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/compile_time_math/compile_time_math.hal --emit-exe
 
 run_regression_case "CVE Monitor" \
-    "Verify Resnik compatability to HAL/S EQUATE keyword aliasing across entirely different primitive types, simulating a memory corruption check." \
+    "Verify Resnik's compatability to HAL/S EQUATE keyword aliasing across entirely different primitive types, simulating a memory corruption check." \
     "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/cve_monitor/cve_monitor.hal --emit-exe
+
+run_regression_case "Dangling Else Trap" \
+    "Verify Resnik prioritizes IF-THEN-ELSE statement over an open IF-THEN statement." \
+    "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/dangling_else_trap/dangling_else_trap.hal --emit-exe
 
 run_regression_case "Data Pipeline" \
     "Verify Resnik's ability to pass complex, multi-dimensional structures by reference using the ASSIGN blocks." \
     "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/data_pipeline/data_pipeline.hal --emit-exe
+
+run_regression_case "Dynamic Slicing" \
+    "Verify Resnik automatically injects runtime bounds-checking logic immediately prior to the slice operation." \
+    "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/dynamic_slicing/dynamic_slicing.hal --emit-exe
 
 run_regression_case "Escape Velocity" \
     "Verify Resnik's ability to handle standard mathematical built-in functions (like SQRT), extremely large scientific notation literals, and complex adjacency multiplication grouped by parentheses." \
@@ -264,9 +280,13 @@ run_regression_case "NAV Filter" \
     "Verify Resnik's compatability of HAL/S unique indexing semantics for geometric types using advanced matrix partitioning and slicing." \
     "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/nav_filter/nav_filter.hal --emit-exe
 
-run_regression_case "ORBITAL KINEMATICS" \
+run_regression_case "Orbital Kinematics" \
     "Verify Resnik's ability to handle mixed-type arithmetic—specifically, scalar-to-vector broadcasting and exponentiation." \
     "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/orbital_kinematics/orbital_kinematics.hal --emit-exe
+
+run_regression_case "Percision Math" \
+    "Verify Resnik's ability to handle mixed-precision math and automatic type promotion." \
+    "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/percision_math/percision_math.hal --emit-exe
 
 run_regression_case "Pitch DAP" \
     "Verify Resnik's lowerering of nested tasks to separate top-level Rust functions. " \

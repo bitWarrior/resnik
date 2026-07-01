@@ -2563,3 +2563,169 @@ class TestCharacterFixedLength:
             "T: PROGRAM; DECLARE S CHARACTER(10); S = 'HI'; CLOSE T;")
         assert not errs
         assert 'format!("{:<10}", "HI")' in code
+
+
+class TestArrayArithmetic:
+    """Element-wise array +/-/*, scalar broadcast, and dimension checking."""
+
+    def _run(self, src: str):
+        from resnik import Lexer, Parser
+        from resnik.backend.codegen import RustCodeGenerator
+        p = Parser()
+        ast = p.parse(Lexer().tokenize(src, "t"))
+        code = RustCodeGenerator().generate(ast) if not p.errors else ""
+        return p.errors, code
+
+    def test_elementwise_add_unrolls(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE A ARRAY(5) OF SCALAR; DECLARE B ARRAY(5) OF SCALAR; "
+            "DECLARE C ARRAY(5) OF SCALAR; C = A + B; CLOSE T;")
+        assert not errs
+        assert "std::array::from_fn(|i| a[i] + b[i])" in code
+
+    def test_scalar_broadcast_multiply(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE A ARRAY(5) OF SCALAR; DECLARE C ARRAY(5) OF SCALAR; "
+            "C = A * 2.0; CLOSE T;")
+        assert not errs
+        assert "std::array::from_fn(|i| a[i] * 2.0)" in code
+
+    def test_array_element_access_is_scalar(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE A ARRAY(5) OF SCALAR; DECLARE X SCALAR; "
+            "X = A$1 + A$5; CLOSE T;")
+        assert not errs
+        assert "x = a[0] + a[4];" in code
+
+    def test_dimension_mismatch_errors(self) -> None:
+        from resnik import Lexer, Parser
+        p = Parser()
+        p.parse(Lexer().tokenize(
+            "T: PROGRAM; DECLARE A ARRAY(4) OF SCALAR; DECLARE B ARRAY(5) OF SCALAR; "
+            "DECLARE C ARRAY(5) OF SCALAR; C = A + B; CLOSE T;", "t"))
+        assert any("dimension mismatch" in str(e) for e in p.errors)
+
+    def test_matching_dims_ok(self) -> None:
+        errs, _ = self._run(
+            "T: PROGRAM; DECLARE A ARRAY(5) OF SCALAR; DECLARE B ARRAY(5) OF SCALAR; "
+            "DECLARE C ARRAY(5) OF SCALAR; C = A + B; CLOSE T;")
+        assert not errs
+
+
+class TestNonhalExternalFunctions:
+    """NONHAL opaque functions -> extern "C" FFI bindings, unsafe calls."""
+
+    def _run(self, src: str):
+        from resnik import Lexer, Parser
+        from resnik.backend.codegen import RustCodeGenerator
+        p = Parser()
+        ast = p.parse(Lexer().tokenize(src, "t"))
+        code = RustCodeGenerator().generate(ast) if not p.errors else ""
+        return p.errors, code
+
+    def test_nonhal_emits_extern_block(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; R: FUNCTION(A) INTEGER NONHAL; DECLARE A INTEGER; "
+            "CLOSE R; DECLARE X INTEGER; X = R(5); CLOSE T;")
+        assert not errs
+        assert 'extern "C" { fn r(a: i32) -> i32; }' in code
+
+    def test_nonhal_call_is_unsafe(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; R: FUNCTION(A) INTEGER NONHAL; DECLARE A INTEGER; "
+            "CLOSE R; DECLARE X INTEGER; X = R(5); CLOSE T;")
+        assert not errs
+        assert "unsafe { r(5) }" in code
+
+    def test_nonhal_has_no_fn_body(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; R: FUNCTION(A) INTEGER NONHAL; DECLARE A INTEGER; "
+            "CLOSE R; CLOSE T;")
+        assert not errs
+        # no `fn r(...) {` definition -- only the extern signature
+        assert "fn r(a: i32) {" not in code
+        assert 'extern "C"' in code
+
+
+class TestBitConcatenation:
+    """`||` overload: bit concatenation on BIT vs string concat on CHARACTER."""
+
+    def _run(self, src: str):
+        from resnik import Lexer, Parser
+        from resnik.backend.codegen import RustCodeGenerator
+        p = Parser()
+        ast = p.parse(Lexer().tokenize(src, "t"))
+        code = RustCodeGenerator().generate(ast) if not p.errors else ""
+        return p.errors, code
+
+    def test_bit_concat_shifts_and_ors(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE H BIT(8); DECLARE L BIT(8); DECLARE W BIT(16); "
+            "W = H || L; CLOSE T;")
+        assert not errs
+        assert "((h) << 8) | (l)" in code
+
+    def test_string_concat_still_format(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE A CHARACTER(4); DECLARE B CHARACTER(4); "
+            "DECLARE S CHARACTER(8); S = A || B; CLOSE T;")
+        assert not errs
+        assert "format!" in code
+
+    def test_nested_bit_concat_width(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE A BIT(4); DECLARE B BIT(4); DECLARE C BIT(8); "
+            "DECLARE W BIT(16); W = A || B || C; CLOSE T;")
+        assert not errs
+        # (A||B) is BIT(8), then || C (BIT(8)) -> shift left by 8
+        assert "<< 8) | (c)" in code
+
+    def test_bit_width_mismatch_errors(self) -> None:
+        from resnik import Lexer, Parser
+        p = Parser()
+        p.parse(Lexer().tokenize(
+            "T: PROGRAM; DECLARE H BIT(8); DECLARE L BIT(8); DECLARE W BIT(12); "
+            "W = H || L; CLOSE T;", "t"))
+        assert any("BIT(16)" in str(e) and "BIT(12)" in str(e) for e in p.errors)
+
+
+class TestPrecisionPromotion:
+    """SCALAR SINGLE (f32) / DOUBLE (f64) tracking + mixed-precision upcasts."""
+
+    def _run(self, src: str):
+        from resnik import Lexer, Parser
+        from resnik.backend.codegen import RustCodeGenerator
+        p = Parser()
+        ast = p.parse(Lexer().tokenize(src, "t"))
+        code = RustCodeGenerator().generate(ast) if not p.errors else ""
+        return p.errors, code
+
+    def test_single_is_f32_double_is_f64(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE S SCALAR SINGLE; DECLARE D SCALAR DOUBLE; "
+            "CLOSE T;")
+        assert not errs
+        assert "let mut s: f32" in code
+        assert "let mut d: f64" in code
+
+    def test_mixed_precision_promotes_single_to_f64(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE S SCALAR SINGLE; DECLARE D SCALAR DOUBLE; "
+            "DECLARE R SCALAR DOUBLE; R = S * D; CLOSE T;")
+        assert not errs
+        assert "(s as f64) * d" in code
+
+    def test_double_on_right_promotes_left(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE S SCALAR SINGLE; DECLARE D SCALAR DOUBLE; "
+            "DECLARE R SCALAR DOUBLE; R = D + S; CLOSE T;")
+        assert not errs
+        assert "d + (s as f64)" in code
+
+    def test_same_precision_no_cast(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE A SCALAR SINGLE; DECLARE B SCALAR SINGLE; "
+            "DECLARE R SCALAR SINGLE; R = A * B; CLOSE T;")
+        assert not errs
+        assert "a * b" in code
+        assert "as f64" not in code

@@ -156,6 +156,7 @@ class ProcedureNode(ASTNode):
     declarations: List[ASTNode] = field(default_factory=list)
     statements: List[ASTNode] = field(default_factory=list)
     return_type: Optional["TypeSpec"] = None  # set when this is a FUNCTION
+    is_external: bool = False  # NONHAL: opaque external (FFI) function
 
     def __post_init__(self) -> None:
         self.node_type = NodeType.PROCEDURE
