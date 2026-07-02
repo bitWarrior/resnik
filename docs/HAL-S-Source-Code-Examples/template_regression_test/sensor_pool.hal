@@ -1,0 +1,6 @@
+/* Shared sensor data pool. Compile with --gen-tpl to bank SENSOR_POOL.tpl. */
+SENSOR_POOL: COMPOOL;
+  DECLARE RAW_TEMP INTEGER;
+  DECLARE CAL_GAIN SCALAR;
+  DECLARE CHANNEL_MASK BIT(16);
+CLOSE SENSOR_POOL;

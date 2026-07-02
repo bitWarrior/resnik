@@ -1,0 +1,11 @@
+D INCLUDE TEMPLATE NAV_UPDATE
+/* Negative test: POSITION is a VECTOR(4), but the included template
+   declares NAV_UPDATE's first parameter as VECTOR(3). The compiler
+   must reject this at semantic analysis -- before any code is run. */
+GUIDANCE: PROGRAM;
+  DECLARE POSITION VECTOR(4);
+  DECLARE VELOCITY VECTOR(3);
+  DECLARE STATE VECTOR(6);
+
+  CALL NAV_UPDATE(POSITION, VELOCITY) ASSIGN(STATE);
+CLOSE GUIDANCE;

@@ -94,10 +94,14 @@ class Parser:
                 "KEYWORD_STATIC",
                 "KEYWORD_CONSTANT",
                 "KEYWORD_STRUCTURE",
+                "KEYWORD_TEMPLATE",
                 "KEYWORD_RESUME",
                 "KEYWORD_EQUATE",
                 "KEYWORD_ARRAY",
                 "KEYWORD_OF",
+                "KEYWORD_ALIGNED",
+                "KEYWORD_DENSE",
+                "KEYWORD_AUTOMATIC",
                 "DOT",
                 "KEYWORD_CALL",
                 "KEYWORD_WHILE",
@@ -413,6 +417,29 @@ class Parser:
                         getattr(call, "line", 0), getattr(call, "column", 0),
                     )
                 )
+            # Dimension/type check: each input argument that is a plain
+            # variable must match the shape of the parameter it binds to. This
+            # is what catches, e.g., passing a VECTOR(4) where the (possibly
+            # TEMPLATE-declared) parameter requires a VECTOR(3).
+            itypes = self._proc_param_types.get(call.name.upper())
+            if itypes and len(call.arguments) == len(itypes):
+                for arg, pts in zip(call.arguments, itypes):
+                    name = getattr(arg, "name", None)
+                    if name is None or pts is None:
+                        continue
+                    ats = var_types.get(name.lower())
+                    if ats is None:
+                        continue
+                    if self._type_shape(ats) != self._type_shape(pts):
+                        self.errors.append(
+                            SemanticError(
+                                f"CALL {call.name} argument '{name}' does not "
+                                f"match the type/dimensions of the "
+                                f"corresponding PROCEDURE parameter",
+                                getattr(call, "line", 0),
+                                getattr(call, "column", 0),
+                            )
+                        )
             # Dimension/type check: each ASSIGN argument that is a plain
             # variable must match the shape of the parameter it binds to.
             ptypes = self._proc_assign_types.get(call.name.upper())
@@ -493,7 +520,7 @@ class Parser:
     def _build_procedure(
         self, name_tok: Any, params: list, statements: list, close_tok: Any,
         return_type: Any = None, assign_params: Any = None,
-        is_external: bool = False,
+        is_external: bool = False, is_template: bool = False,
     ) -> ProcedureNode:
         """Build a ProcedureNode and check the CLOSE name matches the label."""
         name = name_tok.value
@@ -511,9 +538,17 @@ class Parser:
         # Record the signature (input arity, output arity) so CALL sites can be
         # checked for the same input/output structure HAL/S enforces.
         self._proc_signatures[name.upper()] = (len(params), len(assign_params))
-        _bd = {d.identifiers[0].lower(): d.type_spec
-               for d in statements if isinstance(d, DeclareNode)
-               and len(d.identifiers) == 1}
+        # Map every parameter/local name to its declared type (from the body
+        # declarations), so CALL arguments can be dimension-checked against
+        # both the inputs and the ASSIGN outputs -- this is how a TEMPLATE's
+        # signature validates callers even when the body is elsewhere.
+        _bd = {}
+        for d in statements:
+            if isinstance(d, DeclareNode):
+                for ident in d.identifiers:
+                    _bd[ident.lower()] = d.type_spec
+        self._proc_param_types[name.upper()] = [
+            _bd.get(p.lower()) for p in params]
         self._proc_assign_types[name.upper()] = [
             _bd.get(a.lower()) for a in assign_params]
         # Procedure bodies may not nest further tasks/procedures here; keep all
@@ -527,6 +562,7 @@ class Parser:
             statements=statements,
             return_type=return_type,
             is_external=is_external,
+            is_template=is_template,
             line=getattr(name_tok, "line", 0),
             column=getattr(name_tok, "column", 0),
         )
@@ -555,6 +591,7 @@ class Parser:
 
         @self.pg.production("unit : program")
         @self.pg.production("unit : compool_block")
+        @self.pg.production("unit : procedure_block")
         def unit(p: List[Any]) -> ASTNode:
             return p[0]
 
@@ -648,6 +685,57 @@ class Parser:
             return self._build_procedure(
                 name_tok=p[0], params=p[4], statements=p[11],
                 close_tok=p[13], assign_params=p[8]
+            )
+
+        # TEMPLATE: a signature-only prototype (like a C header). Its params,
+        # ASSIGN outputs, and body declarations are parsed and its signature is
+        # recorded for type-validating CALL sites, but it generates no code and
+        # allocates no memory.
+        @self.pg.production(
+            "procedure_block : IDENTIFIER COLON KEYWORD_PROCEDURE "
+            "LPAREN param_list RPAREN KEYWORD_ASSIGN LPAREN param_list RPAREN "
+            "KEYWORD_TEMPLATE SEMICOLON statement_list KEYWORD_CLOSE "
+            "IDENTIFIER SEMICOLON"
+        )
+        def procedure_template_assign(p: List[Any]) -> ProcedureNode:
+            return self._build_procedure(
+                name_tok=p[0], params=p[4], statements=p[12],
+                close_tok=p[14], assign_params=p[8], is_template=True
+            )
+
+        @self.pg.production(
+            "procedure_block : IDENTIFIER COLON KEYWORD_PROCEDURE "
+            "LPAREN param_list RPAREN KEYWORD_TEMPLATE SEMICOLON "
+            "statement_list KEYWORD_CLOSE IDENTIFIER SEMICOLON"
+        )
+        def procedure_template(p: List[Any]) -> ProcedureNode:
+            return self._build_procedure(
+                name_tok=p[0], params=p[4], statements=p[8],
+                close_tok=p[10], is_template=True
+            )
+
+        @self.pg.production(
+            "procedure_block : IDENTIFIER COLON KEYWORD_PROCEDURE "
+            "KEYWORD_TEMPLATE SEMICOLON statement_list KEYWORD_CLOSE "
+            "IDENTIFIER SEMICOLON"
+        )
+        def procedure_template_noparams(p: List[Any]) -> ProcedureNode:
+            return self._build_procedure(
+                name_tok=p[0], params=[], statements=p[5],
+                close_tok=p[7], is_template=True
+            )
+
+        # FUNCTION(inputs) <return-type> TEMPLATE; -- signature-only function
+        # prototype (auto-generated into the template library).
+        @self.pg.production(
+            "procedure_block : IDENTIFIER COLON KEYWORD_FUNCTION "
+            "LPAREN param_list RPAREN type_spec KEYWORD_TEMPLATE SEMICOLON "
+            "statement_list KEYWORD_CLOSE IDENTIFIER SEMICOLON"
+        )
+        def function_template(p: List[Any]) -> ProcedureNode:
+            return self._build_procedure(
+                name_tok=p[0], params=p[4], statements=p[9],
+                close_tok=p[11], return_type=p[6], is_template=True
             )
 
         # PROCEDURE ASSIGN(outputs);  (no input parameters)
@@ -853,6 +941,7 @@ class Parser:
                     array_dims=dims,
                     array_size=dims[0],
                     element_type=element,
+                    layout=getattr(element, "layout", "aligned"),
                 ),
                 attributes={"initial": init} if init is not None else {},
                 line=getattr(p[0], "line", 0),
@@ -880,7 +969,22 @@ class Parser:
 
         @self.pg.production("array_element : IDENTIFIER KEYWORD_STRUCTURE")
         def array_element_struct(p: List[Any]) -> TypeSpec:
-            return TypeSpec(data_type=DataType.STRUCTURE, type_name=p[0].value)
+            # No layout modifier -> HAL/S defaults to ALIGNED (for speed), but
+            # we track it explicitly for the code generator.
+            return TypeSpec(data_type=DataType.STRUCTURE, type_name=p[0].value,
+                            layout="aligned")
+
+        @self.pg.production(
+            "array_element : IDENTIFIER KEYWORD_STRUCTURE KEYWORD_ALIGNED")
+        def array_element_struct_aligned(p: List[Any]) -> TypeSpec:
+            return TypeSpec(data_type=DataType.STRUCTURE, type_name=p[0].value,
+                            layout="aligned")
+
+        @self.pg.production(
+            "array_element : IDENTIFIER KEYWORD_STRUCTURE KEYWORD_DENSE")
+        def array_element_struct_dense(p: List[Any]) -> TypeSpec:
+            return TypeSpec(data_type=DataType.STRUCTURE, type_name=p[0].value,
+                            layout="dense")
 
         @self.pg.production("array_dim_list : NUMBER")
         def array_dim_single(p: List[Any]) -> list:
@@ -968,6 +1072,40 @@ class Parser:
                 identifiers=[p[1].value],
                 type_spec=p[2],
                 attributes={"static": True},
+                initial_values=values,
+                line=getattr(p[0], "line", 0),
+                column=getattr(p[0], "column", 0),
+            )
+            if len(values) == 1:
+                node.initial_value = values[0]
+            return node
+
+        # AUTOMATIC is HAL/S's default storage class (stack-local). It needs no
+        # special lowering -- a normal local variable already has automatic
+        # storage -- so we parse and record it, then ignore it in codegen.
+        @self.pg.production(
+            "declare_statement : KEYWORD_DECLARE IDENTIFIER type_spec "
+            "KEYWORD_AUTOMATIC SEMICOLON"
+        )
+        def declare_automatic(p: List[Any]) -> DeclareNode:
+            return DeclareNode(
+                identifiers=[p[1].value],
+                type_spec=p[2],
+                attributes={"automatic": True},
+                line=getattr(p[0], "line", 0),
+                column=getattr(p[0], "column", 0),
+            )
+
+        @self.pg.production(
+            "declare_statement : KEYWORD_DECLARE IDENTIFIER type_spec "
+            "KEYWORD_AUTOMATIC KEYWORD_INITIAL LPAREN arg_list RPAREN SEMICOLON"
+        )
+        def declare_automatic_initial(p: List[Any]) -> DeclareNode:
+            values = p[6]
+            node = DeclareNode(
+                identifiers=[p[1].value],
+                type_spec=p[2],
+                attributes={"automatic": True},
                 initial_values=values,
                 line=getattr(p[0], "line", 0),
                 column=getattr(p[0], "column", 0),
@@ -2444,6 +2582,7 @@ class Parser:
         self.errors = []
         self._proc_signatures = {}
         self._proc_assign_types = {}
+        self._proc_param_types = {}
         self.symbol_table = SymbolTable()
 
         # Token-level preprocessor passes, before parsing:

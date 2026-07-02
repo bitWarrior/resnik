@@ -64,6 +64,13 @@ cleanup() {
             
         done < <(find "$GIT_ROOT/docs/HAL-S-Source-Code-Examples" -type f -name "*.hal" -print0)        
     fi
+
+    # Remove generated template libraries from --gen-tpl regression cases
+    if [[ -n "${SCRIPT_DIR:-}" ]]; then
+        [[ -d "$SCRIPT_DIR/TEMPLIB" ]] && rm -rf "$SCRIPT_DIR/TEMPLIB"
+        [[ -d "$SCRIPT_DIR/TEMPLATE_REGRESSION_TEMPLIB" ]] && \
+            rm -rf "$SCRIPT_DIR/TEMPLATE_REGRESSION_TEMPLIB"
+    fi
 }
 trap cleanup SIGINT SIGTERM ERR EXIT
 
@@ -100,11 +107,65 @@ run_regression_case() {
 
     TEST_CASE_NUM=$((TEST_CASE_NUM + 1))
 
+    echo "--------------------------------------------------------------------"
+    echo "Test Case #${TEST_CASE_NUM} - ${title}"
+    echo "--------------------------------------------------------------------"
+    echo "[+] ${description}"
+    run_test "TC${TEST_CASE_NUM} - ${title}" "$@"
+}
+
+# Helper function for multi-step HAL/S template pipeline regression
+run_template_pipeline_case() {
+    local title="$1"
+    local description="$2"
+    local test_name=""
+    local tpl_dir=""
+    local tpl_file=""
+    local step_failed=""
+    local template_root=""
+
+    TEST_CASE_NUM=$((TEST_CASE_NUM + 1))
+    test_name="TC${TEST_CASE_NUM} - ${title}"
+    tpl_dir="$SCRIPT_DIR/TEMPLATE_REGRESSION_TEMPLIB"
+    template_root="$GIT_ROOT/docs/HAL-S-Source-Code-Examples/template_regression_test"
+
     echo "----------------------------------"
     echo "Test Case #${TEST_CASE_NUM} - ${title}"
     echo "----------------------------------"
     echo "[+] ${description}"
-    run_test "TC${TEST_CASE_NUM} - ${title}" "$@"
+
+    rm -rf "$tpl_dir"
+    mkdir -p "$tpl_dir"
+
+    if ! "$_RESNIK" compile "$template_root/nav_update.hal" --gen-tpl "$tpl_dir"; then
+        step_failed="nav_update.hal --gen-tpl"
+    elif ! "$_RESNIK" compile "$template_root/sensor_pool.hal" --gen-tpl "$tpl_dir"; then
+        step_failed="sensor_pool.hal --gen-tpl"
+    else
+        for tpl_file in "$tpl_dir"/NAV_UPDATE.tpl "$tpl_dir"/SENSOR_POOL.tpl; do
+            if [[ ! -f "$tpl_file" ]]; then
+                step_failed="missing $(basename "$tpl_file")"
+                break
+            fi
+            echo "  Generated: $tpl_file"
+        done
+    fi
+
+    if [[ -z "$step_failed" ]]; then
+        if ! "$_RESNIK" compile "$template_root/guidance_main.hal" --templib "$tpl_dir"; then
+            step_failed="guidance_main.hal --templib"
+        fi
+    fi
+
+    if [[ -n "$step_failed" ]]; then
+        echo "[✗ FAIL] $test_name ($step_failed)"
+        FAILED=$((FAILED + 1))
+        FAILED_TESTS+=("$test_name ($step_failed)")
+    else
+        echo "[✓ PASS] $test_name (Template pipeline)"
+        PASSED=$((PASSED + 1))
+    fi
+    echo ""
 }
 
 # Helper function to run tests, catch failures, and prevent script exit
@@ -114,22 +175,56 @@ run_test() {
 
     local hal_file=""
     local exe_file=""
+    local gen_tpl_mode=false
+    local gen_tpl_dir=""
+    local arg=""
+    local next_is_tpl_dir=false
 
-    # Dynamically find the .hal file in the argument list
+    # Parse compile arguments for .hal input, --emit-exe, and --gen-tpl modes
     for arg in "$@"; do
+        if [[ "$next_is_tpl_dir" == true ]]; then
+            gen_tpl_dir="$arg"
+            next_is_tpl_dir=false
+            continue
+        fi
+
         if [[ "$arg" == *.hal ]]; then
             hal_file="$arg"
             # Strip the '.hal' extension to get the executable path
             exe_file="${hal_file%.hal}"
-            break
+        elif [[ "$arg" == "--gen-tpl" ]]; then
+            gen_tpl_mode=true
+            next_is_tpl_dir=true
         fi
     done
 
     # Step 1: Run the compilation command
     if "$@"; then
+        if [[ "$gen_tpl_mode" == true ]]; then
+            # --gen-tpl writes TEMPLATE prototypes only; no executable is produced
+            local tpl_file=""
+            local tpl_found=false
+
+            if [[ -n "$gen_tpl_dir" ]] && [[ -d "$gen_tpl_dir" ]]; then
+                for tpl_file in "${gen_tpl_dir}"/*.tpl; do
+                    if [[ -f "$tpl_file" ]]; then
+                        tpl_found=true
+                        echo "  Generated: $tpl_file"
+                    fi
+                done
+            fi
+
+            if [[ "$tpl_found" == true ]]; then
+                echo "[✓ PASS] $test_name (Template generation)"
+                PASSED=$((PASSED + 1))
+            else
+                echo "[✗ FAIL] $test_name (No .tpl files found in ${gen_tpl_dir:-<unset>})"
+                FAILED=$((FAILED + 1))
+                FAILED_TESTS+=("$test_name (Missing Template)")
+            fi
         # Step 2: Verify the executable was created and is runnable
-        if [[ -n "$exe_file" ]] && [[ -x "$exe_file" ]]; then
-            
+        elif [[ -n "$exe_file" ]] && [[ -x "$exe_file" ]]; then
+
             # Step 3: Execute the compiled binary
             echo "+++++++++++++++++++++++++++++++++++++++++++++++++++++++++"
             if "$exe_file"; then
@@ -196,7 +291,7 @@ run_regression_case "Attitude Math" \
 
 run_regression_case "Bit Assembler" \
     "Verify Resnik's ability to handle the || (concatenate) operator on raw bit arrays, generating dynamically sized integer types on the fly." \
-    "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/basic_math_test/basic_math_test.hal --emit-exe
+    "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/bit_assembler/bit_assembler.hal --emit-exe
 
 run_regression_case "Basic Math Test" \
     "Verify Resnik's compatability with HAL/S Adjacency Multiplication 'feature'. Resnik must recognize that two adjacent operand tokens (with no explicit operator like + or / between them) form a multiplication expression." \
@@ -234,6 +329,10 @@ run_regression_case "Data Pipeline" \
     "Verify Resnik's ability to pass complex, multi-dimensional structures by reference using the ASSIGN blocks." \
     "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/data_pipeline/data_pipeline.hal --emit-exe
 
+run_regression_case "DMA Telemetry" \
+    "Verify Resnik's parsing of ALIGNED, AUTOMATIC and DENSE keywords." \
+    "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/dma_telemetry/dma_telemetry.hal --emit-exe
+
 run_regression_case "Dynamic Slicing" \
     "Verify Resnik automatically injects runtime bounds-checking logic immediately prior to the slice operation." \
     "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/dynamic_slicing/dynamic_slicing.hal --emit-exe
@@ -246,9 +345,9 @@ run_regression_case "Euler" \
     "Verify Resnik's conversion of vectors as primitive types." \
     "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/euler/euler.hal --emit-exe
 
-run_regression_case "Escape Velocity" \
-    "Verify Resnik parses EVENT types to seamlessly coerce to boolean values during conditional checks, representing whether the event is currently in a "signaled" state." \
-    "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/escape_vel/escape_vel.hal --emit-exe
+run_regression_case "Event Gateway" \
+    "Verify Resnik parses EVENT types to seamlessly coerce to boolean values during conditional checks, representing whether the event is currently in a \"signaled\" state." \
+    "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/event_gateway/event_gateway.hal --emit-exe
 
 run_regression_case "First Contact" \
     "Verify Resnik's conversion of vectors as primitive types." \
@@ -293,6 +392,10 @@ run_regression_case "Matrix Gen" \
 run_regression_case "NAV Filter" \
     "Verify Resnik's compatability of HAL/S unique indexing semantics for geometric types using advanced matrix partitioning and slicing." \
     "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/nav_filter/nav_filter.hal --emit-exe
+
+run_regression_case "NAV Update Template" \
+    "Verify Resnik executes lexer and parser on HAL/S template blocks and generates a tpl file instead of an execuatable." \
+    "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/nav_update_template/nav_update_template.hal --gen-tpl "$SCRIPT_DIR/TEMPLIB"
 
 run_regression_case "Orbital Kinematics" \
     "Verify Resnik's ability to handle mixed-type arithmetic—specifically, scalar-to-vector broadcasting and exponentiation." \
@@ -393,6 +496,9 @@ run_regression_case "Warp Drive Init" \
 run_regression_case "Yaw Rotate" \
     "Verify Resnik's ability to parse 2D matrix element assignments and trigonometric built-in functions." \
     "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/yaw_rotate/yaw_rotate.hal --emit-exe
+
+run_template_pipeline_case "HAL/S Template Processing" \
+    "Verify Resnik template workflow including supporting the OG 'D INCLUDE TEMPLATE' pre-processor directive (Link multiple templates into main)."
 
 # ==============================================================================
 # 7. SUMMARY

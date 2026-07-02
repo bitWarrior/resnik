@@ -2936,3 +2936,296 @@ class TestLabeledExit:
         assert not errs
         assert "'dispatch" not in code
         assert "__pc" not in code
+
+
+class TestLayoutModifiers:
+    """ARRAY OF STRUCTURE layout modifiers (ALIGNED / DENSE) and the AUTOMATIC
+    storage class. ALIGNED is the default and maps to #[repr(C)]; DENSE is
+    tracked in the AST and guarded pending packed lowering; AUTOMATIC is a
+    no-op (a normal stack local)."""
+
+    def _run(self, src: str):
+        from resnik import Lexer, Parser
+        p = Parser()
+        ast = p.parse(Lexer().tokenize(src, "t"))
+        code = RustCodeGenerator().generate(ast) if not p.errors else ""
+        return p.errors, code, ast
+
+    def _array_layout(self, ast, name):
+        from resnik.parser.ast_nodes import DeclareNode
+        stack = [ast]
+        while stack:
+            n = stack.pop()
+            if isinstance(n, DeclareNode) and name in [i for i in n.identifiers]:
+                return n.type_spec.layout
+            for v in vars(n).values():
+                for it in (v if isinstance(v, list) else [v]):
+                    if hasattr(it, "node_type"):
+                        stack.append(it)
+        return None
+
+    STRUCT = "STRUCTURE PKT: DECLARE A BIT(4); DECLARE B INTEGER; CLOSE PKT; "
+
+    def test_struct_is_repr_c(self):
+        errs, code, _ = self._run(
+            "T: PROGRAM; " + self.STRUCT +
+            "DECLARE B1 ARRAY(4) OF PKT STRUCTURE; CLOSE T;")
+        assert not errs
+        assert "#[repr(C)]" in code
+
+    def test_default_layout_is_aligned(self):
+        _, _, ast = self._run(
+            "T: PROGRAM; " + self.STRUCT +
+            "DECLARE B1 ARRAY(4) OF PKT STRUCTURE; CLOSE T;")
+        assert self._array_layout(ast, "B1") == "aligned"
+
+    def test_aligned_keyword_tracked(self):
+        _, _, ast = self._run(
+            "T: PROGRAM; " + self.STRUCT +
+            "DECLARE B1 ARRAY(4) OF PKT STRUCTURE ALIGNED; CLOSE T;")
+        assert self._array_layout(ast, "B1") == "aligned"
+
+    def test_dense_keyword_tracked_in_ast(self):
+        _, _, ast = self._run(
+            "T: PROGRAM; " + self.STRUCT +
+            "DECLARE B1 ARRAY(4) OF PKT STRUCTURE DENSE; CLOSE T;")
+        assert self._array_layout(ast, "B1") == "dense"
+
+    def test_dense_emits_packed_lowering(self):
+        errs, code, _ = self._run(
+            "T: PROGRAM; " + self.STRUCT +
+            "DECLARE B1 ARRAY(4) OF PKT STRUCTURE DENSE; CLOSE T;")
+        assert not errs
+        assert "compile_error!" not in code
+        assert "#[repr(C, packed)]" in code          # packed companion emitted
+        assert "struct PktPacked {" in code
+        assert "[PktPacked; 4]" in code               # dense array uses it
+
+    def test_aligned_has_no_guard(self):
+        errs, code, _ = self._run(
+            "T: PROGRAM; " + self.STRUCT +
+            "DECLARE B1 ARRAY(4) OF PKT STRUCTURE ALIGNED; CLOSE T;")
+        assert not errs
+        assert "compile_error!" not in code
+
+    def test_automatic_is_noop(self):
+        errs, code, _ = self._run(
+            "T: PROGRAM; DECLARE X INTEGER AUTOMATIC; X = 5; CLOSE T;")
+        assert not errs
+        assert "let mut x: i32" in code
+        assert "compile_error!" not in code
+
+    DMA = ("T: PROGRAM; " + STRUCT +
+           "DECLARE FAST ARRAY(4) OF PKT STRUCTURE ALIGNED; "
+           "DECLARE SLOW ARRAY(4) OF PKT STRUCTURE DENSE; "
+           "DECLARE I INTEGER; "
+           "DO FOR I = 1 TO 4; FAST$I.B = I; END; "
+           "SLOW = FAST; "
+           "IF SLOW$1.B = 1 THEN DO; WRITE(6) 'OK'; END; "
+           "CLOSE T;")
+
+    def test_dense_field_read_uses_read_unaligned(self):
+        errs, code, _ = self._run(self.DMA)
+        assert not errs
+        assert "core::ptr::addr_of!(slow[0].b).read_unaligned()" in code
+
+    def test_aligned_field_access_stays_plain(self):
+        errs, code, _ = self._run(self.DMA)
+        assert not errs
+        # aligned array field write is an ordinary assignment
+        assert "fast[(i - 1) as usize].b = i;" in code
+
+    def test_cross_layout_copy_is_elementwise(self):
+        errs, code, _ = self._run(self.DMA)
+        assert not errs
+        assert "for __i in 0..4 {" in code
+        assert "let __s = fast[__i];" in code
+        assert "write_unaligned(__s.b)" in code
+        # not a whole-array assignment (types differ)
+        assert "slow = fast;" not in code
+
+
+class TestTemplate:
+    """PROCEDURE ... TEMPLATE is a signature-only prototype (like a C header).
+    Its parameters, ASSIGN outputs, and declarations are parsed and its
+    signature is recorded for type-validating CALL sites, but it generates no
+    executable code and allocates no memory."""
+
+    TPL = ("NAV_UPDATE: PROCEDURE(POS, VEL) ASSIGN(STATE_VEC) TEMPLATE; "
+           "DECLARE POS VECTOR(3); DECLARE VEL VECTOR(3); "
+           "DECLARE STATE_VEC VECTOR(6); CLOSE NAV_UPDATE;")
+
+    def _parse(self, src):
+        from resnik import Lexer, Parser
+        p = Parser()
+        ast = p.parse(Lexer().tokenize(src, "t"))
+        return p, ast
+
+    def test_template_parses_and_is_flagged(self):
+        p, ast = self._parse(self.TPL)
+        assert p.errors == []
+        assert getattr(ast, "is_template", False) is True
+
+    def test_template_emits_no_function(self):
+        _, ast = self._parse(self.TPL)
+        code = RustCodeGenerator().generate(ast)
+        assert "fn nav_update" not in code
+
+    def test_template_allocates_no_memory(self):
+        _, ast = self._parse(self.TPL)
+        code = RustCodeGenerator().generate(ast)
+        # parameter / output declarations must not become runtime locals
+        assert "let mut pos" not in code
+        assert "let mut state_vec" not in code
+
+    def test_template_records_signature_for_validation(self):
+        p, _ = self._parse(self.TPL)
+        # 2 inputs (POS, VEL), 1 ASSIGN output (STATE_VEC)
+        assert p._proc_signatures.get("NAV_UPDATE") == (2, 1)
+
+    def test_template_params_only_form(self):
+        p, ast = self._parse(
+            "F: PROCEDURE(X) TEMPLATE; DECLARE X INTEGER; CLOSE F;")
+        assert p.errors == []
+        assert getattr(ast, "is_template", False) is True
+        assert "fn f" not in RustCodeGenerator().generate(ast)
+
+    # --- call-site validation against a template's ingested signature -------
+
+    NAV = ("NAV_UPDATE: PROCEDURE(POS, VEL) ASSIGN(STATE_VEC) TEMPLATE; "
+           "DECLARE POS VECTOR(3); DECLARE VEL VECTOR(3); "
+           "DECLARE STATE_VEC VECTOR(6); CLOSE NAV_UPDATE; ")
+
+    def test_call_wrong_input_dimension_fails(self):
+        # POS requires VECTOR(3); passing a VECTOR(4) must be rejected, even
+        # though the actual procedure body lives elsewhere (only the TEMPLATE
+        # prototype is present).
+        p, _ = self._parse(
+            self.NAV + "MAIN: PROGRAM; "
+            "DECLARE A VECTOR(4); DECLARE B VECTOR(3); DECLARE S VECTOR(6); "
+            "CALL NAV_UPDATE(A, B) ASSIGN(S); CLOSE MAIN;")
+        assert any("argument 'A' does not match" in e.message
+                   for e in p.errors)
+
+    def test_call_matching_dimensions_ok(self):
+        p, _ = self._parse(
+            self.NAV + "MAIN: PROGRAM; "
+            "DECLARE A VECTOR(3); DECLARE B VECTOR(3); DECLARE S VECTOR(6); "
+            "CALL NAV_UPDATE(A, B) ASSIGN(S); CLOSE MAIN;")
+        assert p.errors == []
+
+    def test_call_wrong_output_dimension_fails(self):
+        # STATE_VEC requires VECTOR(6); an ASSIGN of VECTOR(3) is rejected.
+        p, _ = self._parse(
+            self.NAV + "MAIN: PROGRAM; "
+            "DECLARE A VECTOR(3); DECLARE B VECTOR(3); DECLARE S VECTOR(3); "
+            "CALL NAV_UPDATE(A, B) ASSIGN(S); CLOSE MAIN;")
+        assert any("ASSIGN argument 'S' does not match" in e.message
+                   for e in p.errors)
+
+    def test_template_ingests_param_types(self):
+        p, _ = self._parse(self.NAV + "MAIN: PROGRAM; CLOSE MAIN;")
+        recorded = p._proc_param_types.get("NAV_UPDATE", [])
+        assert len(recorded) == 2 and all(t is not None for t in recorded)
+
+
+class TestTemplateLinkage:
+    """A CALLed TEMPLATE is a prototype whose body is elsewhere: codegen emits
+    an `extern "C"` forward declaration and wraps the call in `unsafe`."""
+
+    def _run(self, src: str):
+        from resnik import Lexer, Parser
+        p = Parser()
+        ast = p.parse(Lexer().tokenize(src, "t"))
+        code = RustCodeGenerator().generate(ast) if not p.errors else ""
+        return p.errors, code
+
+    NAV = ("NAV_UPDATE: PROCEDURE(POS, VEL) ASSIGN(STATE_VEC) TEMPLATE; "
+           "DECLARE POS VECTOR(3); DECLARE VEL VECTOR(3); "
+           "DECLARE STATE_VEC VECTOR(6); CLOSE NAV_UPDATE; ")
+
+    def test_called_template_emits_extern_c(self):
+        errs, code = self._run(
+            self.NAV + "MAIN: PROGRAM; "
+            "DECLARE A VECTOR(3); DECLARE B VECTOR(3); DECLARE S VECTOR(6); "
+            "CALL NAV_UPDATE(A, B) ASSIGN(S); CLOSE MAIN;")
+        assert not errs
+        assert 'extern "C" { fn nav_update(' in code
+        # inputs by value, ASSIGN output by &mut
+        assert "state_vec: &mut Vector<6>" in code
+
+    def test_called_template_call_is_unsafe(self):
+        errs, code = self._run(
+            self.NAV + "MAIN: PROGRAM; "
+            "DECLARE A VECTOR(3); DECLARE B VECTOR(3); DECLARE S VECTOR(6); "
+            "CALL NAV_UPDATE(A, B) ASSIGN(S); CLOSE MAIN;")
+        assert not errs
+        assert "unsafe { nav_update(a, b, &mut s); }" in code
+
+    def test_uncalled_template_emits_nothing(self):
+        errs, code = self._run(self.NAV + "MAIN: PROGRAM; CLOSE MAIN;")
+        assert not errs
+        assert "extern" not in code and "nav_update" not in code
+
+    def test_function_template_parses(self):
+        from resnik import Lexer, Parser
+        p = Parser()
+        ast = p.parse(Lexer().tokenize(
+            "MAG: FUNCTION(V) SCALAR TEMPLATE; DECLARE V VECTOR(3); "
+            "CLOSE MAG;", "t"))
+        assert p.errors == []
+        assert getattr(ast, "is_template", False) is True
+        assert ast.return_type is not None
+
+
+class TestTemplateLibrary:
+    """--gen-tpl: auto-generate re-parseable HAL/S TEMPLATE prototypes for
+    reusable units, mimicking the original HAL/S TEMPLIB."""
+
+    def _parse(self, src):
+        from resnik import Lexer, Parser
+        p = Parser()
+        return p, p.parse(Lexer().tokenize(src, "t"))
+
+    def test_render_procedure_template(self):
+        from resnik.templib import render_template
+        _, ast = self._parse(
+            "NAV: PROCEDURE(POS) ASSIGN(OUT); DECLARE POS VECTOR(3); "
+            "DECLARE OUT VECTOR(6); CLOSE NAV;")
+        tpl = render_template(ast)
+        assert "NAV: PROCEDURE(POS) ASSIGN(OUT) TEMPLATE;" in tpl
+        assert "DECLARE POS VECTOR(3);" in tpl
+        assert "DECLARE OUT VECTOR(6);" in tpl
+
+    def test_render_compool_template(self):
+        from resnik.templib import render_template
+        _, ast = self._parse(
+            "SHARED: COMPOOL; DECLARE GAIN SCALAR; DECLARE N INTEGER; "
+            "CLOSE SHARED;")
+        tpl = render_template(ast)
+        assert "SHARED: COMPOOL;" in tpl
+        assert "DECLARE GAIN SCALAR;" in tpl and "DECLARE N INTEGER;" in tpl
+
+    def test_generated_template_round_trips(self):
+        # The whole point: a generated .tpl must re-parse (for D INCLUDE later).
+        from resnik.templib import render_template
+        from resnik import Lexer, Parser
+        _, ast = self._parse(
+            "NAV: PROCEDURE(POS) ASSIGN(OUT); DECLARE POS VECTOR(3); "
+            "DECLARE OUT VECTOR(6); CLOSE NAV;")
+        tpl = render_template(ast)
+        rp = Parser()
+        rt = rp.parse(Lexer().tokenize(tpl, "t"))
+        assert rp.errors == []
+        assert getattr(rt, "is_template", False) is True
+
+    def test_write_templates_creates_files(self, tmp_path):
+        from resnik.templib import write_templates
+        _, ast = self._parse(
+            "SHARED: COMPOOL; DECLARE GAIN SCALAR; CLOSE SHARED; "
+            "NAV: PROCEDURE(POS); DECLARE POS VECTOR(3); CLOSE NAV;")
+        written = write_templates(ast, str(tmp_path))
+        names = sorted((tmp_path / n).name for n in
+                       ["SHARED.tpl", "NAV.tpl"] if (tmp_path / n).exists())
+        assert names == ["NAV.tpl", "SHARED.tpl"]
+        assert len(written) == 2

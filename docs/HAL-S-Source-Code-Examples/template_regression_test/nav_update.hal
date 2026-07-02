@@ -1,0 +1,19 @@
+/* ============================================================
+   NAV_UPDATE  --  navigation state-vector propagator (provider)
+
+   This is the *real* unit with a body. Compile it with:
+
+       resnik compile nav_update.hal --gen-tpl ./TEMPLIB
+
+   and Resnik banks an auto-generated prototype, NAV_UPDATE.tpl,
+   into the template library -- no header written by hand.
+   ============================================================ */
+NAV_UPDATE: PROCEDURE(POS, VEL) ASSIGN(STATE_VEC);
+  DECLARE POS VECTOR(3);
+  DECLARE VEL VECTOR(3);
+  DECLARE STATE_VEC VECTOR(6);
+  DECLARE SPEED SCALAR;
+
+  /* trivial body -- only the signature/layout is templated */
+  SPEED = ABVAL(VEL);
+CLOSE NAV_UPDATE;

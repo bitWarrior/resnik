@@ -231,6 +231,22 @@ def parse(
     help="Code-generation target profile: 'host' (std) or 'cortex-m' (no_std "
          "bare-metal firmware). Use with --emit-cargo for embedded builds.",
 )
+@click.option(
+    "--gen-tpl",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Auto-generate TEMPLATE prototypes for each reusable unit "
+         "(PROCEDURE/FUNCTION/COMPOOL) into this template library directory "
+         "(TEMPLIB), mimicking the original HAL/S compiler.",
+)
+@click.option(
+    "--templib",
+    type=click.Path(path_type=Path),
+    multiple=True,
+    help="Template-library directory searched by 'D INCLUDE TEMPLATE <name>' "
+         "for <name>.tpl (repeatable). The source file's own directory is "
+         "always searched.",
+)
 def compile(
     input_file: Path,
     tokens: Optional[Path],
@@ -241,6 +257,8 @@ def compile(
     emit_cargo: Optional[Path],
     build: bool,
     target: str,
+    gen_tpl: Optional[Path],
+    templib: tuple,
 ) -> None:
     """Run the complete compilation pipeline."""
     console.print(
@@ -262,6 +280,7 @@ def compile(
             task = progress.add_task("[cyan]Phase 1: Lexical Analysis", total=None)
 
             lexer = Lexer()
+            lexer.template_dirs = [str(d) for d in templib]
             token_list = lexer.tokenize_file(str(input_file))
 
             progress.update(task, completed=True)
@@ -323,6 +342,21 @@ def compile(
             progress.update(task, completed=True)
 
         print_success(f"Generated Rust source: {rust_path}")
+
+        # Template-library generation (mimics the original HAL/S TEMPLIB): a
+        # perfect prototype for each reusable unit, saved for later D INCLUDE.
+        if gen_tpl:
+            from resnik.templib import write_templates
+            written = write_templates(ast_result, gen_tpl)
+            if written:
+                print_success(
+                    f"Generated {len(written)} template(s) into {gen_tpl}:")
+                for path in written:
+                    print_info(f"  {path}")
+            else:
+                print_info(
+                    "No reusable units (PROCEDURE/FUNCTION/COMPOOL) to "
+                    "template.")
 
         # Cross-compilation triple implied by the target profile (None = host).
         cross_triple = RustCodeGenerator.TARGET_TRIPLES.get(target)
@@ -396,7 +430,13 @@ def compile(
                 progress.update(task, completed=True)
 
             if result.success:
-                print_success(f"Built executable: {result.executable}")
+                if result.library:
+                    print_success(
+                        "No PROGRAM entry point (TEMPLATE/prototype unit); "
+                        "generated Rust validated as a library — no executable "
+                        "produced.")
+                else:
+                    print_success(f"Built executable: {result.executable}")
             else:
                 print_error("rustc failed to compile the generated code")
                 if result.stderr:

@@ -1,0 +1,17 @@
+D INCLUDE TEMPLATE NAV_UPDATE
+/* ============================================================
+   GUIDANCE  --  consumer. The D-card above (D in column 1) makes
+   the preprocessor fetch NAV_UPDATE.tpl from TEMPLIB and register
+   its signature before this file is parsed. The CALL below is then
+   type-checked against that prototype, even though NAV_UPDATE's
+   body was compiled separately.
+
+       resnik compile guidance_main.hal --templib ./TEMPLIB
+   ============================================================ */
+GUIDANCE: PROGRAM;
+  DECLARE POSITION VECTOR(3);
+  DECLARE VELOCITY VECTOR(3);
+  DECLARE STATE VECTOR(6);
+
+  CALL NAV_UPDATE(POSITION, VELOCITY) ASSIGN(STATE);
+CLOSE GUIDANCE;

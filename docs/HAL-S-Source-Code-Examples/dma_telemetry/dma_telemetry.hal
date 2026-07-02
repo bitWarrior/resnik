@@ -1,0 +1,43 @@
+DMA_TELEMETRY: PROGRAM;
+  
+  /* A STRUCTURE COMBINING A 4-BIT FLAG AND A 32-BIT INTEGER.
+     Natively, this creates an awkward 36-bit footprint.
+  */
+  STRUCTURE SENSOR_PACKET:
+    DECLARE STATUS BIT(4);
+    DECLARE VALUE INTEGER;
+  CLOSE SENSOR_PACKET;
+
+  /* ALIGNED ARRAY: Optimized for CPU/DMA access speed.
+     The compiler will insert 28 bits of dead padding after 'STATUS' 
+     so that 'VALUE' starts on a clean 32-bit boundary.
+  */
+  DECLARE FAST_BUFFER ARRAY(10) OF SENSOR_PACKET STRUCTURE ALIGNED;
+  
+  /* DENSE ARRAY: Optimized for storage or radio downlink.
+     The compiler packs them end-to-end. 'VALUE' will cross physical 
+     word boundaries, requiring multiple CPU cycles to read/write.
+  */
+  DECLARE DOWNLINK_BUFFER ARRAY(10) OF SENSOR_PACKET STRUCTURE DENSE;
+
+  DECLARE I INTEGER;
+  DECLARE READY BOOLEAN INITIAL(FALSE);
+
+  /* WRITING TO THE ALIGNED DMA BUFFER */
+  DO FOR I = 1 TO 10;
+    FAST_BUFFER$I.STATUS = HEX 'A';
+    FAST_BUFFER$I.VALUE = I * 100;
+  END;
+
+  /* HAL/S ALLOWS DIRECT COPYING BETWEEN MATCHING STRUCTURE TYPES 
+     EVEN IF THEIR ARRAY MEMORY LAYOUTS DIFFER 
+  */
+  DOWNLINK_BUFFER = FAST_BUFFER;
+
+  IF DOWNLINK_BUFFER$1.STATUS = HEX 'A' THEN
+  DO;
+    READY = TRUE;
+    WRITE(6) 'jstar SIM: ALIGNED TO DENSE MEMORY TRANSFER SUCCESSFUL';
+  END;
+
+CLOSE DMA_TELEMETRY;

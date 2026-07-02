@@ -106,6 +106,10 @@ class TypeSpec:
     array_dims: Optional[List[int]] = None  # multi-dim ARRAY(d1, d2, ...)
     element_type: Optional["TypeSpec"] = None  # ARRAY element type
     is_name: bool = False  # HAL/S NAME (pointer) declaration
+    # Memory layout of an ARRAY OF STRUCTURE: "aligned" (repr(C), padded for
+    # speed -- the HAL/S default) or "dense" (repr(C, packed), for storage /
+    # downlink). Tracked explicitly so codegen can pick the Rust repr.
+    layout: str = "aligned"
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
@@ -132,6 +136,7 @@ class TypeSpec:
                 self.element_type.to_dict() if self.element_type else None
             ),
             "is_name": self.is_name,
+            "layout": self.layout,
         }
 
 

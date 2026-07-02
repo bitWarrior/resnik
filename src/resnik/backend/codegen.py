@@ -68,6 +68,7 @@ class CompileResult:
     source: Optional[str] = None
     stdout: str = ""
     stderr: str = ""
+    library: bool = False  # True when built as a lib (no PROGRAM entry point)
 
 
 @dataclass
@@ -265,6 +266,7 @@ class RustCodeGenerator:
         self.emitter = RustEmitter()
         self.type_mapper = TypeMapper()
         self.in_main = False
+        self._dense_structs: set = set()
         self._task_names: set = set()
         self._bit_widths: dict = {}
         self._var_info: dict = {}
@@ -348,6 +350,20 @@ class RustCodeGenerator:
         if self._embedded:
             self._emit_embedded_guard(ast)
 
+        # Structs used in a DENSE array get a #[repr(C, packed)] companion so
+        # dense arrays can be laid out end-to-end; aligned arrays keep the
+        # #[repr(C)] form. Field access on packed elements is lowered through
+        # read_unaligned/write_unaligned (Rust forbids references into packed
+        # fields), and cross-layout copies convert element-by-element.
+        self._dense_structs = {
+            (n.type_spec.element_type.type_name or "").upper()
+            for n in self._walk(ast)
+            if isinstance(n, DeclareNode) and n.type_spec is not None
+            and getattr(n.type_spec, "layout", "aligned") == "dense"
+            and n.type_spec.element_type is not None
+            and n.type_spec.element_type.type_name
+        }
+
         # Emit the dependency-free runtime prelude only if the program uses
         # vectors/matrices, function calls, or real-time statements.
         if self._uses_runtime(ast):
@@ -389,6 +405,18 @@ class RustCodeGenerator:
         for node in self._walk(ast):
             if isinstance(node, ProcedureNode) and getattr(
                     node, "is_external", False):
+                self._extern_fns.add(node.name.lower())
+                self._generate_extern(node)
+        # A TEMPLATE procedure that is actually CALLed is a prototype whose body
+        # lives elsewhere; emit an `extern "C"` forward declaration so the call
+        # resolves at link time (calls to it are wrapped in `unsafe`).
+        _called = {c.name.lower() for c in self._walk(ast)
+                   if isinstance(c, CallNode)}
+        for node in self._walk(ast):
+            if (isinstance(node, ProcedureNode)
+                    and getattr(node, "is_template", False)
+                    and node.name.lower() in _called
+                    and node.name.lower() not in self._extern_fns):
                 self._extern_fns.add(node.name.lower())
                 self._generate_extern(node)
         if self._extern_fns:
@@ -823,6 +851,9 @@ use hal_rt::*;
         self.emitter.emit_line("#![allow(unused_mut)]")
         self.emitter.emit_line("#![allow(unused_assignments)]")
         self.emitter.emit_line("#![allow(unused_parens)]")
+        self.emitter.emit_line("#![allow(unused_imports)]")
+        self.emitter.emit_line("#![allow(improper_ctypes)]")
+        self.emitter.emit_line("#![allow(unused_imports)]")
         self.emitter.emit_line("#![allow(unreachable_code)]")
         self.emitter.emit_line("#![allow(dead_code)]")
         self.emitter.emit_line()
@@ -1291,7 +1322,8 @@ use hal_rt::*;
                 and node.type_spec.element_type is not None):
             ets = node.type_spec.element_type
             if ets.data_type == DataType.STRUCTURE:
-                et = self._struct_name(ets.type_name or "")
+                et = self._elem_struct_name(
+                    ets.type_name, getattr(node.type_spec, "layout", "aligned"))
                 ei = f"{et}::new()"
             else:
                 et = self.type_mapper.map_type(ets)
@@ -1407,8 +1439,11 @@ use hal_rt::*;
             node: ProcedureNode to generate
         """
         # NONHAL external functions are emitted as `extern "C"` bindings in the
-        # generate() pre-pass; there is no HAL/S body to lower here.
-        if getattr(node, "is_external", False):
+        # generate() pre-pass; there is no HAL/S body to lower here. A TEMPLATE
+        # is a signature-only prototype -- parsed and type-checked, but it
+        # generates no code and allocates no memory.
+        if getattr(node, "is_external", False) or getattr(
+                node, "is_template", False):
             return
         rust_name = node.name.lower()
         all_param_names = list(node.parameters) + list(node.assign_params)
@@ -1748,6 +1783,9 @@ use hal_rt::*;
         callee = node.name.lower()
         if self._uses_faults and callee in self._faulting_procs:
             self._generate_faulting_call(call_expr, callee)
+        elif callee in getattr(self, "_extern_fns", set()):
+            # extern "C" (NONHAL or CALLed TEMPLATE): calling it is unsafe.
+            self.emitter.emit_line(f"unsafe {{ {call_expr}; }}")
         else:
             self.emitter.emit_line(f"{call_expr};")
     
@@ -1804,6 +1842,34 @@ use hal_rt::*;
             node: AssignmentNode to generate
         """
         if node.target and node.value:
+            # ARRAY OF STRUCTURE copy between differing memory layouts
+            # (ALIGNED <-> DENSE): the two arrays are distinct Rust types
+            # (padded vs packed), so convert element-by-element.
+            if (isinstance(node.target, IdentifierNode)
+                    and isinstance(node.value, IdentifierNode)):
+                tts = self._var_info.get(node.target.name.lower())
+                vts = self._var_info.get(node.value.name.lower())
+                if (tts is not None and vts is not None
+                        and tts.data_type == DataType.STRUCTURE
+                        and vts.data_type == DataType.STRUCTURE
+                        and tts.array_size is not None
+                        and vts.array_size is not None
+                        and getattr(tts, "layout", "aligned")
+                            != getattr(vts, "layout", "aligned")):
+                    self._generate_cross_layout_copy(
+                        node.target.name.lower(), node.value.name.lower(),
+                        tts, vts)
+                    return
+            # Write to a field of a DENSE (packed) array element: use
+            # write_unaligned (Rust forbids &mut into a packed field).
+            if self._is_dense_field(node.target):
+                place = (f"{self._generate_expression(node.target.operand)}"
+                         f".{node.target.field_name.lower()}")
+                val = self._generate_expression(node.value)
+                self.emitter.emit_line(
+                    f"unsafe {{ core::ptr::addr_of_mut!({place})"
+                    f".write_unaligned({val}); }}")
+                return
             # HAL/S CHARACTER is fixed-length: assigning to CHARACTER(n) right-
             # truncates an oversized source and right-pads (with spaces) an
             # undersized one, decided from the declared lengths at compile time.
@@ -2480,11 +2546,37 @@ use hal_rt::*;
         """HAL/S template name -> Rust PascalCase struct name (NODE -> Node)."""
         return "".join(w.capitalize() for w in name.split("_"))
 
+    def _elem_struct_name(self, type_name: str, layout: str) -> str:
+        """Rust struct name for an array element: the packed companion for a
+        DENSE array of a dense-used template, else the aligned struct."""
+        base = self._struct_name(type_name or "")
+        if layout == "dense" and (type_name or "").upper() in self._dense_structs:
+            return base + "Packed"
+        return base
+
     def _generate_structure_def(self, node: StructureDefNode) -> None:
-        """Emit a STRUCTURE template as a Rust struct plus a zero-init new()."""
-        sname = self._struct_name(node.name)
+        """Emit a STRUCTURE template as a Rust struct plus a zero-init new().
+
+        The aligned form is #[repr(C)] (HAL/S's default ALIGNED layout: fields
+        padded to natural boundaries for CPU/DMA access). If the template is
+        used in any DENSE array, also emit a #[repr(C, packed)] companion named
+        <Name>Packed for end-to-end storage layout."""
+        self._emit_struct(node, self._struct_name(node.name),
+                          repr_attr="#[repr(C)]",
+                          derives="Clone, Copy, Debug")
+        if node.name.upper() in self._dense_structs:
+            self._emit_struct(node, self._struct_name(node.name) + "Packed",
+                              repr_attr="#[repr(C, packed)]",
+                              # no Debug: deriving it on a packed struct needs
+                              # unaligned reads and is rejected/lints on rustc.
+                              derives="Clone, Copy")
+
+    def _emit_struct(self, node: StructureDefNode, sname: str,
+                     repr_attr: str, derives: str) -> None:
+        """Emit one Rust struct (given name/repr/derives) with a zero-init new()."""
         self.emitter.emit_comment(f"HAL/S Structure template: {node.name}")
-        self.emitter.emit_line("#[derive(Clone, Copy, Debug)]")
+        self.emitter.emit_line(repr_attr)
+        self.emitter.emit_line(f"#[derive({derives})]")
         self.emitter.emit_line(f"struct {sname} {{")
         self.emitter.indent()
         for decl in node.fields:
@@ -2493,7 +2585,6 @@ use hal_rt::*;
                 self.emitter.emit_line(f"{ident.lower()}: {rust_type},")
         self.emitter.dedent()
         self.emitter.emit_line("}")
-        # constructor: zero-initialize every field
         self.emitter.emit_line(f"impl {sname} {{")
         self.emitter.indent()
         self.emitter.emit_line("fn new() -> Self {")
@@ -2509,10 +2600,68 @@ use hal_rt::*;
         self.emitter.dedent()
         self.emitter.emit_line("}")
 
+    def _is_dense_field(self, node) -> bool:
+        """True if `node` is a field access on an element of a DENSE (packed)
+        array -- i.e. reading/writing it must go through un-aligned pointer ops
+        rather than a normal reference."""
+        if not isinstance(node, FieldAccessNode):
+            return False
+        base = node.operand
+        if isinstance(base, SubscriptNode):
+            base = base.operand
+        if isinstance(base, IdentifierNode):
+            ts = self._var_info.get(base.name.lower())
+            return ts is not None and getattr(ts, "layout", "aligned") == "dense"
+        return False
+
+    def _struct_field_names(self, type_name: str) -> list:
+        """Ordered lower-cased field names of a STRUCTURE template."""
+        sdef = self._structs.get((type_name or "").upper())
+        if sdef is None:
+            return []
+        return [ident.lower()
+                for decl in sdef.fields for ident in decl.identifiers]
+
+    def _generate_cross_layout_copy(self, tgt: str, src: str,
+                                    tgt_ts, src_ts) -> None:
+        """Copy an ARRAY OF STRUCTURE between differing layouts (ALIGNED <->
+        DENSE) element-by-element. The two arrays are distinct Rust types
+        (padded vs packed), so a whole-array assignment won't type-check; and
+        packed fields must be touched via un-aligned pointer ops."""
+        n = tgt_ts.array_size
+        tname = tgt_ts.element_type.type_name if tgt_ts.element_type else None
+        fields = self._struct_field_names(tname)
+        tgt_dense = getattr(tgt_ts, "layout", "aligned") == "dense"
+        src_dense = getattr(src_ts, "layout", "aligned") == "dense"
+        self.emitter.emit_line(f"for __i in 0..{n} {{")
+        self.emitter.indent()
+        self.emitter.emit_line(f"let __s = {src}[__i];")
+        self.emitter.emit_line("unsafe {")
+        self.emitter.indent()
+        for f in fields:
+            rhs = (f"core::ptr::addr_of!(__s.{f}).read_unaligned()"
+                   if src_dense else f"__s.{f}")
+            if tgt_dense:
+                self.emitter.emit_line(
+                    f"core::ptr::addr_of_mut!({tgt}[__i].{f})"
+                    f".write_unaligned({rhs});")
+            else:
+                self.emitter.emit_line(f"{tgt}[__i].{f} = {rhs};")
+        self.emitter.dedent()
+        self.emitter.emit_line("}")
+        self.emitter.dedent()
+        self.emitter.emit_line("}")
+
     def _generate_field_access(self, node: FieldAccessNode) -> str:
-        """Structure field access: operand.field."""
+        """Structure field access: operand.field. A field of a DENSE (packed)
+        array element is read via read_unaligned (a plain reference into a
+        packed field is rejected by the borrow checker)."""
         operand = self._generate_expression(node.operand)
-        return f"{operand}.{node.field_name.lower()}"
+        field = node.field_name.lower()
+        if self._is_dense_field(node):
+            return (f"unsafe {{ core::ptr::addr_of!({operand}.{field})"
+                    f".read_unaligned() }}")
+        return f"{operand}.{field}"
 
     def _generate_vector_literal(self, node: VectorLiteralNode) -> str:
         """VECTOR(v1, v2, ...) -> Vector([v1, v2, ...])."""
@@ -2716,20 +2865,28 @@ use hal_rt::*;
         return f"{node.name.lower()}({args})"
 
     def _generate_extern(self, node) -> None:
-        """Emit a NONHAL function as an `extern "C"` FFI signature."""
+        """Emit a body-less procedure/function as an `extern "C"` declaration so
+        the (separately compiled) implementation resolves at link time. Used for
+        NONHAL FFI functions and for TEMPLATE procedures that are CALLed:
+        inputs pass by value, ASSIGN outputs by &mut, matching the call site."""
         name = node.name.lower()
-        ptypes = {
-            d.identifiers[0].lower(): d.type_spec
-            for d in node.statements
-            if isinstance(d, DeclareNode) and len(d.identifiers) == 1
-        }
-        params = ", ".join(
+        ptypes = {}
+        for d in node.statements:
+            if isinstance(d, DeclareNode):
+                for ident in d.identifiers:
+                    ptypes[ident.lower()] = d.type_spec
+        parts = [
             f"{pn.lower()}: {self._full_rust_type(ptypes.get(pn.lower()))}"
             for pn in node.parameters
-        )
+        ]
+        parts += [
+            f"{an.lower()}: &mut {self._full_rust_type(ptypes.get(an.lower()))}"
+            for an in node.assign_params
+        ]
         ret = (f" -> {self._full_rust_type(node.return_type)}"
                if node.return_type is not None else "")
-        self.emitter.emit_line(f'extern "C" {{ fn {name}({params}){ret}; }}')
+        self.emitter.emit_line(
+            f'extern "C" {{ fn {name}({", ".join(parts)}){ret}; }}')
 
     def _full_rust_type(self, ts) -> str:
         """Complete Rust type including array dimensions, e.g.
@@ -2998,13 +3155,20 @@ use hal_rt::*;
         src = out.with_suffix(".rs")
         src.write_text(code, encoding="utf-8")
 
+        # A unit with no PROGRAM (e.g. a TEMPLATE / prototype-only file) emits
+        # no `fn main`. Building it as a binary would fail with E0601; instead
+        # validate it as a library so "does it compile?" still gets answered.
+        has_main = "fn main" in code
         cmd = [
             rustc,
             str(src),
-            "-o", str(out),
             "--edition", edition,
             "-C", f"opt-level={opt_level}",
         ]
+        if has_main:
+            cmd += ["-o", str(out)]
+        else:
+            cmd += ["--crate-type", "lib", "-o", str(out)]
         if target:
             cmd += ["--target", target]
 
@@ -3016,10 +3180,11 @@ use hal_rt::*;
 
         return CompileResult(
             success=success,
-            executable=str(out) if success else None,
+            executable=str(out) if (success and has_main) else None,
             source=str(src) if (keep_source or not success) else None,
             stdout=proc.stdout,
             stderr=proc.stderr,
+            library=not has_main,
         )
 
     @staticmethod

@@ -39,6 +39,8 @@ class Lexer:
         self.tokens: List[Token] = []
         self.source_file: str = ""
         self.source_lines: List[str] = []
+        # Directories searched by `D INCLUDE TEMPLATE <name>` for <name>.tpl.
+        self.template_dirs: List[str] = []
 
         # Build the lexer
         self._define_tokens()
@@ -111,6 +113,58 @@ class Lexer:
         # Newlines for position tracking
         self.lg.add("NEWLINE", r"\n")
 
+    # `D INCLUDE TEMPLATE <name>` -- D strictly in column 1 (HAL/S directive
+    # card). The `\s+` after D keeps DECLARE/DO/etc. (no space after D) as code.
+    _INCLUDE_RE = re.compile(
+        r"^D[ \t]+INCLUDE[ \t]+TEMPLATE[ \t]+([A-Za-z_]\w*)[ \t]*$",
+        re.IGNORECASE)
+
+    def _find_template(self, name: str, search_dirs: List[str]) -> Optional[str]:
+        """Locate <name>.tpl (case-insensitively) in the search dirs."""
+        for d in search_dirs:
+            for candidate in (f"{name}.tpl", f"{name.upper()}.tpl",
+                              f"{name.lower()}.tpl"):
+                p = Path(d) / candidate
+                if p.is_file():
+                    return p.read_text(encoding="utf-8")
+        return None
+
+    def _expand_template_includes(
+            self, source_code: str, filename: str) -> str:
+        """Replace `D INCLUDE TEMPLATE <name>` directives with the contents of
+        the referenced template-library file. Missing templates are reported as
+        lexer errors."""
+        if "INCLUDE" not in source_code.upper():
+            return source_code  # fast path: no directive present
+
+        search_dirs = list(self.template_dirs)
+        # Search the including file's own directory too (if it's a real path).
+        if filename and not filename.startswith("<"):
+            src_dir = str(Path(filename).parent)
+            if src_dir and src_dir not in search_dirs:
+                search_dirs.append(src_dir)
+        if not search_dirs:
+            search_dirs = ["."]
+
+        out: List[str] = []
+        for lineno, line in enumerate(source_code.split("\n"), start=1):
+            m = self._INCLUDE_RE.match(line)
+            if m:
+                name = m.group(1)
+                tpl = self._find_template(name, search_dirs)
+                if tpl is None:
+                    self.errors.append(LexerError(
+                        f"D INCLUDE TEMPLATE {name}: '{name}.tpl' not found in "
+                        f"template library ({', '.join(search_dirs)})",
+                        lineno, 1))
+                    out.append("")  # preserve line structure
+                    continue
+                out.append(f"/* ---- D INCLUDE TEMPLATE {name} ---- */")
+                out.append(tpl.rstrip("\n"))
+            else:
+                out.append(line)
+        return "\n".join(out)
+
     def _preprocess_source(self, source_code: str, filename: str) -> str:
         """
         Preprocess HAL/S source to remove comments.
@@ -122,6 +176,12 @@ class Lexer:
         Returns:
             Preprocessed source code with comments removed
         """
+        # First resolve `D INCLUDE TEMPLATE <name>` directives (D in column 1),
+        # splicing in the referenced .tpl so its signature is registered when
+        # the injected TEMPLATE unit is parsed. Done before comment stripping so
+        # the template's banner comment is handled like any other comment.
+        source_code = self._expand_template_includes(source_code, filename)
+
         lines = source_code.split("\n")
         processed_lines = []
         in_block_comment = False
