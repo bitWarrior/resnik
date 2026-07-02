@@ -113,6 +113,7 @@ class Parser:
                 "KEYWORD_GO",
                 "KEYWORD_NAME",
                 "KEYWORD_NONHAL",
+                "KEYWORD_EXTERNAL",
                 "KEYWORD_DOUBLE",
                 "KEYWORD_SINGLE",
                 "HASH",
@@ -738,6 +739,55 @@ class Parser:
                 close_tok=p[11], return_type=p[6], is_template=True
             )
 
+        # EXTERNAL: a prototype whose body is foreign (assembly/C/linker-
+        # resolved), NOT another HAL/S unit. Straight FFI -> extern "C". Unlike
+        # TEMPLATE, it is not type-checked across the boundary and is not banked
+        # in the template library.
+        @self.pg.production(
+            "procedure_block : IDENTIFIER COLON KEYWORD_PROCEDURE "
+            "LPAREN param_list RPAREN KEYWORD_EXTERNAL SEMICOLON "
+            "statement_list KEYWORD_CLOSE IDENTIFIER SEMICOLON"
+        )
+        def procedure_external(p: List[Any]) -> ProcedureNode:
+            return self._build_procedure(
+                name_tok=p[0], params=p[4], statements=p[8],
+                close_tok=p[10], is_external=True
+            )
+
+        @self.pg.production(
+            "procedure_block : IDENTIFIER COLON KEYWORD_PROCEDURE "
+            "LPAREN param_list RPAREN KEYWORD_ASSIGN LPAREN param_list RPAREN "
+            "KEYWORD_EXTERNAL SEMICOLON statement_list KEYWORD_CLOSE "
+            "IDENTIFIER SEMICOLON"
+        )
+        def procedure_external_assign(p: List[Any]) -> ProcedureNode:
+            return self._build_procedure(
+                name_tok=p[0], params=p[4], statements=p[12],
+                close_tok=p[14], assign_params=p[8], is_external=True
+            )
+
+        @self.pg.production(
+            "procedure_block : IDENTIFIER COLON KEYWORD_PROCEDURE "
+            "KEYWORD_EXTERNAL SEMICOLON statement_list KEYWORD_CLOSE "
+            "IDENTIFIER SEMICOLON"
+        )
+        def procedure_external_noparams(p: List[Any]) -> ProcedureNode:
+            return self._build_procedure(
+                name_tok=p[0], params=[], statements=p[5],
+                close_tok=p[7], is_external=True
+            )
+
+        @self.pg.production(
+            "procedure_block : IDENTIFIER COLON KEYWORD_FUNCTION "
+            "LPAREN param_list RPAREN type_spec KEYWORD_EXTERNAL SEMICOLON "
+            "statement_list KEYWORD_CLOSE IDENTIFIER SEMICOLON"
+        )
+        def function_external(p: List[Any]) -> ProcedureNode:
+            return self._build_procedure(
+                name_tok=p[0], params=p[4], statements=p[9],
+                close_tok=p[11], return_type=p[6], is_external=True
+            )
+
         # PROCEDURE ASSIGN(outputs);  (no input parameters)
         @self.pg.production(
             "procedure_block : IDENTIFIER COLON KEYWORD_PROCEDURE "
@@ -1079,6 +1129,22 @@ class Parser:
             if len(values) == 1:
                 node.initial_value = values[0]
             return node
+
+        # DECLARE <name> <type> EXTERNAL; -- a variable defined in a foreign
+        # module (object file / linker script). No storage is allocated here;
+        # it lowers to an `extern "C"` static and reads are wrapped in `unsafe`.
+        @self.pg.production(
+            "declare_statement : KEYWORD_DECLARE IDENTIFIER type_spec "
+            "KEYWORD_EXTERNAL SEMICOLON"
+        )
+        def declare_external(p: List[Any]) -> DeclareNode:
+            return DeclareNode(
+                identifiers=[p[1].value],
+                type_spec=p[2],
+                attributes={"external": True},
+                line=getattr(p[0], "line", 0),
+                column=getattr(p[0], "column", 0),
+            )
 
         # AUTOMATIC is HAL/S's default storage class (stack-local). It needs no
         # special lowering -- a normal local variable already has automatic

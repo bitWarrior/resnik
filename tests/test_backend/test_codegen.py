@@ -3229,3 +3229,51 @@ class TestTemplateLibrary:
                        ["SHARED.tpl", "NAV.tpl"] if (tmp_path / n).exists())
         assert names == ["NAV.tpl", "SHARED.tpl"]
         assert len(written) == 2
+
+
+class TestExternal:
+    """EXTERNAL: foreign (linker-resolved) procedures and variables -> extern
+    "C", with unsafe calls/reads and no local storage."""
+
+    def _run(self, src):
+        from resnik import Lexer, Parser
+        p = Parser()
+        ast = p.parse(Lexer().tokenize(src, "t"))
+        code = RustCodeGenerator().generate(ast) if not p.errors else ""
+        return p.errors, code
+
+    def test_external_procedure(self):
+        errs, code = self._run(
+            "HW: PROGRAM; "
+            "READ_I2C_BUS: PROCEDURE(BUS_ID) EXTERNAL; DECLARE BUS_ID INTEGER; "
+            "CLOSE READ_I2C_BUS; "
+            "CALL READ_I2C_BUS(2); CLOSE HW;")
+        assert not errs
+        assert 'extern "C" { fn read_i2c_bus(bus_id: i32); }' in code
+        assert "unsafe { read_i2c_bus(2); }" in code
+
+    def test_external_variable(self):
+        errs, code = self._run(
+            "HW: PROGRAM; DECLARE RAW_TEMP SCALAR EXTERNAL; "
+            "DECLARE HOT BOOLEAN INITIAL(FALSE); "
+            "IF RAW_TEMP > 85.0 THEN DO; HOT = TRUE; END; CLOSE HW;")
+        assert not errs
+        assert 'extern "C" { static raw_temp: f32; }' in code
+        assert "(unsafe { raw_temp })" in code
+        # no local storage allocated for the external variable
+        assert "let mut raw_temp" not in code
+
+    def test_rustc_command_forwards_link_flags(self):
+        cmd = RustCodeGenerator._rustc_command(
+            "rustc", "hw.rs", "hw", has_main=True, opt_level="2",
+            edition="2021", link_search=["libs"], link_libs=["hw"],
+            link_objs=["i2c.o"])
+        assert "-L" in cmd and "libs" in cmd
+        assert "-l" in cmd and "hw" in cmd
+        assert "link-arg=i2c.o" in cmd
+
+    def test_rustc_command_no_main_builds_lib(self):
+        cmd = RustCodeGenerator._rustc_command(
+            "rustc", "t.rs", "t", has_main=False, opt_level="2",
+            edition="2021")
+        assert "--crate-type" in cmd and "lib" in cmd

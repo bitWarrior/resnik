@@ -3,7 +3,7 @@
 An open-source compiler for the HAL/S aerospace programming language, translating legacy NASA HAL/S source code to safe, modern Rust.
 
 **Version:** 1.0.0 (Modern Edition)  
-**Status:** Lexer ✓ | Parser ✓ | Backend ✓ | Cross-compilation (ARM Cortex-M) ✓
+**Status:** Lexer ✓ | Parser ✓ | Backend ✓ | Cross-compilation (ARM Cortex-M) ✓ | Separate compilation (TEMPLIB) ✓
 
 ## About HAL/S
 
@@ -219,6 +219,132 @@ cleanly to bare metal — the fault model unwinds via `Result` and halts via
 emit a `compile_error!` on `cortex-m` with a clear message rather than failing
 silently. These are on the embedded roadmap.
 
+### Templates & Separate Compilation
+
+HAL/S supports separate compilation through *templates* — signature-only
+prototypes, analogous to C headers. A block marked `TEMPLATE` declares a unit's
+name, parameters, and data layout for type checking, but generates no executable
+code and allocates no memory:
+
+```
+NAV_UPDATE: PROCEDURE(POS, VEL) ASSIGN(STATE_VEC) TEMPLATE;
+  DECLARE POS VECTOR(3);
+  DECLARE VEL VECTOR(3);
+  DECLARE STATE_VEC VECTOR(6);
+CLOSE NAV_UPDATE;
+```
+
+Resnik mirrors the original HAL/S compiler's **template library** (TEMPLIB)
+workflow, so you never hand-write a prototype.
+
+**Generate templates.** On a successful compile, `--gen-tpl` auto-generates a
+prototype for each reusable unit (`PROCEDURE`, `FUNCTION`, `COMPOOL`) into a
+template-library directory:
+
+```bash
+resnik compile nav_update.hal --gen-tpl ./TEMPLIB
+# writes ./TEMPLIB/NAV_UPDATE.tpl
+```
+
+**Include templates.** A `D INCLUDE TEMPLATE <name>` directive — with `D` in
+column 1, following the HAL/S directive-card convention — pulls a stored
+template from the library and injects its signature *before the rest of the file
+is parsed*. Point the preprocessor at the library with `--templib` (repeatable;
+the source file's own directory is always searched):
+
+```bash
+resnik compile guidance.hal --templib ./TEMPLIB
+```
+
+```
+D INCLUDE TEMPLATE NAV_UPDATE
+GUIDANCE: PROGRAM;
+  DECLARE POSITION VECTOR(3);
+  DECLARE VELOCITY VECTOR(3);
+  DECLARE STATE VECTOR(6);
+  CALL NAV_UPDATE(POSITION, VELOCITY) ASSIGN(STATE);
+CLOSE GUIDANCE;
+```
+
+**Cross-unit type checking.** Once a template's signature is registered, `CALL`
+sites are validated against it — input arity, output (`ASSIGN`) arity, and type
+*dimensions*. Passing a `VECTOR(4)` where the prototype requires a `VECTOR(3)`
+is rejected at semantic analysis, before any code is generated, even though the
+called unit's body lives in another file.
+
+**Linkage.** A `TEMPLATE` that is actually called is forward-declared as an
+`extern "C"` binding in the generated Rust, and the call is wrapped in `unsafe`,
+leaving the separately compiled body to be resolved by the linker:
+
+```rust
+extern "C" { fn nav_update(pos: Vector<3>, vel: Vector<3>, state_vec: &mut Vector<6>); }
+...
+unsafe { nav_update(position, velocity, &mut state); }
+```
+
+### Foreign Code: `EXTERNAL`
+
+Where a `TEMPLATE` is a prototype for another HAL/S unit, `EXTERNAL` declares a
+symbol whose definition is genuinely foreign — hand-written assembly, a C
+routine, a BSP entry point, or a linker-provided value. It is Resnik's
+straightforward Foreign Function Interface: `EXTERNAL` procedures and variables
+lower directly to `extern "C"` and — unlike `TEMPLATE` — are **not** type-checked
+across the boundary or banked in the template library. You are trusting the
+linker.
+
+```
+HW_INTERFACE: PROGRAM;
+  /* external variable -- defined in another object file; no storage here */
+  DECLARE RAW_TEMP SCALAR EXTERNAL;
+
+  /* external routine -- a prototype for code compiled outside HAL/S */
+  READ_I2C_BUS: PROCEDURE(BUS_ID) EXTERNAL;
+    DECLARE BUS_ID INTEGER;
+  CLOSE READ_I2C_BUS;
+
+  CALL READ_I2C_BUS(2);
+  IF RAW_TEMP > 85.0 THEN DO; ... END;
+CLOSE HW_INTERFACE;
+```
+
+lowers to:
+
+```rust
+extern "C" { fn read_i2c_bus(bus_id: i32); }
+extern "C" { static raw_temp: f32; }
+...
+unsafe { read_i2c_bus(2); }
+if (unsafe { raw_temp }) > 85.0 { ... }
+```
+
+Every use is `unsafe`, and the external variable allocates no local storage.
+Symbol names follow HAL/S case-insensitivity: `READ_I2C_BUS` links against the C
+symbol `read_i2c_bus`.
+
+**Linking.** rustc compiles the `extern "C"` declarations into *undefined*
+symbols; the linker must be handed their definitions. When building an
+executable with `--emit-exe`, pass the foreign objects/libraries through:
+
+| Flag | rustc | Purpose |
+| ---- | ----- | ------- |
+| `-L, --link-search DIR` | `-L DIR`           | linker search directory |
+| `-l, --link-lib NAME`   | `-l NAME`          | link a native library   |
+| `--link-obj FILE`       | `-C link-arg=FILE` | add an object / archive |
+
+```bash
+cd docs/HAL-S-Source-Code-Examples/hw_interface
+cc -c i2c.c -o i2c.o
+resnik compile hw_interface.hal --emit-exe --link-obj i2c.o
+```
+
+For larger builds, prefer `--emit-cargo` and let a `build.rs` (with the `cc`
+crate) compile and link the foreign sources — the idiomatic path for BSP objects
+and linker scripts.
+
+> **Note:** an external hardware register whose value changes underneath the
+> program is currently read as a plain (non-volatile) `static`; volatile-correct
+> reads for memory-mapped registers are on the roadmap.
+
 ### Programmatic Usage
 
 ```python
@@ -264,6 +390,7 @@ resnik/
 │   │   ├── rust_emitter.py # Rust source emission helpers
 │   │   └── type_mapper.py  # HAL/S → Rust type mapping
 │   ├── cli.py              # Beautiful CLI with Click + Rich
+│   ├── templib.py          # Template-library (.tpl) generation for --gen-tpl
 │   ├── types.py            # Type definitions
 │   └── exceptions.py       # Custom exceptions
 │
@@ -301,6 +428,51 @@ pytest -v
 # Run only fast tests
 pytest -m "not slow"
 ```
+
+## Space Shuttle Flight Software History
+
+The software Resnik's HAL/S heritage traces back to is the **Primary Avionics
+Software System (PASS)** — the onboard flight software of the Space Shuttle, and
+one of the most rigorously engineered programs of its era. Developed by IBM's
+Federal Systems Division, PASS ran the orbiter's guidance, navigation, and
+control in HAL/S, with its operating system (the Flight Control Operating
+System) and low-level routines in assembly.
+
+It flew on a set of five **General Purpose Computers (GPCs)** — IBM AP-101
+machines from the System/4 Pi family, close cousins of the System/360
+mainframe. Four ran PASS as a synchronized, voting redundant set, cross-checking
+each other hundreds of times per second and voting out any computer that
+disagreed. The fifth ran the **Backup Flight System (BFS)** — deliberately
+developed by a separate contractor (Rockwell) so that a single software fault
+could not take down primary and backup at once. That "diverse redundancy"
+philosophy — guard against common-mode software failure, not just hardware
+failure — is a recurring theme in safety-critical avionics. Because the AP-101's
+memory couldn't hold everything at once, PASS was segmented into eight
+phase/function memory loads streamed in from a tape-based mass-memory unit as
+the mission moved through ascent, orbit, and entry. The AP-101S upgrade (first
+flown on STS-37 in 1991) swapped core memory for semiconductor memory and
+roughly doubled capacity.
+
+Its most famous moment came before the program ever left the ground: the STS-1
+launch scrub of April 10, 1981, when the backup computer refused to synchronize
+with the four primaries — Jack Garman's *"Bug Heard 'Round the World."* PASS
+flew for three decades, retiring with the Shuttle in 2011.
+
+**Further reading** (in [`docs/Space_Shuttle_Flight_Software_History/`](docs/Space_Shuttle_Flight_Software_History/)):
+
+- [The 1977 Approach and Landing Tests](docs/Space_Shuttle_Flight_Software_History/Enterprise-1977-Approach_And_Glide_Test.md)
+  — the Enterprise glide trials that proved PASS digital fly-by-wire.
+- [STS-1: "The Bug Heard 'Round the World"](docs/Space_Shuttle_Flight_Software_History/STS-1-The-Bug-Heard-Round-The-World.md)
+  — the ~1-in-67 timing bug that scrubbed the first launch.
+- [STS-9: Common-Mode Hardware Failure](docs/Space_Shuttle_Flight_Software_History/STS-9-Incident-Common_Mode_Hardware_Failure.md)
+  — two GPCs lost to a loose-solder fault during entry, and redundancy
+  management against a shared hardware defect.
+- [PASS Operational Sequences (OPS)](docs/Space_Shuttle_Flight_Software_History/PASS-Operational_Sequences.md)
+  — the OPS memory configurations that reconfigured the GPCs for each flight
+  phase (ascent, orbit, entry).
+- [PASS Crew Input Processing](docs/Space_Shuttle_Flight_Software_History/PASS-Crew-Input-Processing.md)
+  — how the crew drove the system through 32-key keypads and the
+  `OPS`/`SPEC`/`ITEM` display language.
 
 ## Compilers Namesake
 

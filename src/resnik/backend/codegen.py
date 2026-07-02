@@ -267,6 +267,7 @@ class RustCodeGenerator:
         self.type_mapper = TypeMapper()
         self.in_main = False
         self._dense_structs: set = set()
+        self._extern_vars: set = set()  # DECLARE ... EXTERNAL variable names
         self._task_names: set = set()
         self._bit_widths: dict = {}
         self._var_info: dict = {}
@@ -420,6 +421,20 @@ class RustCodeGenerator:
                 self._extern_fns.add(node.name.lower())
                 self._generate_extern(node)
         if self._extern_fns:
+            self.emitter.emit_line()
+
+        # EXTERNAL variables -> module-level `extern "C"` statics; no storage is
+        # allocated here, and reads are wrapped in `unsafe` (see identifiers).
+        self._extern_vars = set()
+        for node in self._walk(ast):
+            if (isinstance(node, DeclareNode)
+                    and (node.attributes or {}).get("external")):
+                for ident in node.identifiers:
+                    self._extern_vars.add(ident.lower())
+                    rty = self._full_rust_type(node.type_spec)
+                    self.emitter.emit_line(
+                        f'extern "C" {{ static {ident.lower()}: {rty}; }}')
+        if self._extern_vars:
             self.emitter.emit_line()
 
         # Generate code from AST
@@ -853,7 +868,6 @@ use hal_rt::*;
         self.emitter.emit_line("#![allow(unused_parens)]")
         self.emitter.emit_line("#![allow(unused_imports)]")
         self.emitter.emit_line("#![allow(improper_ctypes)]")
-        self.emitter.emit_line("#![allow(unused_imports)]")
         self.emitter.emit_line("#![allow(unreachable_code)]")
         self.emitter.emit_line("#![allow(dead_code)]")
         self.emitter.emit_line()
@@ -1281,6 +1295,11 @@ use hal_rt::*;
             node: DeclareNode to generate
         """
         rust_type = self.type_mapper.map_type(node.type_spec)
+
+        # EXTERNAL variables are foreign `extern "C"` statics (emitted in the
+        # generate() pre-pass); no per-scope storage is allocated here.
+        if (node.attributes or {}).get("external"):
+            return
 
         # EVENT variables are module-level AtomicBool statics (emitted in the
         # generate() pre-pass); no per-scope local is declared.
@@ -2157,6 +2176,12 @@ use hal_rt::*;
         if node.name.lower() in getattr(self, "_event_vars", set()):
             return (f"{node.name.upper()}"
                     ".load(std::sync::atomic::Ordering::SeqCst)")
+        # EXTERNAL variable -> read the foreign `extern "C"` static (unsafe).
+        if node.name.lower() in getattr(self, "_extern_vars", set()):
+            nm = node.name.lower()
+            if getattr(self, "_unsafe_ctx", False):
+                return nm
+            return f"(unsafe {{ {nm} }})"
         # `unsafe` the bare deref suffices; elsewhere use an inline unsafe block
         # so the expression is valid on its own.
         if node.name.lower() in getattr(self, "_name_vars", {}):
@@ -3119,6 +3144,9 @@ use hal_rt::*;
         edition: str = "2021",
         target: Optional[str] = None,
         keep_source: bool = True,
+        link_search: Optional[list] = None,
+        link_libs: Optional[list] = None,
+        link_objs: Optional[list] = None,
     ) -> "CompileResult":
         """
         Compile generated Rust source into a native executable with rustc.
@@ -3159,18 +3187,10 @@ use hal_rt::*;
         # no `fn main`. Building it as a binary would fail with E0601; instead
         # validate it as a library so "does it compile?" still gets answered.
         has_main = "fn main" in code
-        cmd = [
-            rustc,
-            str(src),
-            "--edition", edition,
-            "-C", f"opt-level={opt_level}",
-        ]
-        if has_main:
-            cmd += ["-o", str(out)]
-        else:
-            cmd += ["--crate-type", "lib", "-o", str(out)]
-        if target:
-            cmd += ["--target", target]
+        cmd = self._rustc_command(
+            rustc, str(src), str(out), has_main=has_main, opt_level=opt_level,
+            edition=edition, target=target, link_search=link_search,
+            link_libs=link_libs, link_objs=link_objs)
 
         proc = subprocess.run(cmd, capture_output=True, text=True)
         success = proc.returncode == 0
@@ -3186,6 +3206,31 @@ use hal_rt::*;
             stderr=proc.stderr,
             library=not has_main,
         )
+
+    @staticmethod
+    def _rustc_command(
+        rustc: str, src: str, out: str, *, has_main: bool, opt_level: str,
+        edition: str, target: Optional[str] = None,
+        link_search: Optional[list] = None, link_libs: Optional[list] = None,
+        link_objs: Optional[list] = None,
+    ) -> list:
+        """Build the rustc argv. A unit with no `fn main` is compiled as a
+        library (validated, not linked); EXTERNAL symbols are resolved via
+        linker passthrough: -L (search), -l (library), -C link-arg (object)."""
+        cmd = [rustc, src, "--edition", edition, "-C", f"opt-level={opt_level}"]
+        if has_main:
+            cmd += ["-o", out]
+        else:
+            cmd += ["--crate-type", "lib", "-o", out]
+        if target:
+            cmd += ["--target", target]
+        for d in (link_search or []):
+            cmd += ["-L", str(d)]
+        for lib in (link_libs or []):
+            cmd += ["-l", str(lib)]
+        for obj in (link_objs or []):
+            cmd += ["-C", f"link-arg={obj}"]
+        return cmd
 
     @staticmethod
     def _sanitize_crate_name(raw: str) -> str:

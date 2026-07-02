@@ -70,6 +70,8 @@ cleanup() {
         [[ -d "$SCRIPT_DIR/TEMPLIB" ]] && rm -rf "$SCRIPT_DIR/TEMPLIB"
         [[ -d "$SCRIPT_DIR/TEMPLATE_REGRESSION_TEMPLIB" ]] && \
             rm -rf "$SCRIPT_DIR/TEMPLATE_REGRESSION_TEMPLIB"
+        [[ -d "$SCRIPT_DIR/HW_INTERFACE_BUILD" ]] && \
+            rm -rf "$SCRIPT_DIR/HW_INTERFACE_BUILD"
     fi
 }
 trap cleanup SIGINT SIGTERM ERR EXIT
@@ -163,6 +165,59 @@ run_template_pipeline_case() {
         FAILED_TESTS+=("$test_name ($step_failed)")
     else
         echo "[✓ PASS] $test_name (Template pipeline)"
+        PASSED=$((PASSED + 1))
+    fi
+    echo ""
+}
+
+# Helper function for C object linking pipeline regression (--link-obj)
+run_link_obj_pipeline_case() {
+    local title="$1"
+    local description="$2"
+    local c_source="$3"
+    local hal_file="$4"
+    local test_name=""
+    local build_dir=""
+    local obj_file=""
+    local exe_file=""
+    local step_failed=""
+
+    TEST_CASE_NUM=$((TEST_CASE_NUM + 1))
+    test_name="TC${TEST_CASE_NUM} - ${title}"
+    build_dir="$SCRIPT_DIR/HW_INTERFACE_BUILD"
+    obj_file="$build_dir/i2c.o"
+    exe_file="${hal_file%.hal}"
+
+    echo "----------------------------------"
+    echo "Test Case #${TEST_CASE_NUM} - ${title}"
+    echo "----------------------------------"
+    echo "[+] ${description}"
+
+    rm -rf "$build_dir"
+    mkdir -p "$build_dir"
+
+    if ! cc -c "$c_source" -o "$obj_file"; then
+        step_failed="cc -c $(basename "$c_source") -o i2c.o"
+    elif ! "$_RESNIK" compile "$hal_file" --emit-exe --link-obj "$obj_file"; then
+        step_failed="resnik compile $(basename "$hal_file") --emit-exe --link-obj i2c.o"
+    elif [[ ! -x "$exe_file" ]]; then
+        step_failed="executable not found or not runnable ($(basename "$exe_file"))"
+    else
+        echo "  Linked object: $obj_file"
+        echo "  Built executable: $exe_file"
+        echo "+++++++++++++++++++++++++++++++++++++++++++++++++++++++++"
+        if ! "$exe_file"; then
+            step_failed="execution failed"
+        fi
+        echo "+++++++++++++++++++++++++++++++++++++++++++++++++++++++++"
+    fi
+
+    if [[ -n "$step_failed" ]]; then
+        echo "[✗ FAIL] $test_name ($step_failed)"
+        FAILED=$((FAILED + 1))
+        FAILED_TESTS+=("$test_name ($step_failed)")
+    else
+        echo "[✓ PASS] $test_name (C link-obj pipeline)"
         PASSED=$((PASSED + 1))
     fi
     echo ""
@@ -499,6 +554,11 @@ run_regression_case "Yaw Rotate" \
 
 run_template_pipeline_case "HAL/S Template Processing" \
     "Verify Resnik template workflow including supporting the OG 'D INCLUDE TEMPLATE' pre-processor directive (Link multiple templates into main)."
+
+run_link_obj_pipeline_case "HW_Interface" \
+    "Verify Resnik links HAL/S EXTERNAL symbols against a foreign C object file via --link-obj." \
+    "$GIT_ROOT/docs/HAL-S-Source-Code-Examples/hw_interface/i2c.c" \
+    "$GIT_ROOT/docs/HAL-S-Source-Code-Examples/hw_interface/hw_interface.hal"
 
 # ==============================================================================
 # 7. SUMMARY

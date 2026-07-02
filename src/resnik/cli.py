@@ -214,6 +214,26 @@ def parse(
     help="rustc optimization level for --emit-exe (0-3, s, z)",
 )
 @click.option(
+    "-L", "--link-search",
+    type=click.Path(path_type=Path),
+    multiple=True,
+    help="With --emit-exe: add a linker search directory (rustc -L). "
+         "Repeatable. For resolving EXTERNAL symbols.",
+)
+@click.option(
+    "-l", "--link-lib",
+    multiple=True,
+    help="With --emit-exe: link a native library by name (rustc -l). "
+         "Repeatable.",
+)
+@click.option(
+    "--link-obj",
+    type=click.Path(path_type=Path),
+    multiple=True,
+    help="With --emit-exe: add a foreign object/archive to the link "
+         "(e.g. i2c.o for an EXTERNAL routine). Repeatable.",
+)
+@click.option(
     "--emit-cargo",
     type=click.Path(path_type=Path),
     help="Scaffold a Cargo project at this directory",
@@ -254,6 +274,9 @@ def compile(
     rust: Optional[Path],
     emit_exe: bool,
     opt_level: str,
+    link_search: tuple,
+    link_lib: tuple,
+    link_obj: tuple,
     emit_cargo: Optional[Path],
     build: bool,
     target: str,
@@ -421,6 +444,9 @@ def compile(
                         str(rust_path.with_suffix("")),
                         opt_level=opt_level,
                         target=cross_triple,
+                        link_search=[str(d) for d in link_search],
+                        link_libs=list(link_lib),
+                        link_objs=[str(o) for o in link_obj],
                     )
                 except RuntimeError as exc:
                     progress.update(task, completed=True)

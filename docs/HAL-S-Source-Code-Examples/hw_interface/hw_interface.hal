@@ -1,0 +1,32 @@
+HW_INTERFACE: PROGRAM;
+  
+  /* EXTERNAL VARIABLE: Defined in a separate object file or linker script. 
+     The compiler will not allocate space for this. 
+  */
+  DECLARE RAW_TEMP SCALAR EXTERNAL;
+  
+  /* EXTERNAL PROCEDURE: A prototype for a routine compiled outside this file.
+     Similar to TEMPLATE, but usually implies non-HAL linkage or manual 
+     linker resolution rather than auto-generated libraries.
+  */
+  READ_I2C_BUS: PROCEDURE(BUS_ID) EXTERNAL;
+    DECLARE BUS_ID INTEGER;
+  CLOSE READ_I2C_BUS;
+
+  DECLARE KILROY_OVERHEAT BOOLEAN INITIAL(FALSE);
+
+  /* CALLING THE EXTERNAL ROUTINE */
+  CALL READ_I2C_BUS(2);
+
+  /* READING THE EXTERNAL VARIABLE */
+  IF RAW_TEMP > 85.0 THEN
+  DO;
+    KILROY_OVERHEAT = TRUE;
+    WRITE(6) 'KILROY ALERT: EXTERNAL SENSOR EXCEEDS THERMAL LIMITS';
+  END;
+  ELSE
+  DO;
+    WRITE(6) 'I2C BUS POLLED, THERMALS NOMINAL';
+  END;
+
+CLOSE HW_INTERFACE;
