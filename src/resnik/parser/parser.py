@@ -27,6 +27,7 @@ from resnik.parser.ast_nodes import (
     UnaryOpNode,
     SubscriptNode,
     ForNode,
+    ExitNode,
     StarNode,
     IndexListNode,
     RangeNode,
@@ -103,6 +104,8 @@ class Parser:
                 "KEYWORD_CASE",
                 "KEYWORD_FOR",
                 "KEYWORD_TO",
+                "KEYWORD_DOWNTO",
+                "KEYWORD_EXIT",
                 "KEYWORD_GO",
                 "KEYWORD_NAME",
                 "KEYWORD_NONHAL",
@@ -158,6 +161,7 @@ class Parser:
                 "KEYWORD_AND",
                 "KEYWORD_OR",
                 "KEYWORD_XOR",
+                "KEYWORD_MOD",
                 "KEYWORD_NOT",
                 "HEXSTRING",
                 "BITSTRING",
@@ -176,7 +180,7 @@ class Parser:
                 ("left", ["ASSIGN"]),
                 ("left", ["LT", "GT", "LE", "GE", "NE"]),
                 ("left", ["PLUS", "MINUS", "CONCAT"]),
-                ("left", ["MULTIPLY", "DIVIDE"]),
+                ("left", ["MULTIPLY", "DIVIDE", "KEYWORD_MOD"]),
                 ("right", ["POWER"]),
                 ("right", ["KEYWORD_NOT"]),     # unary NOT binds tightly
                 ("left", ["DOLLAR", "DOT"]),    # postfix subscript/field, left-to-right
@@ -1396,6 +1400,60 @@ class Parser:
                 column=getattr(p[0], "column", 0),
             )
 
+        # ---- DO FOR <var> = <start> DOWNTO <end> [BY <step>]; ... END; ----
+        # The directional token forks the rule: DOWNTO builds a decrementing
+        # ForNode (descending=True), which the backend lowers to a reversed
+        # range.
+        @self.pg.production(
+            "do_block : KEYWORD_DO KEYWORD_FOR IDENTIFIER ASSIGN expression "
+            "KEYWORD_DOWNTO expression SEMICOLON statement_list "
+            "KEYWORD_END SEMICOLON"
+        )
+        def do_for_down_block(p: List[Any]) -> ForNode:
+            return ForNode(
+                var=p[2].value,
+                start=p[4],
+                end=p[6],
+                step=None,
+                descending=True,
+                statements=p[8],
+                line=getattr(p[0], "line", 0),
+                column=getattr(p[0], "column", 0),
+            )
+
+        @self.pg.production(
+            "do_block : KEYWORD_DO KEYWORD_FOR IDENTIFIER ASSIGN expression "
+            "KEYWORD_DOWNTO expression KEYWORD_BY expression SEMICOLON "
+            "statement_list KEYWORD_END SEMICOLON"
+        )
+        def do_for_down_step_block(p: List[Any]) -> ForNode:
+            return ForNode(
+                var=p[2].value,
+                start=p[4],
+                end=p[6],
+                step=p[8],
+                descending=True,
+                statements=p[10],
+                line=getattr(p[0], "line", 0),
+                column=getattr(p[0], "column", 0),
+            )
+
+        # ---- EXIT [<label>]; -- break the innermost or a named loop -------
+        @self.pg.production("statement : KEYWORD_EXIT SEMICOLON")
+        def exit_statement(p: List[Any]) -> ExitNode:
+            return ExitNode(
+                line=getattr(p[0], "line", 0),
+                column=getattr(p[0], "column", 0),
+            )
+
+        @self.pg.production("statement : KEYWORD_EXIT IDENTIFIER SEMICOLON")
+        def exit_labeled_statement(p: List[Any]) -> ExitNode:
+            return ExitNode(
+                label=p[1].value,
+                line=getattr(p[0], "line", 0),
+                column=getattr(p[0], "column", 0),
+            )
+
         # ---- CALL <proc>[(<args>)]; -----------------------------------
         @self.pg.production(
             "call_statement : KEYWORD_CALL IDENTIFIER LPAREN arg_list RPAREN SEMICOLON"
@@ -1671,6 +1729,7 @@ class Parser:
         @self.pg.production("expression : expression MINUS expression")
         @self.pg.production("expression : expression MULTIPLY expression")
         @self.pg.production("expression : expression DIVIDE expression")
+        @self.pg.production("expression : expression KEYWORD_MOD expression")
         @self.pg.production("expression : expression POWER expression")
         @self.pg.production("expression : expression ASSIGN expression")
         @self.pg.production("expression : expression LT expression")
@@ -2321,6 +2380,57 @@ class Parser:
             column=getattr(tok, "column", 0),
         )
 
+    def _check_exit_context(self, node: ASTNode, in_loop: bool,
+                            labels: frozenset = frozenset()) -> None:
+        """Semantic check: EXIT is only legal inside a loop body.
+
+        Walks the AST tracking (a) whether the current position is inside a
+        DO FOR / DO WHILE loop, and (b) the set of labels of enclosing loops.
+        A PROGRAM, PROCEDURE, or TASK body opens a fresh scope (an outer loop
+        or label does not reach into a nested procedure). Rules:
+          - `EXIT;` with no enclosing loop -> "used outside of loop".
+          - `EXIT <label>;` where <label> is not an enclosing loop label ->
+            "references unknown loop label".
+        """
+        if node is None:
+            return
+        if isinstance(node, ExitNode):
+            if node.label:
+                if node.label.upper() not in labels:
+                    self.errors.append(SemanticError(
+                        f"Context Error: EXIT references unknown loop label "
+                        f"'{node.label}'.",
+                        node.line, node.column,
+                    ))
+            elif not in_loop:
+                self.errors.append(SemanticError(
+                    "Context Error: EXIT used outside of loop.",
+                    node.line, node.column,
+                ))
+            return
+
+        # A procedure/task/program body is a fresh scope: no enclosing loop.
+        if isinstance(node, (ProgramNode, ProcedureNode, TaskNode)):
+            in_loop, labels = False, frozenset()
+
+        # A label directly wrapping a loop names that loop; recurse into the
+        # loop body with the label available as an EXIT target.
+        if isinstance(node, LabelNode) and isinstance(
+                node.statement, (ForNode, WhileNode)):
+            body_labels = labels | {node.name.upper()}
+            for stmt in node.statement.statements:
+                self._check_exit_context(stmt, True, body_labels)
+            return
+
+        # Entering a (bare, unlabeled) loop: its body is in-loop.
+        child_in_loop = True if isinstance(node, (ForNode, WhileNode)) else in_loop
+
+        for value in vars(node).values():
+            items = value if isinstance(value, list) else [value]
+            for item in items:
+                if isinstance(item, ASTNode):
+                    self._check_exit_context(item, child_in_loop, labels)
+
     def parse(self, tokens: List[Token]) -> Optional[ASTNode]:
         """
         Parse token stream and generate AST.
@@ -2367,6 +2477,8 @@ class Parser:
                 rply_tokens.append(mock_token)
 
             self.ast = self.parser.parse(iter(rply_tokens))
+            if self.ast is not None:
+                self._check_exit_context(self.ast, in_loop=False)
             return self.ast
 
         except Exception as e:

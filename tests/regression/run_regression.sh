@@ -206,6 +206,10 @@ run_regression_case "Branch Inference" \
     "Verify Resnik's ability to process multi-branch control flow using HAL/S DO CASE for state machine logic." \
     "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/branch_inference/branch_inference.hal --emit-exe
 
+run_regression_case "Buffer Search" \
+    "Verify Resnik's parses DOWNTO and EXIT control logic keywords." \
+    "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/buffer_search/buffer_search.hal --emit-exe
+
 run_regression_case "Command Decoder" \
     "Verify Resnik handles HAL/S's unique casting syntax and intrinsic conversions that is stressing strongly-typed semantic analyzer." \
     "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/cmd_decoder/cmd_decoder.hal --emit-exe
@@ -306,6 +310,10 @@ run_regression_case "PTR Resolution" \
     "Verify Resnik parses pass references to pre-allocated memory using the NAME keyword. This acts as a strictly controlled pointer. " \
     "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/ptr_resolution/ptr_resolution.hal --emit-exe
 
+run_regression_case "Ring Buffer" \
+    "Verify Resnik parses the MOD keyword. " \
+    "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/ring_buffer/ring_buffer.hal --emit-exe
+
 run_regression_case "SAT Mon" \
     "Verify Resnik's parsing with the REPLACE keyword before or during AST generation and Bit Slicing." \
     "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/sat_mon/sat_mon.hal --emit-exe
@@ -373,6 +381,10 @@ run_regression_case "Tensor Math" \
 run_regression_case "Tsiolkovsky Delta V Calc" \
     "Verify Resnik's abiliy to parse combined arrays, loops, logarithms (LN), and conditional margin checks." \
     "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/tsiolkovsky_deltav_calc/tsiolkovsky_deltav_calc.hal --emit-exe
+
+run_regression_case "Voyager Signal" \
+    "Verify Resnik's ability to parse scientific notation." \
+    "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/voyager_signal/voyager_signal.hal --emit-exe
 
 run_regression_case "Warp Drive Init" \
     "Verify Resnik's ability to parse ability to handle matrix-vector multiplication, universal constants with scientific notation, array iteration, and compound logical branching." \

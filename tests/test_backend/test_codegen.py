@@ -2731,3 +2731,208 @@ class TestPrecisionPromotion:
         assert not errs
         assert "a * b" in code
         assert "as f64" not in code
+
+
+class TestModOperator:
+    """HAL/S MOD operator: an infix, multiplicative-precedence integer/real
+    remainder that lowers to Rust `%`. Exercised through the parser so that
+    tokenization, precedence, and case-insensitivity are covered too."""
+
+    def _run(self, src: str):
+        from resnik import Lexer, Parser
+        p = Parser()
+        ast = p.parse(Lexer().tokenize(src, "t"))
+        code = RustCodeGenerator().generate(ast) if not p.errors else ""
+        return p.errors, code
+
+    MOD = ("T: PROGRAM; "
+           "DECLARE A INTEGER INITIAL(17); "
+           "DECLARE B INTEGER INITIAL(5); "
+           "DECLARE R INTEGER; "
+           "R = A MOD B; "
+           "CLOSE T;")
+
+    RING = ("RING_BUFFER: PROGRAM; "
+            "DECLARE MAX_PKTS INTEGER CONSTANT(16); "
+            "DECLARE TELEMETRY_RING ARRAY(16) OF INTEGER; "
+            "DECLARE WRITE_IDX INTEGER INITIAL(1); "
+            "DECLARE PACKET_COUNT INTEGER INITIAL(0); "
+            "DECLARE INBOUND_DATA INTEGER; "
+            "DO WHILE PACKET_COUNT < 20; "
+            "INBOUND_DATA = PACKET_COUNT * 2; "
+            "TELEMETRY_RING$WRITE_IDX = INBOUND_DATA; "
+            "WRITE_IDX = (WRITE_IDX MOD MAX_PKTS) + 1; "
+            "PACKET_COUNT = PACKET_COUNT + 1; "
+            "END; "
+            "CLOSE RING_BUFFER;")
+
+    def test_mod_lowers_to_percent(self) -> None:
+        errs, code = self._run(self.MOD)
+        assert not errs
+        assert "r = a % b;" in code
+
+    def test_mod_is_case_insensitive(self) -> None:
+        errs, code = self._run(self.MOD.replace("A MOD B", "A mod B"))
+        assert not errs
+        assert "r = a % b;" in code
+
+    def test_mod_precedence_is_multiplicative(self) -> None:
+        # MOD must bind tighter than + : (A MOD B) + 1, not A MOD (B + 1)
+        errs, code = self._run(self.MOD.replace("R = A MOD B;", "R = A MOD B + 1;"))
+        assert not errs
+        assert "(a % b) + 1" in code
+
+    def test_ring_buffer_wraps(self) -> None:
+        errs, code = self._run(self.RING)
+        assert not errs
+        # cyclic 1-based index increment via MOD
+        assert "write_idx = (write_idx % 16) + 1;" in code
+        # 1-based -> 0-based translation preserved on the ring store
+        assert "telemetry_ring[(write_idx - 1) as usize]" in code
+
+
+class TestDowntoAndExit:
+    """DO FOR ... DOWNTO (decrementing loop) and EXIT (loop break with a
+    loop-context semantic check). Exercised through the parser."""
+
+    def _run(self, src: str):
+        from resnik import Lexer, Parser
+        p = Parser()
+        ast = p.parse(Lexer().tokenize(src, "t"))
+        code = RustCodeGenerator().generate(ast) if not p.errors else ""
+        return p.errors, code
+
+    def test_to_counts_up(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE I INTEGER; DO FOR I = 1 TO 5; END; CLOSE T;")
+        assert not errs
+        assert "for i in 1..=5 {" in code
+
+    def test_downto_reverses_range(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE I INTEGER; DO FOR I = 10 DOWNTO 1; END; CLOSE T;")
+        assert not errs
+        assert "for i in (1..=10).rev() {" in code
+
+    def test_downto_with_step(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE I INTEGER; "
+            "DO FOR I = 10 DOWNTO 1 BY 2; END; CLOSE T;")
+        assert not errs
+        assert "for i in (1..=10).rev().step_by((2) as usize) {" in code
+
+    def test_exit_in_loop_lowers_to_break(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE I INTEGER; "
+            "DO FOR I = 1 TO 5; EXIT; END; CLOSE T;")
+        assert not errs
+        assert "break;" in code
+
+    def test_exit_in_while_loop_ok(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE I INTEGER INITIAL(0); "
+            "DO WHILE I < 5; EXIT; END; CLOSE T;")
+        assert not errs
+        assert "break;" in code
+
+    def test_exit_outside_loop_is_semantic_error(self) -> None:
+        errs, _ = self._run(
+            "T: PROGRAM; DECLARE X INTEGER; X = 1; EXIT; CLOSE T;")
+        assert any("EXIT used outside of loop" in e.message for e in errs)
+
+    def test_exit_in_nested_procedure_ignores_outer_loop(self) -> None:
+        # An outer loop does NOT legalize an EXIT inside a called procedure.
+        errs, _ = self._run(
+            "T: PROGRAM; DECLARE I INTEGER; "
+            "SUB: PROCEDURE; EXIT; CLOSE SUB; "
+            "DO FOR I = 1 TO 3; CALL SUB; END; "
+            "CLOSE T;")
+        assert any("EXIT used outside of loop" in e.message for e in errs)
+
+    BUFFER_SEARCH = (
+        "BUFFER_SEARCH: PROGRAM; "
+        "DECLARE HISTORY ARRAY(10) OF INTEGER "
+        "INITIAL(10, 20, 30, 99, 50, 60, 70, 80, 90, 100); "
+        "DECLARE FAULT_TARGET CONSTANT INTEGER(99); "
+        "DECLARE FOUND_IDX INTEGER INITIAL(0); "
+        "DECLARE I INTEGER; "
+        "DO FOR I = 10 DOWNTO 1; "
+        "IF HISTORY$I = FAULT_TARGET THEN DO; FOUND_IDX = I; EXIT; END; "
+        "END; "
+        "CLOSE BUFFER_SEARCH;")
+
+    def test_buffer_search_end_to_end(self) -> None:
+        errs, code = self._run(self.BUFFER_SEARCH)
+        assert not errs
+        assert "for i in (1..=10).rev() {" in code
+        assert "history[(i - 1) as usize] == 99" in code
+        assert "break;" in code
+
+
+class TestLabeledExit:
+    """Labeled loops (SEARCH: DO ...) and EXIT <label> -> Rust labeled break."""
+
+    def _run(self, src: str):
+        from resnik import Lexer, Parser
+        p = Parser()
+        ast = p.parse(Lexer().tokenize(src, "t"))
+        code = RustCodeGenerator().generate(ast) if not p.errors else ""
+        return p.errors, code
+
+    def test_labeled_for_emits_rust_label(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE I INTEGER; "
+            "SEARCH: DO FOR I = 1 TO 3; END; CLOSE T;")
+        assert not errs
+        assert "'search: for i in 1..=3 {" in code
+
+    def test_labeled_while_emits_rust_label(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE I INTEGER INITIAL(0); "
+            "L: DO WHILE I < 5; EXIT L; END; CLOSE T;")
+        assert not errs
+        assert "'l: while i < 5 {" in code
+        assert "break 'l;" in code
+
+    def test_exit_label_breaks_outer_from_inner(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE I INTEGER; DECLARE J INTEGER; "
+            "SEARCH: DO FOR I = 1 TO 3; "
+            "  DO FOR J = 1 TO 3; EXIT SEARCH; END; "
+            "END; CLOSE T;")
+        assert not errs
+        assert "'search: for i in 1..=3 {" in code
+        assert "for j in 1..=3 {" in code   # inner loop unlabeled
+        assert "break 'search;" in code
+
+    def test_bare_exit_still_breaks_innermost(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE I INTEGER; "
+            "L: DO FOR I = 1 TO 3; EXIT; END; CLOSE T;")
+        assert not errs
+        assert "break;" in code           # bare EXIT -> unlabeled break
+        assert "break '" not in code
+
+    def test_exit_unknown_label_is_error(self) -> None:
+        errs, _ = self._run(
+            "T: PROGRAM; DECLARE I INTEGER; "
+            "SEARCH: DO FOR I = 1 TO 3; EXIT NOPE; END; CLOSE T;")
+        assert any("unknown loop label" in e.message for e in errs)
+
+    def test_exit_label_not_in_scope_is_error(self) -> None:
+        # OUTER label is not visible from a sibling loop.
+        errs, _ = self._run(
+            "T: PROGRAM; DECLARE I INTEGER; DECLARE J INTEGER; "
+            "OUTER: DO FOR I = 1 TO 3; END; "
+            "DO FOR J = 1 TO 3; EXIT OUTER; END; "
+            "CLOSE T;")
+        assert any("unknown loop label" in e.message for e in errs)
+
+    def test_labeled_loop_without_goto_avoids_dispatch(self) -> None:
+        # A labeled loop must NOT trigger the GO TO state machine.
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE I INTEGER; "
+            "SEARCH: DO FOR I = 1 TO 3; EXIT SEARCH; END; CLOSE T;")
+        assert not errs
+        assert "'dispatch" not in code
+        assert "__pc" not in code

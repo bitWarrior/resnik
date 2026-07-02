@@ -223,6 +223,14 @@ def parse(
     is_flag=True,
     help="With --emit-cargo, run 'cargo build --release' on the project",
 )
+@click.option(
+    "--target",
+    type=click.Choice(["host", "cortex-m"]),
+    default="host",
+    show_default=True,
+    help="Code-generation target profile: 'host' (std) or 'cortex-m' (no_std "
+         "bare-metal firmware). Use with --emit-cargo for embedded builds.",
+)
 def compile(
     input_file: Path,
     tokens: Optional[Path],
@@ -232,6 +240,7 @@ def compile(
     opt_level: str,
     emit_cargo: Optional[Path],
     build: bool,
+    target: str,
 ) -> None:
     """Run the complete compilation pipeline."""
     console.print(
@@ -240,6 +249,8 @@ def compile(
             subtitle=f"v{__version__}",
         )
     )
+    if target != "host":
+        print_info(f"Target profile: {target} (no_std bare-metal)")
 
     try:
         # Phase 1: Lexer
@@ -304,7 +315,7 @@ def compile(
         ) as progress:
             task = progress.add_task("[cyan]Phase 3: Code Generation", total=None)
 
-            generator = RustCodeGenerator()
+            generator = RustCodeGenerator(target=target)
             rust_code = generator.generate(ast_result)
             rust_path = rust if rust else input_file.with_suffix(".rs")
             generator.write_to_file(str(rust_path), rust_code)
@@ -312,6 +323,9 @@ def compile(
             progress.update(task, completed=True)
 
         print_success(f"Generated Rust source: {rust_path}")
+
+        # Cross-compilation triple implied by the target profile (None = host).
+        cross_triple = RustCodeGenerator.TARGET_TRIPLES.get(target)
 
         # Phase 4: Cargo project (optional)
         if emit_cargo:
@@ -330,6 +344,7 @@ def compile(
                         str(emit_cargo),
                         opt_level=opt_level,
                         build=build,
+                        target=cross_triple,
                     )
                 except RuntimeError as exc:
                     progress.update(task, completed=True)
@@ -352,6 +367,11 @@ def compile(
 
         # Phase 4: Native compilation (optional)
         if emit_exe:
+            if target != "host":
+                print_info(
+                    "--emit-exe builds a single file with rustc; for a "
+                    "bare-metal target prefer --emit-cargo (it scaffolds the "
+                    "linker script and cortex-m-rt runtime).")
             with Progress(
                 SpinnerColumn(),
                 TextColumn("[progress.description]{task.description}"),
@@ -366,6 +386,7 @@ def compile(
                         rust_code,
                         str(rust_path.with_suffix("")),
                         opt_level=opt_level,
+                        target=cross_triple,
                     )
                 except RuntimeError as exc:
                     progress.update(task, completed=True)

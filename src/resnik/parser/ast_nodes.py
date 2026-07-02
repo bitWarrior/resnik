@@ -508,6 +508,7 @@ class ForNode(ASTNode):
     start: Optional[ASTNode] = None
     end: Optional[ASTNode] = None
     step: Optional[ASTNode] = None
+    descending: bool = False  # True for DOWNTO (decrementing), False for TO
     statements: List[ASTNode] = field(default_factory=list)
 
     def __post_init__(self) -> None:
@@ -521,10 +522,22 @@ class ForNode(ASTNode):
                 "start": self.start.to_dict() if self.start else None,
                 "end": self.end.to_dict() if self.end else None,
                 "step": self.step.to_dict() if self.step else None,
+                "descending": self.descending,
                 "statements": [s.to_dict() for s in self.statements],
             }
         )
         return result
+
+
+@dataclass
+class ExitNode(ASTNode):
+    """EXIT [<label>]; -- break out of the innermost enclosing loop, or the
+    loop named by <label> when one is given."""
+
+    label: str = ""
+
+    def __post_init__(self) -> None:
+        self.node_type = NodeType.EXIT
 
 
 @dataclass
