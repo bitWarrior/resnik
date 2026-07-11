@@ -877,6 +877,7 @@ use hal_rt::*;
             "indices", "assign_args",
             "branches",        # CaseNode
             "initial_values",  # DeclareNode array initializers
+            "bits",            # SignalNode bit-list positions
         )
         for attr in list_attrs:
             for child in getattr(node, attr, None) or []:
@@ -3301,22 +3302,94 @@ use hal_rt::*;
         self.emitter.emit_line("}")
 
     def _generate_signal(self, node: SignalNode) -> None:
-        """SIGNAL <event>; -> host stub. Sets the event's latched flag and
-        emits an advisory marker. This is NOT real-time-faithful: a real
-        unlatched event would pulse and be lost with no waiter; here the flag
-        persists. See the RTOS backend for faithful task-notification."""
+        """SIGNAL / SET / RESET -> atomic event write OR bit-mask update
+        on a BIT variable, depending on shape:
+
+          Event form (no `bits`):
+            * SIGNAL: latched set (host stub -- a real unlatched signal
+              would pulse and be lost with no waiter; RTOS backend gives
+              real-time-faithful behaviour).
+            * SET:    latched set (state-based, explicit).
+            * RESET:  latched clear.
+
+          Bit-list form (`bits` populated):
+            * SET B(i, j, ...):   B |= (1 << (w - k))   for each k
+            * RESET B(i, j, ...): B &= !(1 << (w - k))  for each k
+          where `w` is B's declared BIT width and the positions are
+          1-indexed MSB-first (same convention as the $ bit-extract).
+
+        Non-EVENT identifiers in the event form fall back to a plain
+        assignment so a rebound BOOLEAN still works.
+        """
+        op = (getattr(node, "op", "SIGNAL") or "SIGNAL").upper()
+        # Bit-list form takes priority: same source verb (SET/RESET) but
+        # very different lowering when a bit list is present.
+        bits = getattr(node, "bits", None)
+        if bits:
+            self._generate_bit_op(node, op)
+            return
+        # SIGNAL and SET both raise the flag; only RESET clears it.
+        value_expr = "false" if op == "RESET" else "true"
+        rust_value_word = "cleared" if op == "RESET" else "raised"
         ev = node.name.lower()
         self.emitter.emit_comment(
-            f"SIGNAL {node.name} (host stub: advisory, latched flag)")
+            f"{op} {node.name} (host stub: advisory, latched flag)")
         if ev in getattr(self, "_event_vars", set()):
             self.emitter.emit_line(
-                f"{node.name.upper()}.store(true, "
+                f"{node.name.upper()}.store({value_expr}, "
                 "std::sync::atomic::Ordering::SeqCst);")
         else:
-            self.emitter.emit_line(f"{ev} = true;")
+            self.emitter.emit_line(f"{ev} = {value_expr};")
         self.emitter.emit_line(
-            f'eprintln!("[hal_rt] SIGNAL {node.name} '
-            '(advisory host stub; not real-time)");')
+            f'eprintln!("[hal_rt] {op} {node.name} '
+            f'(flag {rust_value_word}; advisory host stub, not real-time)");')
+
+    def _generate_bit_op(self, node: SignalNode, op: str) -> None:
+        """SET/RESET on a BIT variable with an explicit position list.
+        Each listed position is 1-indexed MSB-first; the emitted mask is
+        `1 << (width - pos)`. Constant positions fold to a literal hex
+        mask (`|= 0x8000u16;`); runtime positions emit a live shift."""
+        var = self._rust_ident(node.name)
+        ts = self._var_info.get(node.name.lower())
+        # Resolve the BIT width used for MSB-first indexing; fall back to
+        # the Rust type's default so we still emit valid code even if the
+        # declaration wasn't captured (best-effort).
+        width = self._bit_widths.get(node.name.lower())
+        if width is None and ts is not None and ts.data_type == DataType.BIT \
+                and ts.dimensions:
+            width = ts.dimensions[0]
+        if width is None:
+            width = 32
+        # Rust type of the mask -- matches the variable's declared width
+        # so `var |= 0x8000u16;` type-checks without a cast.
+        rust_type = (self.type_mapper.map_type(ts)
+                     if ts is not None else "u32")
+        self.emitter.emit_comment(
+            f"{op} {node.name}(bit list) -- 1-indexed, MSB-first "
+            f"on BIT({width})")
+        for bit in node.bits or []:
+            const = self._const_int(bit)
+            if const is not None and 1 <= const <= width:
+                mask = 1 << (width - const)
+                if op == "SET":
+                    self.emitter.emit_line(
+                        f"{var} |= 0x{mask:X}{rust_type};")
+                else:  # RESET
+                    self.emitter.emit_line(
+                        f"{var} &= !0x{mask:X}{rust_type};")
+            else:
+                # Runtime position (identifier or expression). Rust's `<<`
+                # accepts any integer shift count and yields the LHS type;
+                # keep the `1` typed so the mask width matches `var`.
+                idx_src = self._generate_expression(bit)
+                mask_expr = (
+                    f"(1{rust_type} "
+                    f"<< ({width} - ({idx_src}) as i32) as u32)"
+                )
+                if op == "SET":
+                    self.emitter.emit_line(f"{var} |= {mask_expr};")
+                else:  # RESET
+                    self.emitter.emit_line(f"{var} &= !{mask_expr};")
 
     def _generate_cancel(self, node: CancelNode) -> None:
         """CANCEL <task>; -> set the task's cancel flag and join its thread."""

@@ -1,0 +1,32 @@
+BIT_VERIFICATION: PROGRAM;
+
+  /* Define a 16-bit status register, initialised to all zeros. */
+  DECLARE STATUS_FLAGS BIT(16) INITIAL(HEX '0000');
+  DECLARE RAW INTEGER;
+
+  /* Output initial state as an integer for readable verification. */
+  RAW = INTEGER(STATUS_FLAGS);
+  WRITE(6) 'Initial State (expect 0):', RAW;
+
+  /* SET keyword: turn on bits 1, 3, and 5 (1-indexed, MSB-first).
+     Expected mask: 1<<15 | 1<<13 | 1<<11 = 0x8000 | 0x2000 | 0x800 = 0xA800 = 43008. */
+  SET STATUS_FLAGS(1, 3, 5);
+  RAW = INTEGER(STATUS_FLAGS);
+  WRITE(6) 'After SET(1, 3, 5) (expect 43008):', RAW;
+
+  /* Bit-level check: read individual bits back with the $ subscript. */
+  WRITE(6) '  Bit 1 =', STATUS_FLAGS$1;
+  WRITE(6) '  Bit 3 =', STATUS_FLAGS$3;
+  WRITE(6) '  Bit 5 =', STATUS_FLAGS$5;
+
+  /* RESET keyword: clear bits 1 and 5; bit 3 must remain set.
+     Expected mask: 0xA800 & ~(0x8000 | 0x800) = 0x2000 = 8192. */
+  RESET STATUS_FLAGS(1, 5);
+  RAW = INTEGER(STATUS_FLAGS);
+  WRITE(6) 'After RESET(1, 5) (expect 8192):', RAW;
+
+  WRITE(6) '  Bit 1 =', STATUS_FLAGS$1;
+  WRITE(6) '  Bit 3 =', STATUS_FLAGS$3;
+  WRITE(6) '  Bit 5 =', STATUS_FLAGS$5;
+
+CLOSE BIT_VERIFICATION;

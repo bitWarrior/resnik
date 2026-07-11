@@ -798,16 +798,31 @@ class WaitNode(ASTNode):
 
 @dataclass
 class SignalNode(ASTNode):
-    """SIGNAL <event>; — signal a real-time EVENT (host stub: advisory)."""
+    """SIGNAL / SET / RESET — HAL/S event and bit-manipulation verbs.
+
+    Two shapes share this node:
+      * Event form (no `bits`): `SIGNAL/SET/RESET <event>;` — atomic
+        write on the shared EVENT flag.
+      * Bit-list form (`bits` populated): `SET/RESET <bit_var>(i, j, ...);`
+        — bitwise-OR (SET) or bitwise-AND-NOT (RESET) of the listed
+        1-indexed, MSB-first bit positions on a BIT variable.
+    The two forms share the node because they're the same source verb
+    with different targets; the presence of `bits` is the discriminator."""
 
     name: str = ""
+    op: str = "SIGNAL"  # one of "SIGNAL" (default), "SET", "RESET"
+    bits: Optional[List[ASTNode]] = None  # bit-list form: 1-indexed positions
 
     def __post_init__(self) -> None:
         self.node_type = NodeType.SIGNAL
 
     def to_dict(self) -> Dict[str, Any]:
         result = super().to_dict()
-        result.update({"name": self.name})
+        result.update({
+            "name": self.name,
+            "op": self.op,
+            "bits": [b.to_dict() for b in self.bits] if self.bits else None,
+        })
         return result
 
 

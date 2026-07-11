@@ -348,6 +348,10 @@ run_regression_case "Bit Assembler" \
     "Verify Resnik's ability to handle the || (concatenate) operator on raw bit arrays, generating dynamically sized integer types on the fly." \
     "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/bit_assembler/bit_assembler.hal --emit-exe
 
+run_regression_case "Bit Manipulation" \
+    "Verify Resnik's parsing of SET / RESET Keywords." \
+    "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/bit_manipulation/bit_manipulation.hal --emit-exe
+
 run_regression_case "Basic Math Test" \
     "Verify Resnik's compatability with HAL/S Adjacency Multiplication 'feature'. Resnik must recognize that two adjacent operand tokens (with no explicit operator like + or / between them) form a multiplication expression." \
     "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/basic_math_test/basic_math_test.hal --emit-exe

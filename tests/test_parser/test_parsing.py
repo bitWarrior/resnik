@@ -440,10 +440,23 @@ class TestDirectAccessIO:
         assert "WRITE(unit=1" in code
 
     def test_storage_io_hal_reference_file_parses(self) -> None:
-        """The specific file the review named -- storage_io.hal --
-        must parse cleanly after this fix."""
-        with open("/home/sdoran/Sandbox/resnik/storage_io.hal") as f:
-            src = f.read()
+        """The exact HAL/S text from the review's storage_io.hal reference
+        file must parse cleanly. The literal is embedded so the test
+        doesn't depend on the scratch file surviving cleanup (it was
+        flagged in the original review as a root-level stray)."""
+        src = (
+            "STORAGE_IO: PROGRAM;\n"
+            "  DECLARE DATA_BLOCK ARRAY(512) OF BIT(16);\n"
+            "  DECLARE BLOCK_ID INTEGER INITIAL(1024);\n"
+            "  DECLARE I INTEGER;\n"
+            "  READ(1, BLOCK_ID) DATA_BLOCK;\n"
+            "  DO FOR I = 1 TO 512;\n"
+            "    DATA_BLOCK$I = DATA_BLOCK$I XOR HEX 'FFFF';\n"
+            "  END;\n"
+            "  WRITE(1, BLOCK_ID + 1) DATA_BLOCK;\n"
+            "  WRITE(6) 'I/O OPERATION COMPLETE FOR BLOCK: ', BLOCK_ID + 1;\n"
+            "CLOSE STORAGE_IO;\n"
+        )
         p = Parser()
         ast = p.parse(Lexer().tokenize(src, "storage_io.hal"))
         assert p.errors == [], p.errors

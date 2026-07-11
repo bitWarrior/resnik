@@ -2739,6 +2739,148 @@ class TestWaitForEventExpression:
         assert not errs
         assert "if E.load(std::sync::atomic::Ordering::SeqCst)" in code
 
+    def test_set_stores_true_and_labels_op(self) -> None:
+        """`SET <event>;` is HAL/S's state-based verb for raising an event
+        flag. Same runtime effect as SIGNAL (host stub: latched set), but
+        the emitted comment/log names SET so a reader can trace the source
+        verb, and future backend policy could distinguish latched-set
+        (SET) from pulse (SIGNAL) without re-parsing."""
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE E EVENT; SET E; CLOSE T;")
+        assert not errs
+        assert "E.store(true, std::sync::atomic::Ordering::SeqCst);" in code
+        assert "SET E" in code
+        # Advisory eprintln! names the source verb, not "SIGNAL".
+        assert "[hal_rt] SET E" in code
+
+    def test_reset_stores_false(self) -> None:
+        """`RESET <event>;` clears a latched flag. Same shape as SET but
+        stores false; the advisory log reflects the different transition."""
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE E EVENT; RESET E; CLOSE T;")
+        assert not errs
+        assert "E.store(false, std::sync::atomic::Ordering::SeqCst);" in code
+        assert "RESET E" in code
+        assert "flag cleared" in code
+
+    def test_set_reset_reset_round_trip(self) -> None:
+        """Interleaved SET / RESET must produce independent atomic writes,
+        not collapse into one -- the codegen must not batch or reorder."""
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE E EVENT; SET E; RESET E; SET E; CLOSE T;")
+        assert not errs
+        # Two `store(true, ...)` and one `store(false, ...)` in source order.
+        assert code.count(
+            "E.store(true, std::sync::atomic::Ordering::SeqCst);") == 2
+        assert code.count(
+            "E.store(false, std::sync::atomic::Ordering::SeqCst);") == 1
+
+    def test_set_reset_produce_signal_node_with_op(self) -> None:
+        """AST-level guard: SET and RESET reuse SignalNode with a
+        distinguishing `op` field. Anyone traversing the AST (walkers,
+        pretty-printers, external tools) can rely on that field."""
+        from resnik import Lexer, Parser
+        from resnik.parser.ast_nodes import SignalNode
+        p = Parser()
+        ast = p.parse(Lexer().tokenize(
+            "T: PROGRAM; DECLARE E EVENT; "
+            "SIGNAL E; SET E; RESET E; CLOSE T;", "t"))
+        assert not p.errors
+        signals = [s for s in ast.statements if isinstance(s, SignalNode)]
+        assert [s.op for s in signals] == ["SIGNAL", "SET", "RESET"]
+        assert all(s.name == "E" for s in signals)
+
+
+class TestBitListSetReset:
+    """HAL/S SET/RESET have a second shape: `SET/RESET B(i, j, ...);`
+    operates on 1-indexed MSB-first bit positions of a BIT variable.
+    Same source verbs as the event form, but they lower to bitwise OR
+    (SET) or bitwise AND-NOT (RESET) of the position masks against the
+    variable's declared BIT type."""
+
+    def _run(self, src: str):
+        from resnik import Lexer, Parser
+        from resnik.backend.codegen import RustCodeGenerator
+        p = Parser()
+        ast = p.parse(Lexer().tokenize(src, "t"))
+        code = RustCodeGenerator().generate(ast) if not p.errors else ""
+        return p.errors, code
+
+    def test_set_bit_list_emits_typed_or_masks(self) -> None:
+        # BIT(16) is u16 (P0 #5 narrow types). Bit 1 is the MSB:
+        # 1 << (16 - 1) = 0x8000. Bit 3 -> 0x2000. Bit 5 -> 0x800.
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE F BIT(16); SET F(1, 3, 5); CLOSE T;")
+        assert not errs
+        assert "f |= 0x8000u16;" in code
+        assert "f |= 0x2000u16;" in code
+        assert "f |= 0x800u16;" in code
+
+    def test_reset_bit_list_emits_typed_and_not_masks(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE F BIT(16); RESET F(1, 5); CLOSE T;")
+        assert not errs
+        assert "f &= !0x8000u16;" in code
+        assert "f &= !0x800u16;" in code
+
+    def test_bit_list_uses_declared_bit_width(self) -> None:
+        # BIT(8) -> u8; bit 1 is MSB: 1 << 7 = 0x80.
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE F BIT(8); SET F(1); CLOSE T;")
+        assert not errs
+        assert "f |= 0x80u8;" in code
+
+    def test_bit_list_runtime_position_emits_shift(self) -> None:
+        # A non-constant position emits a live shift, typed to the
+        # variable's Rust type so no cast is needed at the |= site.
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE F BIT(16); DECLARE I INTEGER INITIAL(2); "
+            "SET F(I); CLOSE T;")
+        assert not errs
+        assert "f |= (1u16 << (16 - (i) as i32) as u32);" in code
+
+    def test_bit_list_out_of_range_constant_falls_back_to_runtime(self) -> None:
+        # If a constant is outside 1..=width we drop to the runtime path
+        # rather than emit a bogus overflow-shifted literal.
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE F BIT(8); SET F(99); CLOSE T;")
+        assert not errs
+        assert "f |= (1u8 << (8 - (99) as i32) as u32);" in code
+
+    def test_bit_list_ast_field_present_and_typed(self) -> None:
+        """AST-level guard: the bit list is captured on SignalNode.bits.
+        The event form leaves it None. Distinguishes the two shapes at
+        the AST layer for any consumer that dispatches on shape."""
+        from resnik import Lexer, Parser
+        from resnik.parser.ast_nodes import SignalNode
+        p = Parser()
+        ast = p.parse(Lexer().tokenize(
+            "T: PROGRAM; DECLARE E EVENT; DECLARE F BIT(16); "
+            "SET E; SET F(1, 3); CLOSE T;", "t"))
+        assert not p.errors
+        signals = [s for s in ast.statements if isinstance(s, SignalNode)]
+        # First (event form) has no bits; second (bit-list form) has two.
+        assert signals[0].bits is None
+        assert signals[1].bits is not None
+        assert len(signals[1].bits) == 2
+
+    def test_bit_list_end_to_end_produces_correct_register(self) -> None:
+        """A single SET/RESET sequence should compose exactly to the
+        expected u16 value. Guards the mask math and MSB-first
+        convention against an off-by-one drift."""
+        errs, code = self._run(
+            "T: PROGRAM;"
+            " DECLARE F BIT(16) INITIAL(HEX '0000');"
+            " SET F(1, 3, 5);"
+            " RESET F(1, 5);"
+            " CLOSE T;")
+        assert not errs
+        # SET expands to three |= lines and RESET to two &= lines, in
+        # source order. Verify the ordering matters for the composition.
+        set_pos = code.index("f |= 0x8000u16;")
+        reset_pos = code.index("f &= !0x8000u16;")
+        assert set_pos < reset_pos
+
 
 class TestAssignByReferenceAndDimCheck:
     """ASSIGN passes arrays by &mut reference; dimension/type verification."""

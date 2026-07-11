@@ -92,6 +92,8 @@ class Parser:
                 "KEYWORD_UNTIL",
                 "KEYWORD_EVENT",
                 "KEYWORD_SIGNAL",
+                "KEYWORD_SET",
+                "KEYWORD_RESET",
                 "KEYWORD_ASSIGN",
                 "KEYWORD_CANCEL",
                 "KEYWORD_COMPOOL",
@@ -1855,16 +1857,84 @@ class Parser:
                 column=getattr(p[0], "column", 0),
             )
 
-        # SIGNAL <event>;  (real-time event; host stub)
+        # SIGNAL / SET / RESET <event>;  (real-time event; host stub)
+        # All three lower to an atomic write on the event's shared flag:
+        # SIGNAL and SET store `true`; RESET stores `false`. The three
+        # productions build the same SignalNode with a distinguishing
+        # `op` field so the backend can pick the right value and any
+        # diagnostic can echo the original verb.
         @self.pg.production(
             "signal_statement : KEYWORD_SIGNAL IDENTIFIER SEMICOLON"
         )
         def signal_statement(p: List[Any]) -> SignalNode:
             return SignalNode(
                 name=p[1].value,
+                op="SIGNAL",
                 line=getattr(p[0], "line", 0),
                 column=getattr(p[0], "column", 0),
             )
+
+        @self.pg.production(
+            "signal_statement : KEYWORD_SET IDENTIFIER SEMICOLON"
+        )
+        def set_statement(p: List[Any]) -> SignalNode:
+            return SignalNode(
+                name=p[1].value,
+                op="SET",
+                line=getattr(p[0], "line", 0),
+                column=getattr(p[0], "column", 0),
+            )
+
+        @self.pg.production(
+            "signal_statement : KEYWORD_RESET IDENTIFIER SEMICOLON"
+        )
+        def reset_statement(p: List[Any]) -> SignalNode:
+            return SignalNode(
+                name=p[1].value,
+                op="RESET",
+                line=getattr(p[0], "line", 0),
+                column=getattr(p[0], "column", 0),
+            )
+
+        # SET/RESET <bit_var>(i, j, ...);  -- HAL/S bit-list form. Sets
+        # (SET) or clears (RESET) each listed bit position, 1-indexed
+        # MSB-first, on a BIT-typed variable. Positions may be constant
+        # or runtime expressions; the codegen handles both.
+        @self.pg.production(
+            "signal_statement : KEYWORD_SET IDENTIFIER LPAREN "
+            "bit_position_list RPAREN SEMICOLON"
+        )
+        def set_bit_list_statement(p: List[Any]) -> SignalNode:
+            return SignalNode(
+                name=p[1].value,
+                op="SET",
+                bits=p[3],
+                line=getattr(p[0], "line", 0),
+                column=getattr(p[0], "column", 0),
+            )
+
+        @self.pg.production(
+            "signal_statement : KEYWORD_RESET IDENTIFIER LPAREN "
+            "bit_position_list RPAREN SEMICOLON"
+        )
+        def reset_bit_list_statement(p: List[Any]) -> SignalNode:
+            return SignalNode(
+                name=p[1].value,
+                op="RESET",
+                bits=p[3],
+                line=getattr(p[0], "line", 0),
+                column=getattr(p[0], "column", 0),
+            )
+
+        @self.pg.production(
+            "bit_position_list : bit_position_list COMMA expression"
+        )
+        def bit_position_list(p: List[Any]) -> list:
+            return p[0] + [p[2]]
+
+        @self.pg.production("bit_position_list : expression")
+        def bit_position_list_single(p: List[Any]) -> list:
+            return [p[0]]
 
         # CANCEL <task>;
         @self.pg.production("cancel_statement : KEYWORD_CANCEL IDENTIFIER SEMICOLON")
