@@ -277,6 +277,394 @@ class TestParserInitState:
         assert mod.Dict is not None
 
 
+class TestInternalErrorDiagnostics:
+    """Parser.parse() used to swallow every exception into a bare
+    `ParserError(str(e))` -- no exception type, no traceback, no location.
+    A `KeyError` in a grammar action became a mysterious one-line
+    message. The revised handler distinguishes rply's ParsingError (a
+    real syntax error, gets a friendly line/column) from arbitrary
+    Python exceptions (a compiler bug, always gets an "internal parser
+    error" prefix + the exception type + optional traceback)."""
+
+    def _make_buggy_parser(self, exc: Exception):
+        """Return a Parser subclass whose _check_exit_context (called from
+        parse() after the LALR reduction succeeds) raises `exc`. This is
+        the smallest surface that mimics a grammar-action bug without
+        touching rply internals."""
+        class BuggyParser(Parser):
+            def _check_exit_context(self, *args, **kwargs):
+                raise exc
+        return BuggyParser()
+
+    def _simple_hal(self) -> str:
+        return "T: PROGRAM; DECLARE X INTEGER; CLOSE T;"
+
+    def test_internal_error_names_exception_type(self, monkeypatch) -> None:
+        """The exception's class name (`KeyError`, `AttributeError`, ...)
+        must appear in the message so the reader can classify the bug at
+        a glance. Previously only `str(e)` -- the message alone -- was
+        surfaced."""
+        monkeypatch.delenv("RESNIK_DEBUG", raising=False)
+        p = self._make_buggy_parser(KeyError("simulated"))
+        p.parse(Lexer().tokenize(self._simple_hal(), "t"))
+        assert len(p.errors) == 1
+        msg = p.errors[0].message
+        assert "internal parser error" in msg
+        assert "KeyError" in msg
+        assert "simulated" in msg
+        # Non-verbose mode nudges the user toward the debug knob rather
+        # than dumping a full traceback into their terminal.
+        assert "RESNIK_DEBUG" in msg
+
+    def test_debug_env_var_appends_traceback(self, monkeypatch) -> None:
+        """With RESNIK_DEBUG=1, the full Python traceback is attached so
+        the offending file/line is one grep away -- the whole point of
+        the review's `--verbose` request."""
+        monkeypatch.setenv("RESNIK_DEBUG", "1")
+        p = self._make_buggy_parser(AttributeError("field 'foo' missing"))
+        p.parse(Lexer().tokenize(self._simple_hal(), "t"))
+        msg = p.errors[0].message
+        assert "AttributeError" in msg
+        assert "field 'foo' missing" in msg
+        assert "Traceback" in msg
+        # File path of the raise site must be quotable from the message.
+        assert "test_parsing.py" in msg or "parser.py" in msg
+
+    def test_real_syntax_error_stays_friendly(self) -> None:
+        """A malformed HAL/S program still produces a plain ParserError
+        with (nonzero) line/column info -- not an "internal parser
+        error" prefix. This guards against over-broadening the internal
+        path to swallow legitimate syntax errors."""
+        p = Parser()
+        # Missing semicolons and dangling tokens: rply should raise
+        # ParsingError, which the friendly branch handles.
+        p.parse(Lexer().tokenize("T: PROGRAM DECLARE X CLOSE", "t"))
+        assert p.errors, "expected a parser error on malformed input"
+        for e in p.errors:
+            assert "internal parser error" not in e.message
+
+
+class TestDirectAccessIO:
+    """HAL/S WRITE / READ take an optional record-number as a second
+    parenthesized argument (`WRITE(unit, record) items;`) for
+    direct-access I/O against block-structured devices like a Mass
+    Memory Unit. The parser used to only accept `(unit)`, so a
+    conforming HAL/S source like `READ(1, BLOCK_ID) DATA_BLOCK;` failed
+    with `Unexpected token: COMMA (',')` at column 9. This class pins
+    down the four new production shapes plus the pre-existing
+    single-argument variants."""
+
+    def _prog(self, body: str) -> str:
+        return (
+            "T: PROGRAM;"
+            " DECLARE BUF ARRAY(4) OF INTEGER;"
+            " DECLARE BLOCK_ID INTEGER INITIAL(1024);"
+            f" {body}"
+            " CLOSE T;"
+        )
+
+    def _parse(self, body: str):
+        p = Parser()
+        ast = p.parse(Lexer().tokenize(self._prog(body), "t"))
+        assert p.errors == [], p.errors
+        return ast
+
+    def _first(self, ast, cls):
+        for stmt in ast.statements:
+            if isinstance(stmt, cls):
+                return stmt
+        raise AssertionError(f"no {cls.__name__} in tree")
+
+    def test_read_with_record_parses(self) -> None:
+        from resnik.parser.ast_nodes import ReadNode, IdentifierNode
+        ast = self._parse("READ(1, BLOCK_ID) BUF;")
+        n = self._first(ast, ReadNode)
+        assert n.channel == 1
+        assert isinstance(n.record, IdentifierNode)
+        assert n.record.name == "BLOCK_ID"
+        assert len(n.targets) == 1
+
+    def test_write_with_record_expression_parses(self) -> None:
+        from resnik.parser.ast_nodes import WriteNode, BinaryOpNode
+        # Record is an expression, not just an identifier.
+        ast = self._parse("WRITE(1, BLOCK_ID + 1) BUF;")
+        n = self._first(ast, WriteNode)
+        assert n.channel == 1
+        assert isinstance(n.record, BinaryOpNode)
+        assert n.record.operator == "+"
+
+    def test_write_with_record_no_items_parses(self) -> None:
+        from resnik.parser.ast_nodes import WriteNode
+        ast = self._parse("WRITE(1, BLOCK_ID);")
+        n = self._first(ast, WriteNode)
+        assert n.record is not None
+        assert n.items == []
+
+    def test_read_with_record_no_targets_parses(self) -> None:
+        from resnik.parser.ast_nodes import ReadNode
+        ast = self._parse("READ(1, BLOCK_ID);")
+        n = self._first(ast, ReadNode)
+        assert n.record is not None
+        assert n.targets == []
+
+    def test_single_argument_forms_still_parse(self) -> None:
+        """Regression guard: adding the two-arg productions must not
+        break the pre-existing single-argument forms."""
+        from resnik.parser.ast_nodes import WriteNode, ReadNode
+        ast = self._parse("WRITE(6) 'HELLO'; READ(5) BUF; WRITE(6);")
+        writes = [s for s in ast.statements if isinstance(s, WriteNode)]
+        reads = [s for s in ast.statements if isinstance(s, ReadNode)]
+        assert len(writes) == 2
+        assert len(reads) == 1
+        assert all(w.record is None for w in writes)
+        assert reads[0].record is None
+
+    def test_read_empty_targets_symmetry_with_write(self) -> None:
+        """The pre-existing WRITE(unit); production had no READ mirror --
+        added for symmetry alongside the record-number forms."""
+        from resnik.parser.ast_nodes import ReadNode
+        ast = self._parse("READ(5);")
+        n = self._first(ast, ReadNode)
+        assert n.channel == 5
+        assert n.record is None
+        assert n.targets == []
+
+    def test_codegen_flags_record_io_as_todo(self) -> None:
+        """Direct-access I/O has no runtime lowering yet; the emitted
+        Rust must carry an explicit TODO so the record is not silently
+        dropped."""
+        from resnik.backend.codegen import RustCodeGenerator
+        ast = self._parse("WRITE(1, BLOCK_ID + 1) 'HI';")
+        code = RustCodeGenerator().generate(ast)
+        assert "TODO: record I/O" in code
+        assert "WRITE(unit=1" in code
+
+    def test_storage_io_hal_reference_file_parses(self) -> None:
+        """The specific file the review named -- storage_io.hal --
+        must parse cleanly after this fix."""
+        with open("/home/sdoran/Sandbox/resnik/storage_io.hal") as f:
+            src = f.read()
+        p = Parser()
+        ast = p.parse(Lexer().tokenize(src, "storage_io.hal"))
+        assert p.errors == [], p.errors
+        assert ast is not None
+
+
+class TestRepetitionLiteralExpansion:
+    """HAL/S repetition literal `N # expr` used to expand via Python
+    `[node] * N`, so every slot pointed at the *same* AST node. Any
+    identity-sensitive pass (seen-id de-dup in the walker, in-place
+    rewrites, node-level annotations) would then see one node where N
+    were declared, and mutating "one slot" would silently mutate all N.
+    Post-fix each slot is a deep-copied distinct subtree."""
+
+    def _initial_values(self, src_expr: str, count: int = 3):
+        """Parse `INITIAL(<count> # <src_expr>)` and return the resulting
+        list from the DeclareNode's attributes["initial"]."""
+        from resnik.parser.ast_nodes import DeclareNode
+        p = Parser()
+        src = (f"T: PROGRAM;"
+               f" DECLARE A ARRAY({count}) OF INTEGER"
+               f" INITIAL({count} # {src_expr}); CLOSE T;")
+        ast = p.parse(Lexer().tokenize(src, "t"))
+        assert p.errors == [], p.errors
+        for stmt in ast.statements:
+            if isinstance(stmt, DeclareNode) and "initial" in stmt.attributes:
+                return stmt.attributes["initial"]
+        raise AssertionError("no DECLARE with INITIAL found")
+
+    def test_each_slot_is_a_distinct_object(self) -> None:
+        # Pre-fix: all N slots were `id()`-identical (shared node).
+        vals = self._initial_values("7", count=4)
+        assert len(vals) == 4
+        assert len({id(v) for v in vals}) == 4
+
+    def test_slot_values_are_preserved(self) -> None:
+        # Deep-copying must not change the semantic content.
+        vals = self._initial_values("42", count=5)
+        assert [v.value for v in vals] == [42, 42, 42, 42, 42]
+
+    def test_mutation_of_one_slot_does_not_leak(self) -> None:
+        # This is the real regression: a hypothetical AST pass that
+        # in-place edits `initial[0]` must NOT change `initial[1..N]`.
+        vals = self._initial_values("7", count=3)
+        vals[0].value = 999
+        assert vals[1].value == 7
+        assert vals[2].value == 7
+
+    def test_walker_sees_all_n_slots_after_dedup(self) -> None:
+        # An identity-keyed seen-set (as used in codegen._walk and
+        # ConstantFolder._walk) previously counted N shared nodes as one.
+        from resnik.parser.ast_nodes import DeclareNode
+        p = Parser()
+        ast = p.parse(Lexer().tokenize(
+            "T: PROGRAM; DECLARE A ARRAY(3) OF INTEGER "
+            "INITIAL(3 # 7); CLOSE T;", "t"))
+        assert p.errors == []
+        for stmt in ast.statements:
+            if isinstance(stmt, DeclareNode) and "initial" in stmt.attributes:
+                vals = stmt.attributes["initial"]
+                seen: set = set()
+                unique = [v for v in vals if id(v) not in seen
+                          and not seen.add(id(v))]
+                assert len(unique) == 3, (
+                    "walker de-dup should not collapse N distinct slots")
+
+
+class TestImplicitMultiplyTransform:
+    """Direct unit tests for `_insert_implicit_multiply`, the token-stream
+    rewrite that turns HAL/S juxtaposition (`I W`) into an explicit
+    multiply (`I * W`). The transform runs on every parse, and a bug in
+    its boundary rules can silently miscompile any HAL/S expression --
+    yet the review found no direct tests on the rewrite itself, only
+    end-to-end integration through the backend. This class fixes that
+    gap by testing the transform in isolation."""
+
+    def _tok(self, ttype: str, lexeme: str = "") -> "Token":
+        from resnik.lexer import Token
+        return Token(type=ttype, lexeme=lexeme or ttype,
+                     line=1, column=1, file="t")
+
+    def _types(self, tokens: list) -> list:
+        return [t.type for t in tokens]
+
+    def _run(self, *type_lexeme_pairs) -> list:
+        """Feed hand-crafted tokens (type, lexeme) into the transform and
+        return the resulting type sequence."""
+        from resnik.lexer import Token
+        tokens = [
+            Token(type=t, lexeme=lx, line=1, column=1, file="t")
+            for t, lx in type_lexeme_pairs
+        ]
+        return self._types(Parser()._insert_implicit_multiply(tokens))
+
+    def test_identifier_identifier_inserts_multiply(self) -> None:
+        # A B -> A * B
+        assert self._run(
+            ("IDENTIFIER", "A"), ("IDENTIFIER", "B"),
+        ) == ["IDENTIFIER", "MULTIPLY", "IDENTIFIER"]
+
+    def test_number_identifier_inserts_multiply(self) -> None:
+        # 2 X -> 2 * X
+        assert self._run(
+            ("NUMBER", "2"), ("IDENTIFIER", "X"),
+        ) == ["NUMBER", "MULTIPLY", "IDENTIFIER"]
+
+    def test_rparen_identifier_inserts_multiply(self) -> None:
+        # A(1) B -> A(1) * B  (RPAREN is a valid left-op boundary)
+        assert self._run(
+            ("IDENTIFIER", "A"), ("LPAREN", "("), ("NUMBER", "1"),
+            ("RPAREN", ")"), ("IDENTIFIER", "B"),
+        ) == ["IDENTIFIER", "LPAREN", "NUMBER", "RPAREN",
+              "MULTIPLY", "IDENTIFIER"]
+
+    def test_chained_juxtaposition_chains_multiplies(self) -> None:
+        # A B C -> A * B * C
+        assert self._run(
+            ("IDENTIFIER", "A"), ("IDENTIFIER", "B"), ("IDENTIFIER", "C"),
+        ) == ["IDENTIFIER", "MULTIPLY", "IDENTIFIER",
+              "MULTIPLY", "IDENTIFIER"]
+
+    def test_explicit_operator_between_operands_leaves_stream_alone(self) -> None:
+        # A + B -> unchanged (PLUS breaks the adjacency).
+        assert self._run(
+            ("IDENTIFIER", "A"), ("PLUS", "+"), ("IDENTIFIER", "B"),
+        ) == ["IDENTIFIER", "PLUS", "IDENTIFIER"]
+
+    def test_lparen_is_not_a_right_operand(self) -> None:
+        # A ( B ) -> unchanged. Adding a MULTIPLY here would collide with
+        # function calls / subscripts (documented non-goal).
+        assert self._run(
+            ("IDENTIFIER", "A"), ("LPAREN", "("),
+            ("IDENTIFIER", "B"), ("RPAREN", ")"),
+        ) == ["IDENTIFIER", "LPAREN", "IDENTIFIER", "RPAREN"]
+
+    def test_declare_variable_name_next_to_template_name(self) -> None:
+        # DECLARE PRIMARY NODE STRUCTURE;  -- the case the review named
+        # explicitly. PRIMARY (variable) and NODE (template) are BOTH
+        # IDENTIFIER tokens, so without the in_declare guard the transform
+        # would splice a MULTIPLY between them and break the declaration.
+        # This test is the actual mutation-kill for the guard.
+        assert self._run(
+            ("KEYWORD_DECLARE", "DECLARE"),
+            ("IDENTIFIER", "PRIMARY"), ("IDENTIFIER", "NODE"),
+            ("KEYWORD_STRUCTURE", "STRUCTURE"),
+            ("SEMICOLON", ";"),
+        ) == ["KEYWORD_DECLARE", "IDENTIFIER", "IDENTIFIER",
+              "KEYWORD_STRUCTURE", "SEMICOLON"]
+
+    def test_declare_with_initial_list_is_fully_suppressed(self) -> None:
+        # DECLARE X INTEGER INITIAL(1, 2, 3);  -- the review flagged
+        # INITIAL(...) as a fragility edge; the whole DECLARE statement
+        # (up to SEMICOLON) must stay untouched.
+        result = self._run(
+            ("KEYWORD_DECLARE", "DECLARE"),
+            ("IDENTIFIER", "X"), ("KEYWORD_INTEGER", "INTEGER"),
+            ("KEYWORD_INITIAL", "INITIAL"),
+            ("LPAREN", "("),
+            ("NUMBER", "1"), ("COMMA", ","),
+            ("NUMBER", "2"), ("COMMA", ","),
+            ("NUMBER", "3"),
+            ("RPAREN", ")"),
+            ("SEMICOLON", ";"),
+        )
+        assert "MULTIPLY" not in result
+
+    def test_declare_boundary_re_arms_after_semicolon(self) -> None:
+        # After the DECLARE terminates, juxtaposition should resume.
+        # DECLARE X SCALAR;  X = A B;
+        assert self._run(
+            ("KEYWORD_DECLARE", "DECLARE"),
+            ("IDENTIFIER", "X"), ("KEYWORD_SCALAR", "SCALAR"),
+            ("SEMICOLON", ";"),
+            ("IDENTIFIER", "X"), ("ASSIGN", "="),
+            ("IDENTIFIER", "A"), ("IDENTIFIER", "B"),
+            ("SEMICOLON", ";"),
+        ) == [
+            "KEYWORD_DECLARE", "IDENTIFIER", "KEYWORD_SCALAR", "SEMICOLON",
+            "IDENTIFIER", "ASSIGN",
+            "IDENTIFIER", "MULTIPLY", "IDENTIFIER", "SEMICOLON",
+        ]
+
+    def test_write_channel_first_item_not_multiplied(self) -> None:
+        # WRITE(6) X;  -- the RPAREN closes the channel; the following
+        # X is the first output item, NOT a factor for `6`.
+        assert self._run(
+            ("KEYWORD_WRITE", "WRITE"),
+            ("LPAREN", "("), ("NUMBER", "6"), ("RPAREN", ")"),
+            ("IDENTIFIER", "X"), ("SEMICOLON", ";"),
+        ) == ["KEYWORD_WRITE", "LPAREN", "NUMBER", "RPAREN",
+              "IDENTIFIER", "SEMICOLON"]
+
+    def test_read_channel_first_item_not_multiplied(self) -> None:
+        # READ(5) X;  -- mirror of the WRITE case for the input channel.
+        assert self._run(
+            ("KEYWORD_READ", "READ"),
+            ("LPAREN", "("), ("NUMBER", "5"), ("RPAREN", ")"),
+            ("IDENTIFIER", "X"), ("SEMICOLON", ";"),
+        ) == ["KEYWORD_READ", "LPAREN", "NUMBER", "RPAREN",
+              "IDENTIFIER", "SEMICOLON"]
+
+    def test_write_subsequent_items_are_not_multiplied_via_commas(self) -> None:
+        # WRITE(6) X, Y;  -- COMMA breaks adjacency; no multiply.
+        assert self._run(
+            ("KEYWORD_WRITE", "WRITE"),
+            ("LPAREN", "("), ("NUMBER", "6"), ("RPAREN", ")"),
+            ("IDENTIFIER", "X"), ("COMMA", ","),
+            ("IDENTIFIER", "Y"), ("SEMICOLON", ";"),
+        ) == ["KEYWORD_WRITE", "LPAREN", "NUMBER", "RPAREN",
+              "IDENTIFIER", "COMMA", "IDENTIFIER", "SEMICOLON"]
+
+    def test_empty_token_stream_is_returned_unchanged(self) -> None:
+        assert Parser()._insert_implicit_multiply([]) == []
+
+    def test_single_token_is_returned_unchanged(self) -> None:
+        # No left neighbour to pair with, so nothing to insert.
+        assert self._run(
+            ("IDENTIFIER", "A"),
+        ) == ["IDENTIFIER"]
+
+
 class TestRelationalPrecedence:
     """HAL/S puts `=` (equality) at the same precedence level as `<`, `>`,
     `<=`, `>=`, `¬=`, all left-associative. The parser used to put `=` on

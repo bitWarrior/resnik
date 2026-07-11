@@ -551,10 +551,16 @@ class IdentifierNode(ASTNode):
 
 @dataclass
 class WriteNode(ASTNode):
-    """WRITE statement node: WRITE(channel) item, item, ...;"""
+    """WRITE statement node: WRITE(channel[, record]) item, item, ...;
+
+    `record` is the optional HAL/S direct-access record number (e.g.
+    `WRITE(1, BLOCK_ID) DATA_BLOCK;` writes to record BLOCK_ID of unit 1,
+    typical for block-structured devices like a Mass Memory Unit). None
+    for the ordinary sequential form."""
 
     channel: int = 6
     items: List[ASTNode] = field(default_factory=list)
+    record: Optional[ASTNode] = None
 
     def __post_init__(self) -> None:
         self.node_type = NodeType.WRITE
@@ -565,6 +571,7 @@ class WriteNode(ASTNode):
             {
                 "channel": self.channel,
                 "items": [i.to_dict() for i in self.items],
+                "record": self.record.to_dict() if self.record else None,
             }
         )
         return result
@@ -572,10 +579,15 @@ class WriteNode(ASTNode):
 
 @dataclass
 class ReadNode(ASTNode):
-    """READ statement node: READ(channel) target, target, ...;"""
+    """READ statement node: READ(channel[, record]) target, target, ...;
+
+    `record` is the optional HAL/S direct-access record number (e.g.
+    `READ(1, BLOCK_ID) DATA_BLOCK;` reads record BLOCK_ID of unit 1).
+    None for the ordinary sequential form."""
 
     channel: int = 5
     targets: List[ASTNode] = field(default_factory=list)
+    record: Optional[ASTNode] = None
 
     def __post_init__(self) -> None:
         self.node_type = NodeType.READ
@@ -586,6 +598,7 @@ class ReadNode(ASTNode):
             {
                 "channel": self.channel,
                 "targets": [t.to_dict() for t in self.targets],
+                "record": self.record.to_dict() if self.record else None,
             }
         )
         return result

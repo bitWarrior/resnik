@@ -894,6 +894,7 @@ use hal_rt::*;
             "delay", "period",        # ScheduleNode timing
             "lo", "hi",               # RangeNode bounds
             "statement",              # LabelNode
+            "record",                 # WriteNode / ReadNode direct-access
         )
         for attr in single_attrs:
             child = getattr(node, attr, None)
@@ -2131,6 +2132,15 @@ use hal_rt::*;
         # Note non-standard channels for traceability; 6 is standard output.
         if node.channel != 6:
             self.emitter.emit_comment(f"WRITE channel {node.channel}")
+        # Direct-access (record-number) I/O parses today but has no runtime
+        # lowering. Flag it explicitly so the emitted Rust doesn't silently
+        # ignore the record and pretend to have done a sequential write.
+        if node.record is not None:
+            record_src = self._generate_expression(node.record)
+            self.emitter.emit_comment(
+                f"TODO: record I/O -- WRITE(unit={node.channel}, "
+                f"record={record_src}) direct-access is not yet lowered; "
+                "items below are emitted as a sequential WRITE")
 
         # Output sink is target-dependent: hosted std uses println!; the
         # cortex-m profile uses semihosting (swap for RTT/UART downstream).
@@ -2151,7 +2161,17 @@ use hal_rt::*;
             return
 
         placeholders = " ".join(["{}"] * len(node.items))
-        args = [self._generate_expression(item) for item in node.items]
+        # WRITE of an ARRAY(n) OF <elem> lists its elements space-separated;
+        # arrays don't implement Display, so convert to a String at the arg
+        # site so a mixed `WRITE(6) 'label', ARR, X;` still fits the plain
+        # println! shape.
+        args = []
+        for item in node.items:
+            src = self._generate_expression(item)
+            if self._is_array_expr(item):
+                src = (f"({src}).iter().map(|__x| __x.to_string())"
+                       ".collect::<Vec<_>>().join(\" \")")
+            args.append(src)
         args_str = ", ".join(args)
         self.emitter.emit_line(f'println!("{placeholders}", {args_str});')
 
@@ -2163,12 +2183,30 @@ use hal_rt::*;
         so the distribution below needs no bounds checks."""
         if node.channel != 5:
             self.emitter.emit_comment(f"READ channel {node.channel}")
+        # Direct-access (record-number) I/O parses today but has no runtime
+        # lowering. Same rationale as _generate_write: flag it explicitly.
+        if node.record is not None:
+            record_src = self._generate_expression(node.record)
+            self.emitter.emit_comment(
+                f"TODO: record I/O -- READ(unit={node.channel}, "
+                f"record={record_src}) direct-access is not yet lowered; "
+                "targets below are filled from the sequential input stream")
 
         target_info = []
         total = 0
         for tgt in node.targets:
             ts = (self._var_info.get(tgt.name.lower())
                   if isinstance(tgt, IdentifierNode) else None)
+            # An ARRAY(n) OF <elem> target is filled element-by-element with
+            # a per-element cast to the array's declared Rust element type.
+            if ts is not None and ts.array_size is not None:
+                elem_type = (self.type_mapper.map_type(ts.element_type)
+                             if ts.element_type is not None else "f32")
+                target_info.append((
+                    self._generate_expression(tgt), "array",
+                    ts.array_size, elem_type))
+                total += ts.array_size
+                continue
             if ts is not None and ts.data_type == DataType.VECTOR:
                 n, kind = (ts.dimensions[0] if ts.dimensions else 3), "vector"
             elif ts is not None and ts.data_type in (
@@ -2176,19 +2214,24 @@ use hal_rt::*;
                 n, kind = 1, "int"
             else:
                 n, kind = 1, "scalar"
-            target_info.append((self._generate_expression(tgt), kind, n))
+            target_info.append((self._generate_expression(tgt), kind, n, None))
             total += n
 
         self.emitter.emit_line("{")
         self.emitter.indent()
         self.emitter.emit_line(f"let __vals = hal_rt::read_f32({total});")
         self.emitter.emit_line("let mut __k = 0usize;")
-        for lvalue, kind, n in target_info:
+        for lvalue, kind, n, elem_type in target_info:
             if kind == "vector":
                 self.emitter.emit_line(
                     f"{lvalue} = {{ let mut __v = [0.0f32; {n}]; "
                     f"for __j in 0..{n} {{ __v[__j] = __vals[__k]; "
                     "__k += 1; } Vector(__v) };")
+            elif kind == "array":
+                self.emitter.emit_line(
+                    f"for __j in 0..{n} {{ "
+                    f"{lvalue}[__j] = __vals[__k] as {elem_type}; "
+                    "__k += 1; }")
             elif kind == "int":
                 self.emitter.emit_line(
                     f"{lvalue} = {{ let __t = __vals[__k] as i32; "

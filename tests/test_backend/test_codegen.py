@@ -2017,6 +2017,63 @@ class TestReadSharedCursor:
         assert "hal_rt::read_f32(4)" in code  # 1 scalar + 3 vector
 
 
+class TestArrayIO:
+    """READ into and WRITE of an ARRAY(n) OF <elem>. Both used to be
+    silent codegen gaps: READ generated a scalar-shaped fill that
+    couldn't assign i32 to a wider array, and WRITE emitted
+    `println!("{}", arr)` which fails because arrays don't implement
+    Display. This class pins the fixed behaviour after the direct-access
+    I/O parser change exposed a HAL/S source (`storage_io.hal`) that
+    actually exercises both."""
+
+    def _gen(self, src: str) -> str:
+        from resnik import Lexer, Parser
+        ast = Parser().parse(Lexer().tokenize(src, "t"))
+        return RustCodeGenerator().generate(ast)
+
+    def test_read_into_array_fills_element_wise(self) -> None:
+        code = self._gen(
+            "T: PROGRAM; DECLARE BUF ARRAY(4) OF INTEGER; "
+            "READ(5) BUF; CLOSE T;")
+        # 4 elements requested from the shared cursor
+        assert "hal_rt::read_f32(4)" in code
+        # Element-wise loop with cast to the array's declared element type
+        assert "for __j in 0..4" in code
+        assert "buf[__j] = __vals[__k] as i32" in code
+
+    def test_read_into_array_of_bit_casts_to_narrow_unsigned(self) -> None:
+        # ARRAY(N) OF BIT(w) uses the P0 #5 narrow element type.
+        code = self._gen(
+            "T: PROGRAM; DECLARE DATA_BLOCK ARRAY(512) OF BIT(16); "
+            "READ(5) DATA_BLOCK; CLOSE T;")
+        assert "for __j in 0..512" in code
+        assert "data_block[__j] = __vals[__k] as u16" in code
+
+    def test_write_of_array_stringifies_elements(self) -> None:
+        code = self._gen(
+            "T: PROGRAM; DECLARE BUF ARRAY(4) OF INTEGER; "
+            "WRITE(6) BUF; CLOSE T;")
+        # Arrays don't implement Display; convert to a joined String at
+        # the arg site so println! sees a value it can format.
+        assert '"{}"' in code
+        assert (
+            "(buf).iter().map(|__x| __x.to_string()).collect::<Vec<_>>()"
+            in code
+        )
+
+    def test_write_mixed_string_and_array_uses_placeholders(self) -> None:
+        # WRITE(6) 'LABEL', ARR;  -- string + array must both format.
+        code = self._gen(
+            "T: PROGRAM; DECLARE BUF ARRAY(3) OF INTEGER; "
+            "WRITE(6) 'BUF: ', BUF; CLOSE T;")
+        assert '"{} {}"' in code
+        assert "\"BUF: \"" in code
+        assert (
+            "(buf).iter().map(|__x| __x.to_string()).collect::<Vec<_>>()"
+            in code
+        )
+
+
 class TestVectorNegation:
     """Unary minus applied to a whole vector/matrix expression."""
 

@@ -2,12 +2,16 @@
 Modern HAL/S Parser with full type annotations.
 """
 
+import copy
 import json
+import os
 import sys
+import traceback
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from rply import ParserGenerator
+from rply.errors import ParsingError as RplyParsingError
 
 from resnik.exceptions import ParserError, SemanticError
 from resnik.lexer import Lexer, Token
@@ -1890,6 +1894,12 @@ class Parser:
             )
 
         # ---- WRITE ------------------------------------------------------
+        # HAL/S WRITE has two channel shapes:
+        #   WRITE(unit) items;              -- sequential I/O
+        #   WRITE(unit, record) items;      -- direct-access I/O (e.g. MMU)
+        # Both are also legal with an empty item list. `record` is an
+        # arbitrary expression (identifier, arithmetic, etc.), not just a
+        # NUMBER, so `WRITE(1, BLOCK_ID + 1) BUF;` parses.
         @self.pg.production(
             "write_statement : KEYWORD_WRITE LPAREN NUMBER RPAREN "
             "write_items SEMICOLON"
@@ -1913,6 +1923,32 @@ class Parser:
                 column=getattr(p[0], "column", 0),
             )
 
+        @self.pg.production(
+            "write_statement : KEYWORD_WRITE LPAREN NUMBER COMMA expression "
+            "RPAREN write_items SEMICOLON"
+        )
+        def write_statement_record(p: List[Any]) -> WriteNode:
+            return WriteNode(
+                channel=int(p[2].value),
+                items=p[6],
+                record=p[4],
+                line=getattr(p[0], "line", 0),
+                column=getattr(p[0], "column", 0),
+            )
+
+        @self.pg.production(
+            "write_statement : KEYWORD_WRITE LPAREN NUMBER COMMA expression "
+            "RPAREN SEMICOLON"
+        )
+        def write_statement_record_empty(p: List[Any]) -> WriteNode:
+            return WriteNode(
+                channel=int(p[2].value),
+                items=[],
+                record=p[4],
+                line=getattr(p[0], "line", 0),
+                column=getattr(p[0], "column", 0),
+            )
+
         @self.pg.production("write_items : write_items COMMA expression")
         def write_items(p: List[Any]) -> list:
             return p[0] + [p[2]]
@@ -1922,6 +1958,8 @@ class Parser:
             return [p[0]]
 
         # ---- READ -------------------------------------------------------
+        # Same channel/record shape as WRITE; the empty-target form
+        # (`READ(unit);`) is now accepted for symmetry with WRITE.
         @self.pg.production(
             "read_statement : KEYWORD_READ LPAREN NUMBER RPAREN "
             "read_items SEMICOLON"
@@ -1930,6 +1968,43 @@ class Parser:
             return ReadNode(
                 channel=int(p[2].value),
                 targets=p[4],
+                line=getattr(p[0], "line", 0),
+                column=getattr(p[0], "column", 0),
+            )
+
+        @self.pg.production(
+            "read_statement : KEYWORD_READ LPAREN NUMBER RPAREN SEMICOLON"
+        )
+        def read_statement_empty(p: List[Any]) -> ReadNode:
+            return ReadNode(
+                channel=int(p[2].value),
+                targets=[],
+                line=getattr(p[0], "line", 0),
+                column=getattr(p[0], "column", 0),
+            )
+
+        @self.pg.production(
+            "read_statement : KEYWORD_READ LPAREN NUMBER COMMA expression "
+            "RPAREN read_items SEMICOLON"
+        )
+        def read_statement_record(p: List[Any]) -> ReadNode:
+            return ReadNode(
+                channel=int(p[2].value),
+                targets=p[6],
+                record=p[4],
+                line=getattr(p[0], "line", 0),
+                column=getattr(p[0], "column", 0),
+            )
+
+        @self.pg.production(
+            "read_statement : KEYWORD_READ LPAREN NUMBER COMMA expression "
+            "RPAREN SEMICOLON"
+        )
+        def read_statement_record_empty(p: List[Any]) -> ReadNode:
+            return ReadNode(
+                channel=int(p[2].value),
+                targets=[],
+                record=p[4],
                 line=getattr(p[0], "line", 0),
                 column=getattr(p[0], "column", 0),
             )
@@ -2201,7 +2276,14 @@ class Parser:
                 count = int(p[0].value)
             except (TypeError, ValueError):
                 count = 0
-            return [p[2]] * count
+            # HAL/S `N # expr` expands to N slots of `expr`. `[p[2]] * count`
+            # would share ONE node across every slot -- any AST-mutating
+            # pass (rewrites, seen-id de-dup, node-level annotation)
+            # would then observe one node where the source calls for N,
+            # and in-place mutations to a "single slot" would silently
+            # affect all N. Deep-copy every slot so each is a distinct
+            # subtree with its own identity.
+            return [copy.deepcopy(p[2]) for _ in range(count)]
 
         @self.pg.production("expression : STRING")
         def expr_string(p: List[Any]) -> LiteralNode:
@@ -2508,6 +2590,17 @@ class Parser:
             i += 1
         return out
 
+    # Token types that mark the *end* of an operand (a left context for
+    # juxtaposition-multiply): identifier, numeric literal, or the closing
+    # paren of a subscript/call/grouped expression. Class-level so callers
+    # can reason about the transform's boundary rules without rebuilding
+    # the sets on every parse.
+    _IMPLICIT_MUL_LEFT_OPS = frozenset({"IDENTIFIER", "NUMBER", "RPAREN"})
+    # Token types that mark the *start* of an operand (a right context).
+    # LPAREN is deliberately excluded -- `A (B)` would collide with function
+    # calls and subscripts and is not handled by this pass.
+    _IMPLICIT_MUL_RIGHT_OPS = frozenset({"IDENTIFIER", "NUMBER"})
+
     def _insert_implicit_multiply(self, tokens: List[Token]) -> List[Token]:
         """HAL/S multiplies adjacent operands by juxtaposition (e.g. `I W` means
         `I * W`, and `ATTITUDE(1) RAD_TO_DEG` means the element times the scalar).
@@ -2526,8 +2619,6 @@ class Parser:
         Paren-start juxtaposition (`A (B)`, `(A)(B)`) is still not handled, as it
         collides with calls and subscripts.
         """
-        left_ops = {"IDENTIFIER", "NUMBER", "RPAREN"}
-        right_ops = {"IDENTIFIER", "NUMBER"}
         out: List[Token] = []
         in_declare = False
         io_pending = False   # just saw WRITE/READ, awaiting its channel '('
@@ -2545,7 +2636,8 @@ class Parser:
             do_suppress = suppress_next
             suppress_next = False
             if (not in_declare and not do_suppress and out
-                    and out[-1].type in left_ops and t in right_ops):
+                    and out[-1].type in self._IMPLICIT_MUL_LEFT_OPS
+                    and t in self._IMPLICIT_MUL_RIGHT_OPS):
                 out.append(Token(
                     type="MULTIPLY", lexeme="*",
                     line=tok.line, column=tok.column, file=tok.file,
@@ -2707,9 +2799,35 @@ class Parser:
                 self._check_exit_context(self.ast, in_loop=False)
             return self.ast
 
-        except Exception as e:
+        except RplyParsingError as e:
+            # Real syntax error from the LALR engine (no production applies).
+            # Keep the message clean; attach the source position so the
+            # user sees the offending line/column, not a naked stack.
+            pos = e.getsourcepos()
+            line = getattr(pos, "lineno", 0) if pos is not None else 0
+            col = getattr(pos, "colno", 0) if pos is not None else 0
             if not self.errors:
-                self.errors.append(ParserError(str(e)))
+                self.errors.append(ParserError(
+                    getattr(e, "message", str(e)), line=line, column=col))
+            return None
+        except Exception as e:
+            # Anything else here is a bug in the parser's own code (a
+            # grammar action reaching for a field the production doesn't
+            # have, a KeyError on an unregistered case, etc). Silently
+            # converting to ParserError(str(e)) hid which production
+            # broke. Always surface the exception's type; on RESNIK_DEBUG=1
+            # include the full traceback so the offending action is
+            # traceable without re-instrumenting the compiler.
+            summary = f"internal parser error -- {type(e).__name__}: {e}"
+            if os.environ.get("RESNIK_DEBUG"):
+                tb = "".join(traceback.format_exception(
+                    type(e), e, e.__traceback__))
+                summary = f"{summary}\n{tb}"
+            else:
+                summary = (f"{summary} "
+                           "(rerun with RESNIK_DEBUG=1 for full traceback)")
+            if not self.errors:
+                self.errors.append(ParserError(summary))
             return None
 
     def parse_file(self, filepath: str) -> Optional[ASTNode]:
