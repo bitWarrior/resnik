@@ -345,33 +345,6 @@ class VectorLiteralNode(ASTNode):
 
 @dataclass
 class OnErrorNode(ASTNode):
-    """ON ERROR(code): <handler>  — resumable fault handler (approximated)."""
-
-    code: int = 0
-    body: Optional[ASTNode] = None
-
-    def __post_init__(self) -> None:
-        self.node_type = NodeType.ON_ERROR
-
-    def to_dict(self) -> Dict[str, Any]:
-        result = super().to_dict()
-        result.update(
-            {"code": self.code,
-             "body": self.body.to_dict() if self.body else None}
-        )
-        return result
-
-
-@dataclass
-class ResumeNode(ASTNode):
-    """RESUME; — return control to the statement after the faulting one."""
-
-    def __post_init__(self) -> None:
-        self.node_type = NodeType.RESUME
-
-
-@dataclass
-class OnErrorNode(ASTNode):
     """ON ERROR(code): <handler> — a registered fault handler (callback)."""
 
     code: int = 0
@@ -543,17 +516,21 @@ class ExitNode(ASTNode):
 
 @dataclass
 class LiteralNode(ASTNode):
-    """Literal value node."""
+    """Literal value node. `bit_width` is the source-declared width in bits
+    for HEX/OCT/BIT based literals (e.g. HEX 'FFFF' is 16 bits = 4 digits × 4).
+    None for non-based literals, and for based literals with no digits."""
 
     value: Any = None
     literal_type: str = ""
+    bit_width: Optional[int] = None
 
     def __post_init__(self) -> None:
         self.node_type = NodeType.LITERAL
 
     def to_dict(self) -> Dict[str, Any]:
         result = super().to_dict()
-        result.update({"value": self.value, "literal_type": self.literal_type})
+        result.update({"value": self.value, "literal_type": self.literal_type,
+                       "bit_width": self.bit_width})
         return result
 
 

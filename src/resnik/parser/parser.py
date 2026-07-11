@@ -287,6 +287,9 @@ class Parser:
                         and ts.dimensions):
                     return ts.dimensions[0]
                 return None
+            if isinstance(node, LiteralNode) and node.literal_type in (
+                    "HEX", "OCT", "BIT") and node.bit_width is not None:
+                return node.bit_width
             if isinstance(node, BinaryOpNode) and node.operator == "||":
                 lw = bit_width(node.left)
                 rw = bit_width(node.right)
@@ -2556,30 +2559,37 @@ class Parser:
         return out
 
     def _make_based_literal(self, tok: Any) -> LiteralNode:
-        """Parse a HEX/BIN/OCT or suffix bit literal token into a LiteralNode."""
+        """Parse a HEX/BIN/OCT or suffix bit literal token into a LiteralNode.
+
+        Preserves the source-declared bit width (digits × bits-per-digit) on
+        the node so downstream passes -- BIT concatenation width checking in
+        the parser and shift-and-OR lowering in the backend -- can honor the
+        original register width instead of inferring from the numeric value."""
         import re
         raw = tok.value
         ttype = tok.gettokentype()
         m = re.search(r"'([^']*)'", raw)
         digits = m.group(1) if m else ""
         if ttype == "HEXSTRING":
-            base, lit = 16, "HEX"
+            base, lit, bits_per_digit = 16, "HEX", 4
         elif ttype == "BITSTRING":
-            base, lit = 2, "BIT"
+            base, lit, bits_per_digit = 2, "BIT", 1
         elif ttype == "OCTSTRING":
-            base, lit = 8, "OCT"
+            base, lit, bits_per_digit = 8, "OCT", 3
         else:  # BITLITERAL, suffix form '....'[BHO]
             suffix = raw[-1].upper()
-            base, lit = {"B": (2, "BIT"), "H": (16, "HEX"), "O": (8, "OCT")}.get(
-                suffix, (2, "BIT")
-            )
+            base, lit, bits_per_digit = {
+                "B": (2, "BIT", 1), "H": (16, "HEX", 4), "O": (8, "OCT", 3),
+            }.get(suffix, (2, "BIT", 1))
         try:
             value = int(digits, base) if digits else 0
         except ValueError:
             value = 0
+        bit_width = len(digits) * bits_per_digit if digits else None
         return LiteralNode(
             value=value,
             literal_type=lit,
+            bit_width=bit_width,
             line=getattr(tok, "line", 0),
             column=getattr(tok, "column", 0),
         )

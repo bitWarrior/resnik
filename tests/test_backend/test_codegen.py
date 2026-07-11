@@ -7,6 +7,7 @@ import tempfile
 import os
 from resnik.backend.codegen import RustCodeGenerator
 from resnik.parser.ast_nodes import (
+    ASTNode,
     ProgramNode,
     DeclareNode,
     ProcedureNode,
@@ -221,34 +222,34 @@ class TestBinaryOperations:
     """Test binary operation generation."""
 
     def test_addition(self) -> None:
-        """Test addition operation."""
+        """INTEGER addition uses wrapping_add for deterministic overflow."""
         generator = RustCodeGenerator()
         left = LiteralNode(value=5, literal_type="INTEGER", line=1, column=1)
         right = LiteralNode(value=3, literal_type="INTEGER", line=1, column=1)
         binop = BinaryOpNode(operator="+", left=left, right=right, line=1, column=1)
-        
+
         result = generator._generate_expression(binop)
-        assert result == "5 + 3"
+        assert result == "(5).wrapping_add(3)"
 
     def test_subtraction(self) -> None:
-        """Test subtraction operation."""
+        """INTEGER subtraction uses wrapping_sub for deterministic overflow."""
         generator = RustCodeGenerator()
         left = LiteralNode(value=10, literal_type="INTEGER", line=1, column=1)
         right = LiteralNode(value=3, literal_type="INTEGER", line=1, column=1)
         binop = BinaryOpNode(operator="-", left=left, right=right, line=1, column=1)
-        
+
         result = generator._generate_expression(binop)
-        assert result == "10 - 3"
+        assert result == "(10).wrapping_sub(3)"
 
     def test_multiplication(self) -> None:
-        """Test multiplication operation."""
+        """INTEGER multiplication uses wrapping_mul for deterministic overflow."""
         generator = RustCodeGenerator()
         left = LiteralNode(value=4, literal_type="INTEGER", line=1, column=1)
         right = LiteralNode(value=5, literal_type="INTEGER", line=1, column=1)
         binop = BinaryOpNode(operator="*", left=left, right=right, line=1, column=1)
-        
+
         result = generator._generate_expression(binop)
-        assert result == "4 * 5"
+        assert result == "(4).wrapping_mul(5)"
 
     def test_division(self) -> None:
         """Test division operation."""
@@ -273,19 +274,18 @@ class TestBinaryOperations:
         assert "3" in result
 
     def test_nested_operations(self) -> None:
-        """Test nested binary operations."""
+        """Nested INTEGER arithmetic composes wrapping_* calls."""
         generator = RustCodeGenerator()
         # (5 + 3) * 2
         left_inner = LiteralNode(value=5, literal_type="INTEGER", line=1, column=1)
         right_inner = LiteralNode(value=3, literal_type="INTEGER", line=1, column=1)
         add = BinaryOpNode(operator="+", left=left_inner, right=right_inner, line=1, column=1)
-        
+
         right_outer = LiteralNode(value=2, literal_type="INTEGER", line=1, column=1)
         mult = BinaryOpNode(operator="*", left=add, right=right_outer, line=1, column=1)
-        
+
         result = generator._generate_expression(mult)
-        assert "+" in result
-        assert "*" in result
+        assert result == "((5).wrapping_add(3)).wrapping_mul(2)"
 
 
 class TestAssignmentGeneration:
@@ -453,6 +453,214 @@ class TestRuntimePrelude:
         code = generator.generate(program)
 
         assert "mod hal_rt" not in code
+
+
+class TestRustKeywordCollisions:
+    """HAL/S identifiers that lower to a Rust keyword must be escaped. Left
+    unescaped they produce `let mut type: i32 = 0;` etc., which rustc rejects.
+    Most collisions take Rust's raw-identifier form (`r#type`); the four that
+    Rust refuses to raw-escape (`crate`, `self`, `super`, plus lowercased
+    `Self`) get a `_` suffix instead."""
+
+    def _run(self, src: str) -> str:
+        from resnik import Lexer, Parser
+        p = Parser()
+        ast = p.parse(Lexer().tokenize(src, "t"))
+        assert not p.errors, p.errors
+        return RustCodeGenerator().generate(ast)
+
+    def test_raw_escaped_keyword_declaration(self) -> None:
+        code = self._run(
+            "T: PROGRAM; DECLARE TYPE INTEGER; TYPE = 1; CLOSE T;")
+        assert "let mut r#type" in code
+        assert "r#type = 1;" in code
+
+    def test_multiple_raw_escaped_keywords(self) -> None:
+        code = self._run(
+            "T: PROGRAM; DECLARE MATCH INTEGER; DECLARE FN INTEGER; "
+            "DECLARE USE INTEGER; DECLARE MOVE INTEGER; "
+            "MATCH = 1; FN = 2; USE = 3; MOVE = 4; CLOSE T;")
+        for kw in ("match", "fn", "use", "move"):
+            assert f"let mut r#{kw}" in code, f"missing r#{kw} in {code!r}"
+
+    def test_self_gets_suffix_not_raw(self) -> None:
+        """`self` is the one keyword Rust refuses to raw-escape. Use a
+        trailing underscore instead so the identifier remains valid."""
+        code = self._run(
+            "T: PROGRAM; DECLARE SELF INTEGER; SELF = 1; CLOSE T;")
+        assert "r#self" not in code
+        assert "let mut self_" in code
+        assert "self_ = 1;" in code
+
+    def test_non_keyword_identifier_unchanged(self) -> None:
+        """A regular HAL/S name still lowercases plainly (no r# prefix)."""
+        code = self._run(
+            "T: PROGRAM; DECLARE COUNTER INTEGER; COUNTER = 1; CLOSE T;")
+        assert "let mut counter" in code
+        assert "r#counter" not in code
+        assert "counter_" not in code  # not the no-raw suffix path either
+
+    def test_keyword_ident_used_in_expression(self) -> None:
+        """The read-side of an expression (routed through
+        _generate_identifier) must also escape the collision."""
+        code = self._run(
+            "T: PROGRAM; DECLARE TYPE INTEGER; DECLARE X INTEGER; "
+            "X = TYPE + 1; CLOSE T;")
+        # The wrapping_add rewrite from P0 #2 shows the escape on both sides.
+        assert "(r#type).wrapping_add(1)" in code
+
+
+class TestExhaustivenessBackstop:
+    """The codegen dispatchers used to silently emit `// TODO: Generate code
+    for <T>` (statements) or `/* unknown expression */` (expressions) when
+    they hit an AST node type they didn't handle. In a compiler that's a
+    correctness bomb: a whole statement or sub-expression can vanish from
+    the emitted Rust without any diagnostic. Both dispatchers must now
+    raise BackendError so `we forgot to handle X` is a build failure."""
+
+    def test_generate_node_raises_on_unhandled_statement(self) -> None:
+        from resnik.exceptions import BackendError
+
+        class MysteryStatement(ASTNode):
+            pass
+
+        gen = RustCodeGenerator()
+        with pytest.raises(BackendError, match="MysteryStatement"):
+            gen._generate_node(MysteryStatement(line=7, column=3))
+
+    def test_generate_expression_raises_on_unhandled_expression(self) -> None:
+        from resnik.exceptions import BackendError
+
+        class MysteryExpr(ASTNode):
+            pass
+
+        gen = RustCodeGenerator()
+        with pytest.raises(BackendError, match="MysteryExpr"):
+            gen._generate_expression(MysteryExpr(line=11, column=5))
+
+    def test_backend_error_includes_source_location(self) -> None:
+        """Location on the raised error routes it to the offending source
+        line, not a nameless traceback."""
+        from resnik.exceptions import BackendError
+
+        class MysteryExpr(ASTNode):
+            pass
+
+        gen = RustCodeGenerator()
+        with pytest.raises(BackendError) as excinfo:
+            gen._generate_expression(MysteryExpr(line=42, column=9))
+        assert excinfo.value.line == 42
+        assert excinfo.value.column == 9
+
+
+class TestNoShadowedMethods:
+    """Guard against re-introducing duplicate method definitions on the
+    RustCodeGenerator class. Two `_const_int` definitions previously coexisted
+    — the second silently shadowed the first and accepted floats via int()
+    coercion, quietly turning `M(1.7, 2.3)` into `M[0][1]`."""
+
+    def test_codegen_methods_defined_exactly_once(self) -> None:
+        import ast
+        import inspect
+        from resnik.backend import codegen as mod
+
+        src = inspect.getsource(mod)
+        tree = ast.parse(src)
+        for node in ast.iter_child_nodes(tree):
+            if isinstance(node, ast.ClassDef) and node.name == "RustCodeGenerator":
+                names: dict = {}
+                for item in node.body:
+                    if isinstance(item, ast.FunctionDef):
+                        names[item.name] = names.get(item.name, 0) + 1
+                duplicates = {n: c for n, c in names.items() if c > 1}
+                assert not duplicates, (
+                    f"Duplicate method definitions on RustCodeGenerator: "
+                    f"{duplicates}. A second `def` on the same class silently "
+                    "shadows the first.")
+                return
+        pytest.fail("RustCodeGenerator class not found in codegen module")
+
+
+class TestWalkerCoverage:
+    """The AST walker feeds every pre-pass (fault analysis, runtime-prelude
+    gating, bit-width/var-info collection). A missed field silently hides an
+    entire subtree, producing miscompilation rather than a loud failure.
+
+    These tests plant a prelude-requiring node (VECTOR literal) inside each
+    field the walker historically did NOT descend into. If the walker
+    regresses, the emitted code will reference hal_rt symbols without the
+    prelude and fail to compile.
+    """
+
+    def _prelude_trigger(self):
+        # VectorLiteralNode requires the hal_rt prelude.
+        return VectorLiteralNode(values=[
+            LiteralNode(value=1.0, literal_type="SCALAR"),
+            LiteralNode(value=2.0, literal_type="SCALAR"),
+        ])
+
+    def test_walk_descends_into_case_branches(self) -> None:
+        case = CaseNode(
+            selector=LiteralNode(value=1, literal_type="INTEGER"),
+            branches=[AssignmentNode(
+                target=IdentifierNode(name="V"),
+                value=self._prelude_trigger(),
+            )],
+        )
+        program = ProgramNode(name="T", statements=[case])
+        code = RustCodeGenerator().generate(program)
+        assert "mod hal_rt" in code
+
+    def test_walk_descends_into_case_selector(self) -> None:
+        # A SubscriptNode in the CASE selector must still be walked so its
+        # operand (a matrix subscript here) triggers the prelude.
+        selector = SubscriptNode(operand=self._prelude_trigger(), index=1)
+        case = CaseNode(selector=selector, branches=[])
+        program = ProgramNode(name="T", statements=[case])
+        code = RustCodeGenerator().generate(program)
+        assert "mod hal_rt" in code
+
+    def test_walk_descends_into_on_error_body(self) -> None:
+        handler_body = DoBlockNode(statements=[AssignmentNode(
+            target=IdentifierNode(name="V"),
+            value=self._prelude_trigger(),
+        )])
+        on_err = OnErrorNode(code=5, body=handler_body)
+        program = ProgramNode(name="T", statements=[on_err])
+        code = RustCodeGenerator().generate(program)
+        assert "mod hal_rt" in code
+
+    def test_walk_descends_into_for_bounds(self) -> None:
+        # start / end / step are expressions; a prelude-requiring expression
+        # in a loop bound must be seen by the pre-pass.
+        loop = ForNode(
+            var="I",
+            start=SubscriptNode(operand=self._prelude_trigger(), index=1),
+            end=LiteralNode(value=3, literal_type="INTEGER"),
+        )
+        program = ProgramNode(name="T", statements=[loop])
+        code = RustCodeGenerator().generate(program)
+        assert "mod hal_rt" in code
+
+    def test_walk_descends_into_unary_operand(self) -> None:
+        # UnaryOpNode.operand — historically dropped by the walker.
+        unary = UnaryOpNode(operator="-", operand=self._prelude_trigger())
+        assign = AssignmentNode(target=IdentifierNode(name="V"), value=unary)
+        program = ProgramNode(name="T", statements=[assign])
+        code = RustCodeGenerator().generate(program)
+        assert "mod hal_rt" in code
+
+    def test_walk_descends_into_declare_initial_values(self) -> None:
+        # DECLARE with an INITIAL(...) list -- the array-init values must
+        # be walked (they may reference prelude intrinsics).
+        decl = DeclareNode(
+            identifiers=["A"],
+            type_spec=TypeSpec(data_type=DataType.INTEGER),
+            initial_values=[self._prelude_trigger()],
+        )
+        program = ProgramNode(name="T", declarations=[decl])
+        code = RustCodeGenerator().generate(program)
+        assert "mod hal_rt" in code
 
 
 class TestControlFlowGeneration:
@@ -764,11 +972,28 @@ class TestProceduresAndLoops:
 class TestBitOperations:
     """BIT registers, $ subscripting, hex/bit literals, and bitwise ops."""
 
-    def test_bit_width_declares_u32(self) -> None:
+    def test_bit_width_picks_narrowest_unsigned(self) -> None:
+        """BIT(w) picks the narrowest fitting unsigned Rust type. This
+        matters for ARRAY(N) OF BIT(w) where a too-wide element wastes
+        storage and misrepresents on-wire register/downlink widths."""
+        cases = [(1, "u8"), (8, "u8"), (9, "u16"), (16, "u16"),
+                 (17, "u32"), (32, "u32"), (33, "u64"), (64, "u64")]
+        for width, expected in cases:
+            generator = RustCodeGenerator()
+            decl = DeclareNode(
+                identifiers=["REG"],
+                type_spec=TypeSpec(data_type=DataType.BIT, dimensions=[width]),
+            )
+            code = generator.generate(ProgramNode(name="P", declarations=[decl]))
+            assert f"let mut reg: {expected}" in code, \
+                f"BIT({width}) expected {expected}, got: {code!r}"
+
+    def test_bit_no_width_defaults_to_u32(self) -> None:
+        """A bare BIT with no declared width still falls back to u32."""
         generator = RustCodeGenerator()
         decl = DeclareNode(
             identifiers=["REG"],
-            type_spec=TypeSpec(data_type=DataType.BIT, dimensions=[16]),
+            type_spec=TypeSpec(data_type=DataType.BIT),
         )
         code = generator.generate(ProgramNode(name="P", declarations=[decl]))
         assert "let mut reg: u32" in code
@@ -788,6 +1013,56 @@ class TestBitOperations:
             ProgramNode(name="P", declarations=[decl], statements=[assign])
         )
         assert "(reg >> 15) & 1" in code
+
+    def test_array_of_bit_uses_element_width_type(self) -> None:
+        """ARRAY(N) OF BIT(w) picks its element type by w, not a fixed u32.
+        Regression: previously ARRAY(512) OF BIT(16) emitted [u32; 512]
+        (wasted 16 bits per element and misrepresented downlink width)."""
+        generator = RustCodeGenerator()
+        decl = DeclareNode(
+            identifiers=["DATA_BLOCK"],
+            type_spec=TypeSpec(
+                data_type=DataType.BIT,
+                array_size=512,
+                array_dims=[512],
+                element_type=TypeSpec(data_type=DataType.BIT, dimensions=[16]),
+            ),
+        )
+        code = generator.generate(ProgramNode(name="P", declarations=[decl]))
+        assert "let mut data_block: [u16; 512]" in code
+
+    def test_nested_subscript_uses_element_bit_width(self) -> None:
+        """FLAGS$I$K where FLAGS is ARRAY(N) OF BIT(w): the inner bit extract
+        must use w for the shift (MSB-first, 1-indexed), not the default 32.
+        Previously emitted (flags[..] >> 29) & 1 for FLAGS$2$3 on BIT(16)."""
+        generator = RustCodeGenerator()
+        decl = DeclareNode(
+            identifiers=["FLAGS"],
+            type_spec=TypeSpec(
+                data_type=DataType.BIT,
+                array_size=4,
+                array_dims=[4],
+                element_type=TypeSpec(data_type=DataType.BIT, dimensions=[16]),
+            ),
+        )
+        b_decl = DeclareNode(
+            identifiers=["B"],
+            type_spec=TypeSpec(data_type=DataType.BIT, dimensions=[1]),
+        )
+        # FLAGS$2$3 -- bit 3 (MSB-first) of element 2.
+        assign = AssignmentNode(
+            target=IdentifierNode(name="B"),
+            value=SubscriptNode(
+                operand=SubscriptNode(
+                    operand=IdentifierNode(name="FLAGS"), index=2),
+                index=3,
+            ),
+        )
+        code = generator.generate(ProgramNode(
+            name="P", declarations=[decl, b_decl], statements=[assign]))
+        # Correct: (16 - 3) == 13; wrong (pre-fix): (32 - 3) == 29.
+        assert "(flags[1] >> 13) & 1" in code
+        assert "(flags[1] >> 29)" not in code
 
     def test_hex_literal(self) -> None:
         generator = RustCodeGenerator()
@@ -908,7 +1183,7 @@ class TestForAndVectorSubscript:
             statements=[],
         )
         code = generator.generate(ProgramNode(name="P", statements=[loop]))
-        assert "for idx in 1..=3 {" in code
+        assert "for idx in (1) as i32..=(3) as i32 {" in code
 
     def test_vector_element_lvalue_one_indexed(self) -> None:
         """VEC$IDX is a 1-indexed element place expression."""
@@ -1128,7 +1403,8 @@ class TestStructures:
         prog = ProgramNode(name="P", statements=[self._node_template()])
         code = generator.generate(prog)
         assert "struct Node {" in code
-        assert "status: u32," in code
+        # STATUS is BIT(8) -> u8 (narrowest fitting unsigned).
+        assert "status: u8," in code
         assert "position: Vector<3>," in code
         assert "timestamp: f32," in code
         assert "fn new() -> Self {" in code
@@ -2053,14 +2329,18 @@ class TestBitwiseOperatorsAndNestedCompool:
             "T: PROGRAM; DECLARE A BIT(8); DECLARE B BIT(8); "
             "A = A | B; CLOSE T;")
         assert not errs
-        assert "a = a | b;" in code
+        # BIT target gets a narrowing `as` cast so mixed-width RHS still
+        # type-checks; when widths already match, `as u8` is a no-op.
+        assert "a = (a | b) as u8;" in code
 
     def test_ampersand_is_bitwise_and(self) -> None:
         errs, code = self._run(
             "T: PROGRAM; DECLARE A BIT(8); DECLARE B BIT(8); "
             "A = A & B; CLOSE T;")
         assert not errs
-        assert "a = a & b;" in code
+        # BIT target gets a narrowing `as` cast so mixed-width RHS still
+        # type-checks; when widths already match, `as u8` is a no-op.
+        assert "a = (a & b) as u8;" in code
 
     def test_double_bar_still_concat(self) -> None:
         # || must remain string concatenation, not two ORs.
@@ -2665,7 +2945,9 @@ class TestBitConcatenation:
             "T: PROGRAM; DECLARE H BIT(8); DECLARE L BIT(8); DECLARE W BIT(16); "
             "W = H || L; CLOSE T;")
         assert not errs
-        assert "((h) << 8) | (l)" in code
+        # Both u8 operands widened to u16 (the concat result type) so the
+        # shift by 8 doesn't overflow the narrower operand type.
+        assert "(((h) as u16) << 8) | ((l) as u16)" in code
 
     def test_string_concat_still_format(self) -> None:
         errs, code = self._run(
@@ -2679,8 +2961,22 @@ class TestBitConcatenation:
             "T: PROGRAM; DECLARE A BIT(4); DECLARE B BIT(4); DECLARE C BIT(8); "
             "DECLARE W BIT(16); W = A || B || C; CLOSE T;")
         assert not errs
-        # (A||B) is BIT(8), then || C (BIT(8)) -> shift left by 8
-        assert "<< 8) | (c)" in code
+        # (A||B) is BIT(8), then || C (BIT(8)) -> shift left by 8.
+        # The inner (A||B) is a u8; the outer concat widens it to u16.
+        assert "<< 8) | ((c) as u16)" in code
+
+    def test_bit_concat_with_hex_literal_uses_declared_width(self) -> None:
+        """A HEX/OCT/BIT literal contributes its source-declared width to the
+        concatenation. Regression: HEX 'FFFF' used to lose its 16-bit width,
+        so `A || HEX '00'` fell through to string concat and produced Rust
+        that failed to compile against a BIT target."""
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE A BIT(8); DECLARE R BIT(16); "
+            "R = A || HEX '00'; CLOSE T;")
+        assert not errs
+        assert "format!" not in code
+        # The HEX '00' is 2 hex digits = 8 bits; result is BIT(16) -> u16.
+        assert "(((a) as u16) << 8) | ((0x0) as u16)" in code
 
     def test_bit_width_mismatch_errors(self) -> None:
         from resnik import Lexer, Parser
@@ -2735,8 +3031,10 @@ class TestPrecisionPromotion:
 
 class TestModOperator:
     """HAL/S MOD operator: an infix, multiplicative-precedence integer/real
-    remainder that lowers to Rust `%`. Exercised through the parser so that
-    tokenization, precedence, and case-insensitivity are covered too."""
+    remainder. HAL/S MOD is the mathematical (non-negative) modulo, which
+    Rust's `%` is not (-7 % 3 == -1), so MOD lowers to `.rem_euclid(...)`.
+    Exercised through the parser so tokenization, precedence, and case-
+    insensitivity are covered too."""
 
     def _run(self, src: str):
         from resnik import Lexer, Parser
@@ -2766,27 +3064,28 @@ class TestModOperator:
             "END; "
             "CLOSE RING_BUFFER;")
 
-    def test_mod_lowers_to_percent(self) -> None:
+    def test_mod_lowers_to_rem_euclid(self) -> None:
         errs, code = self._run(self.MOD)
         assert not errs
-        assert "r = a % b;" in code
+        assert "r = (a).rem_euclid(b);" in code
 
     def test_mod_is_case_insensitive(self) -> None:
         errs, code = self._run(self.MOD.replace("A MOD B", "A mod B"))
         assert not errs
-        assert "r = a % b;" in code
+        assert "r = (a).rem_euclid(b);" in code
 
     def test_mod_precedence_is_multiplicative(self) -> None:
         # MOD must bind tighter than + : (A MOD B) + 1, not A MOD (B + 1)
         errs, code = self._run(self.MOD.replace("R = A MOD B;", "R = A MOD B + 1;"))
         assert not errs
-        assert "(a % b) + 1" in code
+        # A, B, "1" are all INTEGER, so outer + becomes wrapping_add too.
+        assert "((a).rem_euclid(b)).wrapping_add(1)" in code
 
     def test_ring_buffer_wraps(self) -> None:
         errs, code = self._run(self.RING)
         assert not errs
-        # cyclic 1-based index increment via MOD
-        assert "write_idx = (write_idx % 16) + 1;" in code
+        # cyclic 1-based index increment via MOD (rem_euclid + wrapping_add)
+        assert "write_idx = ((write_idx).rem_euclid(16)).wrapping_add(1);" in code
         # 1-based -> 0-based translation preserved on the ring store
         assert "telemetry_ring[(write_idx - 1) as usize]" in code
 
@@ -2806,20 +3105,23 @@ class TestDowntoAndExit:
         errs, code = self._run(
             "T: PROGRAM; DECLARE I INTEGER; DO FOR I = 1 TO 5; END; CLOSE T;")
         assert not errs
-        assert "for i in 1..=5 {" in code
+        assert "for i in (1) as i32..=(5) as i32 {" in code
 
     def test_downto_reverses_range(self) -> None:
         errs, code = self._run(
             "T: PROGRAM; DECLARE I INTEGER; DO FOR I = 10 DOWNTO 1; END; CLOSE T;")
         assert not errs
-        assert "for i in (1..=10).rev() {" in code
+        assert "for i in ((1) as i32..=(10) as i32).rev() {" in code
 
     def test_downto_with_step(self) -> None:
         errs, code = self._run(
             "T: PROGRAM; DECLARE I INTEGER; "
             "DO FOR I = 10 DOWNTO 1 BY 2; END; CLOSE T;")
         assert not errs
-        assert "for i in (1..=10).rev().step_by((2) as usize) {" in code
+        assert (
+            "for i in ((1) as i32..=(10) as i32).rev()"
+            ".step_by((2) as usize) {"
+        ) in code
 
     def test_exit_in_loop_lowers_to_break(self) -> None:
         errs, code = self._run(
@@ -2864,7 +3166,7 @@ class TestDowntoAndExit:
     def test_buffer_search_end_to_end(self) -> None:
         errs, code = self._run(self.BUFFER_SEARCH)
         assert not errs
-        assert "for i in (1..=10).rev() {" in code
+        assert "for i in ((1) as i32..=(10) as i32).rev() {" in code
         assert "history[(i - 1) as usize] == 99" in code
         assert "break;" in code
 
@@ -2884,7 +3186,7 @@ class TestLabeledExit:
             "T: PROGRAM; DECLARE I INTEGER; "
             "SEARCH: DO FOR I = 1 TO 3; END; CLOSE T;")
         assert not errs
-        assert "'search: for i in 1..=3 {" in code
+        assert "'search: for i in (1) as i32..=(3) as i32 {" in code
 
     def test_labeled_while_emits_rust_label(self) -> None:
         errs, code = self._run(
@@ -2901,8 +3203,8 @@ class TestLabeledExit:
             "  DO FOR J = 1 TO 3; EXIT SEARCH; END; "
             "END; CLOSE T;")
         assert not errs
-        assert "'search: for i in 1..=3 {" in code
-        assert "for j in 1..=3 {" in code   # inner loop unlabeled
+        assert "'search: for i in (1) as i32..=(3) as i32 {" in code
+        assert "for j in (1) as i32..=(3) as i32 {" in code  # inner unlabeled
         assert "break 'search;" in code
 
     def test_bare_exit_still_breaks_innermost(self) -> None:

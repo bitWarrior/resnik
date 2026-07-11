@@ -56,6 +56,7 @@ from resnik.parser.ast_nodes import (
 )
 from resnik.backend.rust_emitter import RustEmitter
 from resnik.backend.type_mapper import TypeMapper
+from resnik.exceptions import BackendError
 from resnik.types import NodeType, DataType, Precision
 
 
@@ -243,6 +244,36 @@ class RustCodeGenerator:
     # NOTE: a full implementation would map each HAL/S runtime error to its
     # real (group:code); this is the single code the current lowering raises.
     _DIVIDE_FAULT_CODE = 5
+
+    # Rust reserved keywords that can be escaped with the raw-identifier
+    # syntax r#foo. HAL/S source may legally use these as identifiers (e.g.
+    # a variable named TYPE or MATCH), and the lowered snake_case would be
+    # a syntax error in Rust without escaping.
+    _RUST_KEYWORDS_RAW = frozenset({
+        "as", "break", "const", "continue", "else", "enum", "extern",
+        "false", "fn", "for", "if", "impl", "in", "let", "loop", "match",
+        "mod", "move", "mut", "pub", "ref", "return", "static", "struct",
+        "trait", "true", "type", "unsafe", "use", "where", "while",
+        "async", "await", "dyn",
+        "abstract", "become", "box", "do", "final", "macro", "override",
+        "priv", "typeof", "unsized", "virtual", "yield", "try",
+    })
+    # Rust keywords that Rust refuses to escape with r# (they have syntactic
+    # roles the parser reserves). A trailing underscore suffix disambiguates.
+    _RUST_KEYWORDS_NO_RAW = frozenset({"crate", "self", "super"})
+
+    @classmethod
+    def _rust_ident(cls, name: str) -> str:
+        """Lowercase a HAL/S source identifier and rewrite it if the result
+        collides with a Rust keyword. Applied at every point a HAL/S name is
+        written into emitted Rust text; internal dict keys keep the raw
+        lowercase (they never reach Rust)."""
+        lo = name.lower()
+        if lo in cls._RUST_KEYWORDS_NO_RAW:
+            return f"{lo}_"
+        if lo in cls._RUST_KEYWORDS_RAW:
+            return f"r#{lo}"
+        return lo
 
     # Supported code-generation target profiles. "host" is the default hosted
     # std build; "cortex-m" emits no_std + #[entry] bare-metal firmware.
@@ -433,7 +464,7 @@ class RustCodeGenerator:
                     self._extern_vars.add(ident.lower())
                     rty = self._full_rust_type(node.type_spec)
                     self.emitter.emit_line(
-                        f'extern "C" {{ static {ident.lower()}: {rty}; }}')
+                        f'extern "C" {{ static {self._rust_ident(ident)}: {rty}; }}')
         if self._extern_vars:
             self.emitter.emit_line()
 
@@ -448,7 +479,7 @@ class RustCodeGenerator:
     # bind TIGHTER than comparisons -- so `(a=b) AND (c=d)` must keep its parens.
     _PRECEDENCE = {
         "**": 12,
-        "*": 10, "/": 10,
+        "*": 10, "/": 10, "MOD": 10,
         "+": 9, "-": 9,
         "AND": 7,                      # &
         "XOR": 6,                      # ^
@@ -802,12 +833,20 @@ use hal_rt::*;
         return False
 
     def _walk(self, node: ASTNode):
-        """Yield node and all descendant AST nodes."""
+        """Yield node and all descendant AST nodes.
+
+        The attribute lists must cover every AST-node-valued field on every
+        node type in ast_nodes.py; any omission silently hides that subtree
+        from every pre-pass (fault analysis, prelude gating, bit-width /
+        var-info collection), producing miscompilation, not a loud failure.
+        """
         yield node
         list_attrs = (
             "statements", "declarations", "procedures", "tasks", "units",
             "items", "arguments", "values", "args", "fields", "targets",
-            "indices", "assign_args"
+            "indices", "assign_args",
+            "branches",        # CaseNode
+            "initial_values",  # DeclareNode array initializers
         )
         for attr in list_attrs:
             for child in getattr(node, attr, None) or []:
@@ -817,6 +856,14 @@ use hal_rt::*;
             "value", "target", "left", "right",
             "condition", "then_block", "else_block",
             "priority", "initial_value",
+            "operand",     # UnaryOpNode, SubscriptNode, FieldAccessNode
+            "index",       # SubscriptNode (may be int; guarded below)
+            "body",        # OnErrorNode handler
+            "selector",    # CaseNode
+            "start", "end", "step",   # ForNode bounds
+            "delay", "period",        # ScheduleNode timing
+            "lo", "hi",               # RangeNode bounds
+            "statement",              # LabelNode
         )
         for attr in single_attrs:
             child = getattr(node, attr, None)
@@ -940,7 +987,8 @@ use hal_rt::*;
         elif isinstance(node, ExitNode):
             # EXIT breaks the innermost loop; EXIT <label> the named loop.
             if node.label:
-                self.emitter.emit_line(f"break '{node.label.lower()};")
+                self.emitter.emit_line(
+                    f"break '{self._rust_ident(node.label)};")
             else:
                 self.emitter.emit_line("break;")
         elif isinstance(node, GotoNode):
@@ -967,8 +1015,16 @@ use hal_rt::*;
         elif isinstance(node, TerminateNode):
             self._generate_terminate(node)
         else:
-            # Unknown node type
-            self.emitter.emit_comment(f"TODO: Generate code for {type(node).__name__}")
+            # Exhaustiveness backstop: an AST statement type that reaches here
+            # without a handler is a codegen bug. Silently emitting a comment
+            # would let whole HAL/S statements vanish -- the exact failure
+            # mode a safety-critical pipeline cannot tolerate.
+            raise BackendError(
+                f"codegen: no handler for statement node "
+                f"{type(node).__name__} (add a branch to _generate_node)",
+                line=getattr(node, "line", 0),
+                column=getattr(node, "column", 0),
+            )
     
     def _generate_compilation(self, node: CompilationNode) -> None:
         """Generate each top-level unit. COMPOOLs (globals) are emitted first
@@ -1120,7 +1176,7 @@ use hal_rt::*;
             self._generate_task_function(sub)
             self.emitter.emit_line()
         self.emitter.emit_function_header(
-            task.name.lower(), [], None, is_public=False
+            self._rust_ident(task.name), [], None, is_public=False
         )
         self._generate_unit_body(task.declarations, task.statements)
         self.emitter.emit_block_end()
@@ -1314,10 +1370,10 @@ use hal_rt::*;
         if node.type_spec is not None and getattr(
                 node.type_spec, "is_name", False):
             for ident in node.identifiers:
-                name = ident.lower()
-                self._name_vars[name] = rust_type
+                self._name_vars[ident.lower()] = rust_type
                 self.emitter.emit_line(
-                    f"let mut {name}: *mut {rust_type} = std::ptr::null_mut();")
+                    f"let mut {self._rust_ident(ident)}: *mut {rust_type} "
+                    f"= std::ptr::null_mut();")
             return
 
         # EQUATE overlay: VIEW aliases TARGET's storage. No separate binding;
@@ -1363,7 +1419,7 @@ use hal_rt::*;
                     rust_i = f"[{rust_i}; {d}]"
             for identifier in node.identifiers:
                 self.emitter.emit_variable_declaration(
-                    identifier.lower(), rust_t, rust_i, True
+                    self._rust_ident(identifier), rust_t, rust_i, True
                 )
             return
         # STRUCTURE-typed variable: `let mut v: Struct = Struct::new();`
@@ -1375,19 +1431,20 @@ use hal_rt::*;
                 n = node.type_spec.array_size
                 for identifier in node.identifiers:
                     self.emitter.emit_variable_declaration(
-                        identifier.lower(), f"[{sname}; {n}]",
+                        self._rust_ident(identifier), f"[{sname}; {n}]",
                         f"[{sname}::new(); {n}]", True
                     )
                 return
             for identifier in node.identifiers:
                 self.emitter.emit_variable_declaration(
-                    identifier.lower(), sname, f"{sname}::new()", True
+                    self._rust_ident(identifier), sname,
+                    f"{sname}::new()", True
                 )
             return
 
         for identifier in node.identifiers:
-            # Convert to snake_case for Rust conventions
-            rust_name = identifier.lower()
+            # Convert HAL/S name to Rust ident (snake_case, keyword-escaped).
+            rust_name = self._rust_ident(identifier)
             
             # Use the INITIAL value(s) if given, else a typed default so the
             # variable is always initialized (Rust rejects reads of an
@@ -1464,7 +1521,10 @@ use hal_rt::*;
         if getattr(node, "is_external", False) or getattr(
                 node, "is_template", False):
             return
-        rust_name = node.name.lower()
+        # Internal key stays raw lowercase so lookups into fault/scope maps
+        # continue to match. Emission uses the Rust-safe form.
+        callee_key = node.name.lower()
+        rust_fn_name = self._rust_ident(node.name)
         all_param_names = list(node.parameters) + list(node.assign_params)
         param_set = {p.lower() for p in all_param_names}
         assign_set = {p.lower() for p in node.assign_params}
@@ -1482,20 +1542,22 @@ use hal_rt::*;
                     d.type_spec
                 )
 
-        # Input parameters by value; ASSIGN (output) parameters by &mut.
+        # Input parameters by value; ASSIGN (output) parameters by &mut. The
+        # emitted parameter name is Rust-safe; type lookup keys stay raw.
         params = [
-            (p.lower(), param_types.get(p.lower(), "i32"))
+            (self._rust_ident(p), param_types.get(p.lower(), "i32"))
             for p in node.parameters
         ]
         params += [
-            (p.lower(), f"&mut {param_types.get(p.lower(), 'i32')}")
+            (self._rust_ident(p),
+             f"&mut {param_types.get(p.lower(), 'i32')}")
             for p in node.assign_params
         ]
 
         # Emit procedure (or function, when it carries a return type)
         base_ret = (self.type_mapper.map_type(node.return_type)
                     if node.return_type is not None else None)
-        is_result = self._uses_faults and rust_name in self._faulting_procs
+        is_result = self._uses_faults and callee_key in self._faulting_procs
         if is_result:
             inner = base_ret if base_ret is not None else "()"
             ret = f"Result<{inner}, HalFault>"
@@ -1503,11 +1565,12 @@ use hal_rt::*;
             ret = base_ret
         kind = "Function" if base_ret is not None else "Procedure"
         self.emitter.emit_comment(f"HAL/S {kind}: {node.name}")
-        self.emitter.emit_function_header(rust_name, params, ret, is_public=False)
+        self.emitter.emit_function_header(
+            rust_fn_name, params, ret, is_public=False)
 
         prev_unit = self._cur_unit
         prev_is_result = self._cur_unit_is_result
-        self._cur_unit = rust_name
+        self._cur_unit = callee_key
         self._cur_unit_is_result = is_result
 
 
@@ -1548,7 +1611,7 @@ use hal_rt::*;
         """Generate a DO WHILE <cond>; ... END; loop as a Rust while loop.
         A `label` (from a labeled DO block) becomes a Rust loop label."""
         condition = self._generate_expression(node.condition)
-        lbl = f"'{label.lower()}: " if label else ""
+        lbl = f"'{self._rust_ident(label)}: " if label else ""
         self.emitter.emit_line(f"{lbl}while {condition} {{")
         self.emitter.indent()
         for stmt in node.statements:
@@ -1613,7 +1676,8 @@ use hal_rt::*;
         the assignment) or unwound to the caller via `return Err(..)` so an
         enclosing handler in the calling scope runs."""
         code = self._DIVIDE_FAULT_CODE
-        tname = target.name.lower()
+        tname = target.name.lower()          # dict-key form
+        rust_lhs = self._rust_ident(target.name)  # Rust place-expression form
         ts = self._var_info.get(tname)
         rust_t = self.type_mapper.map_type(ts) if ts is not None else "f32"
         left = self._generate_expression(binop.left)
@@ -1632,7 +1696,7 @@ use hal_rt::*;
             self.emitter.dedent()
             self.emitter.emit_line("} else {")
             self.emitter.indent()
-            self.emitter.emit_line(f"{tname} = {left} / __d;")
+            self.emitter.emit_line(f"{rust_lhs} = {left} / __d;")
             self.emitter.dedent()
             self.emitter.emit_line("}")
         elif self._cur_unit_is_result:
@@ -1641,7 +1705,7 @@ use hal_rt::*;
             self.emitter.emit_line(
                 f"if __d == 0 as {rust_t} {{ "
                 f"return Err(HalFault {{ code: {code} }}); }}")
-            self.emitter.emit_line(f"{tname} = {left} / __d;")
+            self.emitter.emit_line(f"{rust_lhs} = {left} / __d;")
         else:
             # Unhandled fault at top level -> HAL/S terminates the program.
             self.emitter.emit_line(f"if __d == 0 as {rust_t} {{")
@@ -1649,7 +1713,7 @@ use hal_rt::*;
             self._emit_unhandled_fault(str(code))
             self.emitter.dedent()
             self.emitter.emit_line("}")
-            self.emitter.emit_line(f"{tname} = {left} / __d;")
+            self.emitter.emit_line(f"{rust_lhs} = {left} / __d;")
         self.emitter.dedent()
         self.emitter.emit_line("}")
 
@@ -1798,7 +1862,7 @@ use hal_rt::*;
         parts += [
             f"&mut {self._generate_expression(a)}" for a in node.assign_args
         ]
-        call_expr = f"{node.name.lower()}({', '.join(parts)})"
+        call_expr = f"{self._rust_ident(node.name)}({', '.join(parts)})"
         callee = node.name.lower()
         if self._uses_faults and callee in self._faulting_procs:
             self._generate_faulting_call(call_expr, callee)
@@ -1811,8 +1875,8 @@ use hal_rt::*;
     def _generate_name_assign(self, node: NameAssignNode) -> None:
         """ASSIGN <pointer> TO <target> -> bind the raw pointer to the target's
         address (addr_of_mut! avoids forming an intermediate &mut borrow)."""
-        ptr = node.pointer.lower()
-        tgt = node.target.lower()
+        ptr = self._rust_ident(node.pointer)
+        tgt = self._rust_ident(node.target)
         self.emitter.emit_line(
             f"{ptr} = std::ptr::addr_of_mut!({tgt});")
 
@@ -1876,14 +1940,15 @@ use hal_rt::*;
                         and getattr(tts, "layout", "aligned")
                             != getattr(vts, "layout", "aligned")):
                     self._generate_cross_layout_copy(
-                        node.target.name.lower(), node.value.name.lower(),
+                        self._rust_ident(node.target.name),
+                        self._rust_ident(node.value.name),
                         tts, vts)
                     return
             # Write to a field of a DENSE (packed) array element: use
             # write_unaligned (Rust forbids &mut into a packed field).
             if self._is_dense_field(node.target):
                 place = (f"{self._generate_expression(node.target.operand)}"
-                         f".{node.target.field_name.lower()}")
+                         f".{self._rust_ident(node.target.field_name)}")
                 val = self._generate_expression(node.value)
                 self.emitter.emit_line(
                     f"unsafe {{ core::ptr::addr_of_mut!({place})"
@@ -1895,7 +1960,7 @@ use hal_rt::*;
             if isinstance(node.target, IdentifierNode):
                 tlen = self._char_length(node.target)
                 if tlen is not None and self._is_char_source(node.value):
-                    tgt = node.target.name.lower()
+                    tgt = self._rust_ident(node.target.name)
                     src = self._generate_expression(node.value)
                     slen = self._char_length(node.value)
                     if slen is not None and slen > tlen:
@@ -1933,7 +1998,8 @@ use hal_rt::*;
                         ) + "]" for i in range(r)
                     )
                     self.emitter.emit_line(
-                        f"{node.target.name.lower()} = Matrix([{rows}]);")
+                        f"{self._rust_ident(node.target.name)} "
+                        f"= Matrix([{rows}]);")
                     return
             # NAME (pointer) deref assignment. If the target is a NAME, write
             # through the pointer; if either side reads a NAME, the whole
@@ -1945,7 +2011,7 @@ use hal_rt::*;
                 self._unsafe_ctx = True
                 rhs = self._generate_expression(node.value)
                 if target_is_name:
-                    lhs = f"*{node.target.name.lower()}"
+                    lhs = f"*{self._rust_ident(node.target.name)}"
                 else:
                     lhs = self._generate_expression(node.target)
                 self._unsafe_ctx = False
@@ -1957,7 +2023,9 @@ use hal_rt::*;
                     and node.target.name.lower() in self._equates):
                 target, _, target_type = self._equates[node.target.name.lower()]
                 rhs = self._generate_expression(node.value)
-                self.emitter.emit_line(f"{target} = ({rhs}) as {target_type};")
+                self.emitter.emit_line(
+                    f"{self._rust_ident(target)} = "
+                    f"({rhs}) as {target_type};")
                 return
             # In a fault-aware program (one that uses ON ERROR), a division is
             # lowered so a zero divisor raises HAL/S fault 5 -- handled inline
@@ -1991,6 +2059,19 @@ use hal_rt::*;
                     self.emitter.dedent()
                     self.emitter.emit_line("}")
                     return
+            # BIT-target narrowing: after the P0 #5 fix each BIT(w) picks
+            # its own narrow Rust type (u8/u16/u32/u64). Bit-extracts,
+            # bit-slices, and mixed-width XOR/AND/OR chains produce a value
+            # in the operand's type, which Rust refuses to assign to a
+            # narrower BIT target. An explicit `as {target_type}` cast is a
+            # no-op when widths match and truncates otherwise -- exactly
+            # HAL/S BIT-assignment semantics (low-bits taken).
+            if isinstance(node.target, IdentifierNode):
+                tts = self._var_info.get(node.target.name.lower())
+                if (tts is not None and tts.data_type == DataType.BIT
+                        and tts.dimensions):
+                    target_type = self.type_mapper.map_type(tts)
+                    value = f"({value}) as {target_type}"
             # Subscripted lvalue (vector element). For a VECTOR this renders a
             # real place expression (vec.0[i]) that can be assigned to.
             target = self._generate_expression(node.target)
@@ -2119,7 +2200,17 @@ use hal_rt::*;
         elif isinstance(node, FunctionCallNode):
             return self._generate_function_call(node)
         else:
-            return "/* unknown expression */"
+            # Exhaustiveness backstop -- see _generate_node for rationale. An
+            # unhandled expression node silently emitting a comment would let
+            # a subexpression evaluate to nothing, corrupting the surrounding
+            # statement.
+            raise BackendError(
+                f"codegen: no handler for expression node "
+                f"{type(node).__name__} "
+                f"(add a branch to _generate_expression)",
+                line=getattr(node, "line", 0),
+                column=getattr(node, "column", 0),
+            )
     
     def _generate_literal(self, node: LiteralNode) -> str:
         """
@@ -2178,14 +2269,14 @@ use hal_rt::*;
                     ".load(std::sync::atomic::Ordering::SeqCst)")
         # EXTERNAL variable -> read the foreign `extern "C"` static (unsafe).
         if node.name.lower() in getattr(self, "_extern_vars", set()):
-            nm = node.name.lower()
+            nm = self._rust_ident(node.name)
             if getattr(self, "_unsafe_ctx", False):
                 return nm
             return f"(unsafe {{ {nm} }})"
         # `unsafe` the bare deref suffices; elsewhere use an inline unsafe block
         # so the expression is valid on its own.
         if node.name.lower() in getattr(self, "_name_vars", {}):
-            nm = node.name.lower()
+            nm = self._rust_ident(node.name)
             if getattr(self, "_unsafe_ctx", False):
                 return f"(*{nm})"
             return f"(unsafe {{ *{nm} }})"
@@ -2198,13 +2289,14 @@ use hal_rt::*;
         # EQUATE overlay read: VIEW -> (target as view_type), bit-preserving.
         if node.name.lower() in self._equates:
             target, view_type, _ = self._equates[node.name.lower()]
-            return f"({target} as {view_type})"
+            return f"({self._rust_ident(target)} as {view_type})"
         # ASSIGN (output) parameters are &mut references inside a procedure;
         # dereference on every use so reads and assignment targets both work.
         if node.name.lower() in getattr(self, "_assign_params", set()):
-            return f"(*{node.name.lower()})"
-        # Convert HAL/S UPPER_CASE to Rust snake_case
-        return node.name.lower()
+            return f"(*{self._rust_ident(node.name)})"
+        # Convert HAL/S UPPER_CASE to Rust snake_case (raw-escaped if it
+        # would collide with a Rust keyword).
+        return self._rust_ident(node.name)
     
     def _shift_direction(self, node):
         """Classify a SHIFT count's compile-time sign.
@@ -2256,6 +2348,9 @@ use hal_rt::*;
                     and ts.dimensions):
                 return ts.dimensions[0]
             return None
+        if isinstance(node, LiteralNode) and node.literal_type in (
+                "HEX", "OCT", "BIT") and node.bit_width is not None:
+            return node.bit_width
         if isinstance(node, BinaryOpNode) and node.operator == "||":
             lw = self._bit_width_expr(node.left)
             rw = self._bit_width_expr(node.right)
@@ -2297,24 +2392,52 @@ use hal_rt::*;
                 return f"std::array::from_fn(|i| {lt} {op} {rt})"
         # `||` is overloaded: bit concatenation for BIT operands (shift the
         # left operand up by the right operand's width and OR in the right), and
-        # string concatenation otherwise. BIT lowers to u32 here, so no width
-        # cast is needed (the u8/u16 casts in the spec are for narrower types).
+        # string concatenation otherwise. Both operands are widened to the
+        # result's unsigned type first: after the P0 #5 fix each BIT(w) picks
+        # its own narrow Rust type (u8/u16/...), so a plain `u8 << 8` would
+        # overflow and `u8 | u8` would not fit an assignment to a wider u16.
         if op == "||":
             lw = self._bit_width_expr(node.left)
             rw = self._bit_width_expr(node.right)
             left = self._generate_expression(node.left)
             right = self._generate_expression(node.right)
             if lw is not None and rw is not None:
-                return f"(({left}) << {rw}) | ({right})"
+                result_type = TypeMapper._bit_type(lw + rw)
+                # Inner parens shield {left}/{right} from `as`'s low precedence
+                # (an unparenthesized `a | b as T` binds as `a | (b as T)`).
+                return (f"((({left}) as {result_type}) << {rw}) "
+                        f"| (({right}) as {result_type})")
             return f'format!("{{}}{{}}", {left}, {right})'
+        # HAL/S MOD is mathematically non-negative (e.g. -7 MOD 3 == 2); Rust
+        # `%` is truncated-toward-zero (-7 % 3 == -1). rem_euclid gives HAL/S
+        # semantics and is defined on both integer and float types in std.
+        if op.upper() == "MOD":
+            left = self._generate_expression(node.left)
+            right = self._generate_expression(node.right)
+            return f"({left}).rem_euclid({right})"
+        # INTEGER + - * : lower to wrapping_add / wrapping_sub / wrapping_mul so
+        # behavior is deterministic across Rust debug (panic on overflow) and
+        # release (silent two's-complement wrap) profiles. HAL/S integer
+        # arithmetic is modular within the target width; wrapping was chosen
+        # over checked_* + fault-raise because the fault model currently only
+        # models divide-by-zero (extending it to OVERFLOW is a separate task).
+        if op in ("+", "-", "*") \
+                and self._numeric_kind(node.left) == "int" \
+                and self._numeric_kind(node.right) == "int":
+            method = {"+": "wrapping_add", "-": "wrapping_sub",
+                      "*": "wrapping_mul"}[op]
+            left = self._generate_expression(node.left)
+            right = self._generate_expression(node.right)
+            return f"({left}).{method}({right})"
         op_map = {
             "+": "+", "-": "-", "*": "*", "/": "/",
             "**": ".pow", "=": "==", "¬=": "!=", "~=": "!=",
             "<": "<", ">": ">", "<=": "<=", ">=": ">=",
-            "AND": "&", "OR": "|", "XOR": "^", "MOD": "%",
+            "AND": "&", "OR": "|", "XOR": "^",
         }
-        # Word operators (AND/OR/XOR/MOD) are case-insensitive in HAL/S; fall
-        # back to the upper-cased spelling so mixed-case source still maps.
+        # Word operators (AND/OR/XOR) are case-insensitive in HAL/S; fall back
+        # to the upper-cased spelling so mixed-case source still maps. (MOD is
+        # handled by its own branch above.)
         rust_op = op_map.get(op) or op_map.get(op.upper(), op)
 
         # AND/OR are logical on BOOLEAN operands (&&/||) and bitwise on BIT/
@@ -2415,7 +2538,8 @@ use hal_rt::*;
         if isinstance(node, UnaryOpNode):
             return self._numeric_kind(node.operand)
         if isinstance(node, BinaryOpNode):
-            if node.operator in ("+", "-", "*", "/", "**"):
+            op = (node.operator or "").upper()
+            if op in ("+", "-", "*", "/", "**", "MOD"):
                 lk = self._numeric_kind(node.left)
                 rk = self._numeric_kind(node.right)
                 if lk == "float" or rk == "float":
@@ -2516,13 +2640,33 @@ use hal_rt::*;
                 return f"{operand}.0[{idx_const - 1}]"
             return f"{operand}.0[({idx_src} - 1) as usize]"
 
-        # Default: bit extract (BIT registers, or unknown -> width 32).
-        width = 32
-        if isinstance(node.operand, IdentifierNode):
-            width = self._bit_widths.get(node.operand.name.lower(), 32)
+        # Default: bit extract on a BIT-typed operand. Width is derived from
+        # the operand itself so nested subscripts A$I$K use the array
+        # element's BIT(w), not a 32-bit fallback.
+        width = self._operand_bit_width(node.operand)
         if idx_const is not None:
             return f"(({operand} >> {width - idx_const}) & 1)"
         return f"(({operand} >> ({width} - {idx_src})) & 1)"
+
+    def _operand_bit_width(self, node) -> int:
+        """BIT width of a value expression, defaulting to 32 for unknowns.
+
+        Handles bare BIT identifiers (via _bit_widths, populated at pre-pass)
+        and element access of an ARRAY(N) OF BIT(w) (via _var_info + the
+        array's declared element_type). Without the array-element branch a
+        nested subscript like FLAGS$I$K would default to 32 and mis-compute
+        MSB-first bit positions on a narrower element."""
+        if isinstance(node, IdentifierNode):
+            return self._bit_widths.get(node.name.lower(), 32)
+        if isinstance(node, SubscriptNode) and isinstance(
+                node.operand, IdentifierNode):
+            ts = self._var_info.get(node.operand.name.lower())
+            if (ts is not None and ts.array_size is not None
+                    and ts.element_type is not None
+                    and ts.element_type.data_type == DataType.BIT
+                    and ts.element_type.dimensions):
+                return ts.element_type.dimensions[0]
+        return 32
 
     def _const_int(self, node) -> Optional[int]:
         """Return an int if node is an integer literal, else None."""
@@ -2553,9 +2697,7 @@ use hal_rt::*;
         For a BIT(W) register, bit 1 is the MSB. The slice [lo..hi] occupies
         the bits right-shifted by (W - hi), masked to (hi - lo + 1) bits.
         """
-        width = 32
-        if isinstance(operand_node, IdentifierNode):
-            width = self._bit_widths.get(operand_node.name.lower(), 32)
+        width = self._operand_bit_width(operand_node)
         lo = self._const_int(rng.lo)
         hi = self._const_int(rng.hi)
         if lo is not None and hi is not None:
@@ -2607,7 +2749,8 @@ use hal_rt::*;
         for decl in node.fields:
             rust_type = self.type_mapper.map_type(decl.type_spec)
             for ident in decl.identifiers:
-                self.emitter.emit_line(f"{ident.lower()}: {rust_type},")
+                self.emitter.emit_line(
+                    f"{self._rust_ident(ident)}: {rust_type},")
         self.emitter.dedent()
         self.emitter.emit_line("}")
         self.emitter.emit_line(f"impl {sname} {{")
@@ -2618,7 +2761,7 @@ use hal_rt::*;
         for decl in node.fields:
             default = self.type_mapper.get_default_value(decl.type_spec)
             for ident in decl.identifiers:
-                inits.append(f"{ident.lower()}: {default}")
+                inits.append(f"{self._rust_ident(ident)}: {default}")
         self.emitter.emit_line(f"{sname} {{ {', '.join(inits)} }}")
         self.emitter.dedent()
         self.emitter.emit_line("}")
@@ -2640,11 +2783,13 @@ use hal_rt::*;
         return False
 
     def _struct_field_names(self, type_name: str) -> list:
-        """Ordered lower-cased field names of a STRUCTURE template."""
+        """Ordered Rust-safe field names of a STRUCTURE template. Used to
+        emit field-by-field cross-layout copies, so each name lands in
+        emitted Rust and must be raw-escaped if it collides with a keyword."""
         sdef = self._structs.get((type_name or "").upper())
         if sdef is None:
             return []
-        return [ident.lower()
+        return [self._rust_ident(ident)
                 for decl in sdef.fields for ident in decl.identifiers]
 
     def _generate_cross_layout_copy(self, tgt: str, src: str,
@@ -2682,7 +2827,7 @@ use hal_rt::*;
         array element is read via read_unaligned (a plain reference into a
         packed field is rejected by the borrow checker)."""
         operand = self._generate_expression(node.operand)
-        field = node.field_name.lower()
+        field = self._rust_ident(node.field_name)
         if self._is_dense_field(node):
             return (f"unsafe {{ core::ptr::addr_of!({operand}.{field})"
                     f".read_unaligned() }}")
@@ -2732,7 +2877,7 @@ use hal_rt::*;
     def _generate_matrix_subscript(self, node: MatrixSubscriptNode) -> str:
         """M(<row>, <col>) -> row/column (Vector), element (f32), or submatrix
         (Matrix, constant ranges only)."""
-        operand = node.name.lower()
+        operand = self._rust_ident(node.name)
         if len(node.args) != 2:
             return f"/* unsupported matrix subscript arity {len(node.args)} */"
         row_spec, col_spec = node.args
@@ -2768,12 +2913,6 @@ use hal_rt::*;
             return f"{operand}.0[({r}) as usize - 1][({c}) as usize - 1]"
         return "/* unsupported matrix subscript form */"
 
-    def _const_int(self, node):
-        """Return a Python int if node is a constant integer literal, else None."""
-        if isinstance(node, LiteralNode) and isinstance(node.value, (int, float)):
-            return int(node.value)
-        return None
-
     def _generate_for(self, node: ForNode, label: str = "") -> None:
         """Generate a DO FOR loop as an inclusive Rust range loop.
 
@@ -2782,15 +2921,19 @@ use hal_rt::*;
         ranges must be low..=high. A `label` (from a labeled DO block) becomes
         a Rust loop label so `EXIT <label>` can target it.
         """
-        var = node.var.lower()
+        var = self._rust_ident(node.var)
         start = self._generate_expression(node.start)
         end = self._generate_expression(node.end)
+        # Pin the range endpoints to i32 (HAL/S FOR var is INTEGER). Without
+        # this, the loop binding stays `{integer}` and any wrapping_* call
+        # inside the body (from the P0 #2 fix) becomes ambiguous because
+        # those methods exist on multiple integer types.
         if node.descending:
             # DOWNTO: iterate start, start-1, ..., end  ->  (end..=start).rev()
-            rng = f"({end}..={start}).rev()"
+            rng = f"(({end}) as i32..=({start}) as i32).rev()"
         else:
-            rng = f"{start}..={end}"
-        lbl = f"'{label.lower()}: " if label else ""
+            rng = f"({start}) as i32..=({end}) as i32"
+        lbl = f"'{self._rust_ident(label)}: " if label else ""
         if node.step is not None:
             step = self._generate_expression(node.step)
             self.emitter.emit_line(
@@ -2884,28 +3027,31 @@ use hal_rt::*;
                 i = self._generate_expression(node.arguments[0])
                 return f"{base}.0[({i}) as usize - 1]"
         args = ", ".join(self._generate_expression(a) for a in node.arguments)
+        rust_name = self._rust_ident(node.name)
         # NONHAL external calls cross the FFI boundary and are unsafe to call.
         if node.name.lower() in getattr(self, "_extern_fns", set()):
-            return f"unsafe {{ {node.name.lower()}({args}) }}"
-        return f"{node.name.lower()}({args})"
+            return f"unsafe {{ {rust_name}({args}) }}"
+        return f"{rust_name}({args})"
 
     def _generate_extern(self, node) -> None:
         """Emit a body-less procedure/function as an `extern "C"` declaration so
         the (separately compiled) implementation resolves at link time. Used for
         NONHAL FFI functions and for TEMPLATE procedures that are CALLed:
         inputs pass by value, ASSIGN outputs by &mut, matching the call site."""
-        name = node.name.lower()
+        name = self._rust_ident(node.name)
         ptypes = {}
         for d in node.statements:
             if isinstance(d, DeclareNode):
                 for ident in d.identifiers:
                     ptypes[ident.lower()] = d.type_spec
         parts = [
-            f"{pn.lower()}: {self._full_rust_type(ptypes.get(pn.lower()))}"
+            f"{self._rust_ident(pn)}: "
+            f"{self._full_rust_type(ptypes.get(pn.lower()))}"
             for pn in node.parameters
         ]
         parts += [
-            f"{an.lower()}: &mut {self._full_rust_type(ptypes.get(an.lower()))}"
+            f"{self._rust_ident(an)}: "
+            f"&mut {self._full_rust_type(ptypes.get(an.lower()))}"
             for an in node.assign_params
         ]
         ret = (f" -> {self._full_rust_type(node.return_type)}"
@@ -2928,14 +3074,14 @@ use hal_rt::*;
     def _var_base(self, name: str) -> str:
         """Base accessor for a variable used as a subscript/element operand:
         a locked deref for mutable COMPOOL globals, the bare name for global
-        constants, an ASSIGN-param deref, else snake_case."""
+        constants, an ASSIGN-param deref, else snake_case (Rust-keyword-safe)."""
         up = name.upper()
         if up in self._globals:
             kind, _ = self._globals[up]
             return up if kind == "const" else f"(*{up}.lock().unwrap())"
         if name.lower() in getattr(self, "_assign_params", set()):
-            return f"(*{name.lower()})"
-        return name.lower()
+            return f"(*{self._rust_ident(name)})"
+        return self._rust_ident(name)
 
     def _generate_if(self, node: IfNode) -> None:
         """Generate an IF / THEN / ELSE statement."""

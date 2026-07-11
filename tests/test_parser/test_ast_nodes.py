@@ -420,9 +420,33 @@ class TestComplexAST:
         )
         
         result = program.to_dict()
-        
+
         assert result["name"] == "COMPLEX_TEST"
         assert len(result["declarations"]) == 1
         assert len(result["statements"]) == 1
         assert result["declarations"][0]["identifiers"] == ["X"]
         assert result["statements"][0]["target"]["name"] == "X"
+
+
+class TestNoShadowedDefinitions:
+    """Guard against re-introducing duplicate class definitions in ast_nodes.
+    The module previously defined OnErrorNode and ResumeNode twice each, so
+    the second definition silently shadowed the first — a latent divergence
+    trap the moment either copy was edited."""
+
+    def test_ast_node_classes_defined_exactly_once(self) -> None:
+        import ast
+        import inspect
+        from resnik.parser import ast_nodes as mod
+
+        src = inspect.getsource(mod)
+        tree = ast.parse(src)
+        seen: dict = {}
+        for node in ast.iter_child_nodes(tree):
+            if isinstance(node, ast.ClassDef):
+                seen[node.name] = seen.get(node.name, 0) + 1
+        duplicates = {name: n for name, n in seen.items() if n > 1}
+        assert not duplicates, (
+            f"Duplicate class definitions in ast_nodes: {duplicates}. "
+            "Each class must appear exactly once — a second @dataclass "
+            "silently shadows the first and hides divergence.")

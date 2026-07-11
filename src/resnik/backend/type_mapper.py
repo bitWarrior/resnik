@@ -30,18 +30,35 @@ class TypeMapper:
     TYPE_MAP = {
         DataType.INTEGER: "i32",
         DataType.SCALAR: "f32",  # Default to single precision
-        DataType.BIT: "u32",   # bit string -> unsigned register
+        DataType.BIT: "u32",   # bit string -> unsigned register (see _bit_type)
         DataType.BOOLEAN: "bool",
         DataType.EVENT: "bool",  # host stub: latched flag (advisory)
         DataType.CHARACTER: "String",
     }
-    
+
     def _scalar_type(self, precision) -> str:
         """Resolve SCALAR element type from precision (f32 single, f64 double).
         Accepts the Precision enum or a plain string."""
         if precision in (Precision.DOUBLE, "double", "DOUBLE"):
             return "f64"
         return "f32"
+
+    @staticmethod
+    def _bit_type(width: Optional[int]) -> str:
+        """Pick the narrowest unsigned Rust type that holds a BIT(width). BIT
+        without a declared width falls back to u32. Element-narrowing matters
+        because an ARRAY(N) OF BIT(w) is [T; N] — using u32 for BIT(8) wastes
+        24 bits per element, and misrepresents the on-wire width of packed
+        register / downlink buffers."""
+        if width is None or width <= 0:
+            return "u32"
+        if width <= 8:
+            return "u8"
+        if width <= 16:
+            return "u16"
+        if width <= 32:
+            return "u32"
+        return "u64"
 
     def map_type(self, type_spec: Optional[TypeSpec]) -> str:
         """
@@ -72,13 +89,18 @@ class TypeMapper:
                 rows, cols = 3, 3
             return f"Matrix<{rows}, {cols}>"
         
+        # BIT(w) -> narrowest fitting unsigned type (u8/u16/u32/u64).
+        if type_spec.data_type == DataType.BIT:
+            width = type_spec.dimensions[0] if type_spec.dimensions else None
+            return self._bit_type(width)
+
         # Get base type
         base_type = self.TYPE_MAP.get(type_spec.data_type, "i32")
-        
+
         # For SCALAR, single precision -> f32, double precision -> f64
         if type_spec.data_type == DataType.SCALAR:
             base_type = self._scalar_type(type_spec.precision)
-        
+
         return base_type
     
     def map_literal_type(self, literal_type: str) -> str:

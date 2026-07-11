@@ -1,0 +1,76 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments (repo-local and common defaults)
+resnik-venv/
+.venv/
+venv/
+env/
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+*.egg
+pip-wheel-metadata/
+
+# Test + coverage output
+.pytest_cache/
+.tox/
+.nox/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.hypothesis/
+
+# Type checkers + linters
+.mypy_cache/
+.ruff_cache/
+.pyre/
+.pytype/
+.dmypy.json
+
+# Build backends
+.hatch/
+
+# Rust build artifacts (target/ appears under generated Cargo projects, e.g.
+# the cortex-m no_std scaffold emitted by the backend)
+target/
+Cargo.lock
+
+# Compiled objects / shared libs (i2c.o and friends land here)
+*.o
+*.so
+*.dylib
+*.dll
+*.a
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Jupyter (if used for exploratory work)
+.ipynb_checkpoints/
+
+# Local secrets / environment overrides
+.env
+.env.local
+
+# Known stray artifacts at repo root
+# Once these are cleaned up (delete or move to examples/), the entries below
+# can be removed — they exist so a fresh clone doesn't reintroduce them.
+/firmware_main.rs
+/work_to_go.md
