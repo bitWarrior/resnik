@@ -262,6 +262,36 @@ class RustCodeGenerator:
     # roles the parser reserves). A trailing underscore suffix disambiguates.
     _RUST_KEYWORDS_NO_RAW = frozenset({"crate", "self", "super"})
 
+    @staticmethod
+    def _escape_rust_string(s: str) -> str:
+        """Escape a Python string so it can be embedded between `"..."` as a
+        Rust string literal without losing bytes or terminating early.
+
+        Order matters: backslash first, then quote, then the named control
+        escapes Rust recognises (\\n, \\r, \\t, \\0). Any remaining C0 or
+        DEL byte becomes a `\\xNN` hex escape. Printable UTF-8 passes
+        through unchanged -- Rust source is UTF-8, so no re-encoding needed.
+        """
+        out = []
+        for ch in s:
+            if ch == "\\":
+                out.append("\\\\")
+            elif ch == '"':
+                out.append('\\"')
+            elif ch == "\n":
+                out.append("\\n")
+            elif ch == "\r":
+                out.append("\\r")
+            elif ch == "\t":
+                out.append("\\t")
+            elif ch == "\0":
+                out.append("\\0")
+            elif ord(ch) < 0x20 or ord(ch) == 0x7F:
+                out.append(f"\\x{ord(ch):02X}")
+            else:
+                out.append(ch)
+        return "".join(out)
+
     @classmethod
     def _rust_ident(cls, name: str) -> str:
         """Lowercase a HAL/S source identifier and rewrite it if the result
@@ -2233,9 +2263,13 @@ use hal_rt::*;
                 val_str += ".0"
             return val_str
         elif node.literal_type == "STRING":
-            # Escape quotes and return as Rust string
-            escaped = str(value).replace('"', '\\"')
-            return f'"{escaped}"'
+            # HAL/S source strings are preserved verbatim: every char that
+            # Rust's string-literal grammar would reinterpret (backslash,
+            # double-quote, control chars) gets escaped so the emitted
+            # literal represents the same bytes the HAL/S programmer wrote.
+            # Previously only `"` was escaped, so a HAL/S value containing
+            # `\` produced an unterminated Rust string.
+            return f'"{self._escape_rust_string(str(value))}"'
         elif node.literal_type == "BIT":
             if isinstance(value, bool):
                 return "true" if value else "false"

@@ -2929,6 +2929,52 @@ class TestNonhalExternalFunctions:
         assert 'extern "C"' in code
 
 
+class TestStringLiteralEscaping:
+    """HAL/S source strings must be reproduced byte-for-byte in the emitted
+    Rust literal. The previous implementation only escaped `"`, so any HAL/S
+    value containing a backslash produced an unterminated Rust string, and a
+    newline/tab in the value silently changed length. This class exercises
+    each escape class directly against `_generate_literal`."""
+
+    def _emit(self, value: str) -> str:
+        gen = RustCodeGenerator()
+        return gen._generate_expression(
+            LiteralNode(value=value, literal_type="STRING"))
+
+    def test_backslash_is_doubled(self) -> None:
+        # Regression: `\` used to pass through verbatim, producing `"\"` --
+        # an unterminated Rust string.
+        assert self._emit("a\\b") == '"a\\\\b"'
+
+    def test_double_quote_is_escaped(self) -> None:
+        assert self._emit('a"b') == '"a\\"b"'
+
+    def test_backslash_before_quote_escapes_both(self) -> None:
+        # Order matters: `\` escapes first, then `"` gets its own `\"`;
+        # otherwise the escaped-quote's leading backslash would itself be
+        # doubled and the literal would end at the wrong byte.
+        assert self._emit('\\"') == '"\\\\\\""'
+
+    def test_named_control_escapes(self) -> None:
+        assert self._emit("a\nb") == '"a\\nb"'
+        assert self._emit("a\rb") == '"a\\rb"'
+        assert self._emit("a\tb") == '"a\\tb"'
+        assert self._emit("a\0b") == '"a\\0b"'
+
+    def test_other_control_chars_hex_escape(self) -> None:
+        # ASCII BEL (0x07) has no named Rust escape -> \x07.
+        assert self._emit("a\x07b") == '"a\\x07b"'
+        # DEL (0x7F) is also a control byte in Rust's grammar.
+        assert self._emit("a\x7Fb") == '"a\\x7Fb"'
+
+    def test_printable_ascii_unchanged(self) -> None:
+        assert self._emit("Hello, World!") == '"Hello, World!"'
+
+    def test_utf8_passes_through(self) -> None:
+        # Rust source is UTF-8; multi-byte chars need no re-encoding.
+        assert self._emit("π ≈ 3.14") == '"π ≈ 3.14"'
+
+
 class TestBitConcatenation:
     """`||` overload: bit concatenation on BIT vs string concat on CHARACTER."""
 

@@ -5,7 +5,7 @@ Modern HAL/S Parser with full type annotations.
 import json
 import sys
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 from rply import ParserGenerator
 
@@ -181,9 +181,13 @@ class Parser:
                 ("left", ["KEYWORD_OR", "VBAR"]),
                 ("left", ["KEYWORD_XOR"]),
                 ("left", ["KEYWORD_AND", "AMPERSAND"]),
-                # `=` as equality in expressions
-                ("left", ["ASSIGN"]),
-                ("left", ["LT", "GT", "LE", "GE", "NE"]),
+                # HAL/S relationals share one left-associative precedence
+                # level (LRM: equality `=` is a relational operator, not a
+                # separate tier), so `A = B < C` reduces left-to-right as
+                # `(A = B) < C`. Keeping `=` on a separate lower tier would
+                # match C's convention -- `A = (B < C)` -- but is wrong for
+                # HAL/S.
+                ("left", ["ASSIGN", "LT", "GT", "LE", "GE", "NE"]),
                 ("left", ["PLUS", "MINUS", "CONCAT"]),
                 ("left", ["MULTIPLY", "DIVIDE", "KEYWORD_MOD"]),
                 ("right", ["POWER"]),
@@ -195,8 +199,15 @@ class Parser:
         self.symbol_table = SymbolTable()
         self.errors: List[ParserError] = []
         self.ast: Optional[ASTNode] = None
+        # Procedure signature/type maps -- populated by _build_procedure as
+        # each PROCEDURE is reduced, and consulted by _check_call_signatures.
+        # All three must be initialised here (not lazily in parse()) so that
+        # any code path that calls _build_procedure or _check_call_signatures
+        # before parse() runs -- e.g. tests exercising a single production --
+        # does not AttributeError on the missing dict.
         self._proc_signatures: Dict[str, tuple] = {}
         self._proc_assign_types: Dict[str, list] = {}
+        self._proc_param_types: Dict[str, list] = {}
 
         self._define_grammar()
         self.parser = self.pg.build()

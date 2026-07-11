@@ -230,3 +230,110 @@ class TestTemplateInclude:
         assert lx.errors == []
         assert any("argument 'A' does not match" in e.message
                    for e in p.errors)
+
+
+class TestParserInitState:
+    """Every dict Parser writes to must exist immediately after __init__,
+    without waiting for parse() to run. _proc_param_types used to be
+    initialised lazily inside parse(), so any code path that consulted or
+    populated it before a parse -- e.g. a test that reused a Parser and
+    called _check_call_signatures directly -- died with AttributeError.
+    Guarding all three sibling maps here so a future accidental drop
+    trips a specific test rather than a mysterious crash."""
+
+    def test_proc_type_maps_initialised_before_parse(self) -> None:
+        p = Parser()
+        # Each map is created empty by __init__ and is safe to read
+        # before parse() has ever been called.
+        assert p._proc_signatures == {}
+        assert p._proc_assign_types == {}
+        assert p._proc_param_types == {}
+
+    def test_check_call_signatures_reads_param_types_pre_parse(self) -> None:
+        """Directly exercise the read site (`_proc_param_types.get(...)` in
+        _check_call_signatures) on a Parser that hasn't been through parse().
+        Register a fake procedure so the code path reaches the param-types
+        lookup instead of short-circuiting on an unknown call."""
+        from resnik.parser.ast_nodes import CallNode, IdentifierNode
+        p = Parser()
+        # Register a known procedure so `sig is not None` at line 411 and
+        # execution reaches `self._proc_param_types.get(...)` at line 435.
+        p._proc_signatures["FAKE"] = (1, 0)
+        call = CallNode(
+            name="FAKE",
+            arguments=[IdentifierNode(name="X")],
+            assign_args=[],
+        )
+        p._check_call_signatures([call])  # must not AttributeError
+
+    def test_dict_import_resolves_at_module_level(self) -> None:
+        """The `Dict[...]` annotations in Parser.__init__ reference `Dict`
+        from the module's typing import. If the import silently drops
+        `Dict`, runtime survives (annotations on assignments are lazy) but
+        any tool that resolves the annotation via the module namespace
+        crashes with NameError."""
+        import resnik.parser.parser as mod
+        # A dropped import would surface as AttributeError here.
+        assert mod.Dict is not None
+
+
+class TestRelationalPrecedence:
+    """HAL/S puts `=` (equality) at the same precedence level as `<`, `>`,
+    `<=`, `>=`, `¬=`, all left-associative. The parser used to put `=` on
+    a lower tier, matching C's convention (so `A = B < C` reduced as
+    `A = (B < C)`). This class pins the HAL/S behaviour so a future
+    precedence-table edit trips a specific test rather than silently
+    changing expression semantics."""
+
+    def _cond(self, src_expr: str):
+        """Return the AST of the IF-condition in a program that wraps
+        `src_expr` in an IF. Forces `=` into expression (equality) context,
+        not statement (assignment) context."""
+        from resnik import Lexer, Parser
+        from resnik.parser.ast_nodes import IfNode
+        p = Parser()
+        src = (
+            "T: PROGRAM;"
+            " DECLARE A INTEGER; DECLARE B INTEGER; DECLARE C INTEGER;"
+            f" IF {src_expr} THEN A = 1;"
+            " CLOSE T;"
+        )
+        ast = p.parse(Lexer().tokenize(src, "t"))
+        assert p.errors == [], p.errors
+        for stmt in ast.statements:
+            if isinstance(stmt, IfNode):
+                return stmt.condition
+        raise AssertionError("no IF found in parse tree")
+
+    def test_equality_and_lt_are_same_level_left_to_right(self) -> None:
+        # `A = B < C` -> `(A = B) < C`
+        cond = self._cond("A = B < C")
+        assert cond.operator == "<"
+        assert cond.left.operator == "="
+        assert cond.left.left.name == "A"
+        assert cond.left.right.name == "B"
+        assert cond.right.name == "C"
+
+    def test_lt_then_equality_left_to_right(self) -> None:
+        # `A < B = C` -> `(A < B) = C`
+        cond = self._cond("A < B = C")
+        assert cond.operator == "="
+        assert cond.left.operator == "<"
+        assert cond.left.left.name == "A"
+        assert cond.left.right.name == "B"
+        assert cond.right.name == "C"
+
+    def test_chained_equality_left_to_right(self) -> None:
+        # `A = B = C` -> `(A = B) = C`
+        cond = self._cond("A = B = C")
+        assert cond.operator == "="
+        assert cond.left.operator == "="
+        assert cond.left.left.name == "A"
+        assert cond.left.right.name == "B"
+        assert cond.right.name == "C"
+
+    def test_le_ge_ne_share_the_level(self) -> None:
+        # `A <= B >= C` -> `(A <= B) >= C`
+        cond = self._cond("A <= B >= C")
+        assert cond.operator == ">="
+        assert cond.left.operator == "<="
