@@ -61,7 +61,7 @@ from resnik.parser.ast_nodes import (
     IdentifierNode,
 )
 from resnik.types import DataType, Precision, TypeSpec
-from resnik.parser.symbol_table import SymbolTable
+from resnik.parser.symbol_table import Symbol, SymbolTable
 
 
 class Parser:
@@ -117,6 +117,7 @@ class Parser:
                 "KEYWORD_DOWNTO",
                 "KEYWORD_EXIT",
                 "KEYWORD_GO",
+                "KEYWORD_GOTO",
                 "KEYWORD_NAME",
                 "KEYWORD_NONHAL",
                 "KEYWORD_EXTERNAL",
@@ -285,7 +286,9 @@ class Parser:
         adims = tuple(ts.array_dims) if getattr(ts, "array_dims", None) else ()
         elem = self._type_shape(ts.element_type) \
             if getattr(ts, "element_type", None) else None
-        return (ts.data_type, dims, adims, elem)
+        tname = (ts.type_name.upper() if getattr(ts, "type_name", None) else None)
+        is_name = bool(getattr(ts, "is_name", False))
+        return (ts.data_type, dims, adims, elem, tname, is_name)
 
     def _check_bit_concat(self, body: list) -> None:
         """`||` on BIT operands concatenates their bit widths. Assigning the
@@ -349,23 +352,29 @@ class Parser:
                 for ident in stmt.identifiers:
                     var_types[ident.lower()] = stmt.type_spec
 
-        def array_size(node):
+        def array_shape(node):
             if isinstance(node, IdentifierNode):
                 ts = var_types.get(node.name.lower())
-                if ts is not None and ts.array_size is not None:
-                    return ts.array_size
+                if ts is None:
+                    return None
+                if ts.array_dims:
+                    return tuple(ts.array_dims)
+                if ts.array_size is not None:
+                    return (ts.array_size,)
             return None
 
         for node in self._walk_nodes(body):
             if isinstance(node, BinaryOpNode) and node.operator in (
                     "+", "-", "*", "/"):
-                ls = array_size(node.left)
-                rs = array_size(node.right)
+                ls = array_shape(node.left)
+                rs = array_shape(node.right)
                 if ls is not None and rs is not None and ls != rs:
+                    ltxt = ",".join(str(d) for d in ls)
+                    rtxt = ",".join(str(d) for d in rs)
                     self.errors.append(
                         SemanticError(
-                            f"array dimension mismatch: ARRAY({ls}) "
-                            f"{node.operator} ARRAY({rs}) -- element-wise "
+                            f"array dimension mismatch: ARRAY({ltxt}) "
+                            f"{node.operator} ARRAY({rtxt}) -- element-wise "
                             "operations require equal lengths",
                             getattr(node, "line", 0),
                             getattr(node, "column", 0),
@@ -445,9 +454,12 @@ class Parser:
             itypes = self._proc_param_types.get(call.name.upper())
             if itypes and len(call.arguments) == len(itypes):
                 for arg, pts in zip(call.arguments, itypes):
-                    name = getattr(arg, "name", None)
-                    if name is None or pts is None:
+                    # Only a bare identifier is a typed variable. FunctionCall /
+                    # MatrixSubscript also have .name (the callee/matrix) and
+                    # must not be typed as that whole object.
+                    if not isinstance(arg, IdentifierNode) or pts is None:
                         continue
+                    name = arg.name
                     ats = var_types.get(name.lower())
                     if ats is None:
                         continue
@@ -466,9 +478,9 @@ class Parser:
             ptypes = self._proc_assign_types.get(call.name.upper())
             if ptypes and len(call.assign_args) == len(ptypes):
                 for arg, pts in zip(call.assign_args, ptypes):
-                    name = getattr(arg, "name", None)
-                    if name is None or pts is None:
+                    if not isinstance(arg, IdentifierNode) or pts is None:
                         continue
+                    name = arg.name
                     ats = var_types.get(name.lower())
                     if ats is None:
                         continue
@@ -576,6 +588,9 @@ class Parser:
         # body items as statements (declarations are extracted by codegen).
         self._check_declaration_order(
             statements, "FUNCTION" if return_type is not None else "PROCEDURE")
+        self._check_call_signatures(statements)
+        self._check_array_dims(statements)
+        self._check_bit_concat(statements)
         return ProcedureNode(
             name=name,
             parameters=params,
@@ -942,6 +957,17 @@ class Parser:
         def goto_statement(p: List[Any]) -> GotoNode:
             return GotoNode(
                 label=p[2].value,
+                line=getattr(p[0], "line", 0),
+                column=getattr(p[0], "column", 0),
+            )
+
+        # GOTO <label>;  -- one-token spelling (same AST as GO TO).
+        @self.pg.production(
+            "statement : KEYWORD_GOTO IDENTIFIER SEMICOLON"
+        )
+        def goto_keyword_statement(p: List[Any]) -> GotoNode:
+            return GotoNode(
+                label=p[1].value,
                 line=getattr(p[0], "line", 0),
                 column=getattr(p[0], "column", 0),
             )
@@ -2627,33 +2653,97 @@ class Parser:
         return self._apply_macros(stripped, macros)
 
     def _expand_replace(self, tokens: List[Token]) -> List[Token]:
-        """Apply HAL/S REPLACE <name> BY <tokens>; macro substitution.
+        """Apply HAL/S REPLACE <name> BY <tokens>; and parameterized
+        REPLACE <name>(params) BY <tokens>; substitution.
 
         Definitions are collected and removed; subsequent IDENTIFIER tokens
         whose name matches a macro are replaced by the macro's token list.
         Forward references only (definitions precede uses), which matches the
         directive-at-top convention in the source.
         """
-        macros: dict = {}
+        simple: dict = {}
+        parametric: dict = {}
         out: List[Token] = []
         i = 0
         n = len(tokens)
         while i < n:
             tok = tokens[i]
             if tok.type == "KEYWORD_REPLACE":
-                # REPLACE IDENTIFIER BY <value tokens...> SEMICOLON
-                if i + 2 < n and tokens[i + 1].type == "IDENTIFIER":
-                    name = tokens[i + 1].lexeme.upper()
-                    j = i + 3  # skip REPLACE, name, BY
+                if i + 1 >= n or tokens[i + 1].type != "IDENTIFIER":
+                    self.errors.append(ParserError(
+                        "Malformed REPLACE: expected a name",
+                        tok.line, tok.column))
+                    i += 1
+                    continue
+                name = tokens[i + 1].lexeme.upper()
+                k = i + 2
+                if k < n and tokens[k].type == "LPAREN":
+                    argls, end = self._read_paren_args(tokens, k)
+                    if argls is None or end >= n or tokens[end].type != "KEYWORD_BY":
+                        self.errors.append(ParserError(
+                            f"Malformed parameterized REPLACE '{name}' "
+                            "(expected REPLACE name(params) BY ...;)",
+                            tok.line, tok.column))
+                        i += 1
+                        continue
+                    params: List[str] = []
+                    bad_params = False
+                    for a in argls:
+                        if len(a) == 1 and a[0].type == "IDENTIFIER":
+                            params.append(a[0].lexeme.upper())
+                        else:
+                            self.errors.append(ParserError(
+                                f"REPLACE '{name}' parameters must be "
+                                "identifiers", tok.line, tok.column))
+                            bad_params = True
+                            break
+                    if bad_params:
+                        i += 1
+                        continue
+                    j = end + 1
+                    body: List[Token] = []
+                    while j < n and tokens[j].type != "SEMICOLON":
+                        body.append(tokens[j])
+                        j += 1
+                    parametric[name] = (params, body)
+                    i = j + 1
+                    continue
+                if k < n and tokens[k].type == "KEYWORD_BY":
+                    j = k + 1
                     value: List[Token] = []
                     while j < n and tokens[j].type != "SEMICOLON":
                         value.append(tokens[j])
                         j += 1
-                    macros[name] = value
-                    i = j + 1  # skip past the terminating SEMICOLON
+                    simple[name] = value
+                    i = j + 1
                     continue
-            if tok.type == "IDENTIFIER" and tok.lexeme.upper() in macros:
-                out.extend(macros[tok.lexeme.upper()])
+                self.errors.append(ParserError(
+                    f"Malformed REPLACE '{name}': expected BY",
+                    tok.line, tok.column))
+                i += 1
+                continue
+            if (tok.type == "IDENTIFIER" and tok.lexeme.upper() in parametric
+                    and i + 1 < n and tokens[i + 1].type == "LPAREN"):
+                params, body = parametric[tok.lexeme.upper()]
+                args, end = self._read_paren_args(tokens, i + 1)
+                if args is None:
+                    out.append(tok)
+                    i += 1
+                    continue
+                if len(args) != len(params):
+                    self.errors.append(ParserError(
+                        f"REPLACE '{tok.lexeme}' expects {len(params)} "
+                        f"argument(s), got {len(args)}",
+                        tok.line, tok.column))
+                    out.append(tok)
+                    i += 1
+                    continue
+                expanded = self._expand_one_macro(tok, params, body, args)
+                out.extend(expanded)
+                i = end  # do not swallow a following ';'; this is an expression
+                continue
+            if tok.type == "IDENTIFIER" and tok.lexeme.upper() in simple:
+                out.extend(simple[tok.lexeme.upper()])
                 i += 1
                 continue
             out.append(tok)
@@ -2671,6 +2761,13 @@ class Parser:
     # calls and subscripts and is not handled by this pass.
     _IMPLICIT_MUL_RIGHT_OPS = frozenset({"IDENTIFIER", "NUMBER"})
 
+    def _should_insert_multiply(self, left: str, right: str) -> bool:
+        """True when juxtaposition of `left` then `right` is a product."""
+        if left in self._IMPLICIT_MUL_LEFT_OPS and right in self._IMPLICIT_MUL_RIGHT_OPS:
+            return True
+        # 2(X+1) and (A+B)(C+D). IDENTIFIER LPAREN is a call/subscript.
+        return right == "LPAREN" and left in ("NUMBER", "RPAREN")
+
     def _insert_implicit_multiply(self, tokens: List[Token]) -> List[Token]:
         """HAL/S multiplies adjacent operands by juxtaposition (e.g. `I W` means
         `I * W`, and `ATTITUDE(1) RAD_TO_DEG` means the element times the scalar).
@@ -2681,13 +2778,13 @@ class Parser:
 
         The left operand may end in IDENTIFIER, NUMBER, or RPAREN (a subscript,
         call, or grouped expression); the right must START an operand, so it is
-        IDENTIFIER or NUMBER. Insertion is SUPPRESSED:
+        IDENTIFIER or NUMBER. `2(X+1)` and `(A)(B)` also insert `*` (`NUMBER` or
+        `RPAREN` followed by `LPAREN`). `IDENTIFIER LPAREN` is a call/subscript
+        and is not multiplied. Insertion is SUPPRESSED:
           * inside DECLARE statements -- a variable name sits next to a
             structure-template name (`DECLARE PRIMARY_ALARM NODE STRUCTURE;`);
           * immediately after a WRITE/READ channel `)` -- there the following
             token is the first I/O item (`WRITE(6) X`), not a multiplicand.
-        Paren-start juxtaposition (`A (B)`, `(A)(B)`) is still not handled, as it
-        collides with calls and subscripts.
         """
         out: List[Token] = []
         in_declare = False
@@ -2706,8 +2803,7 @@ class Parser:
             do_suppress = suppress_next
             suppress_next = False
             if (not in_declare and not do_suppress and out
-                    and out[-1].type in self._IMPLICIT_MUL_LEFT_OPS
-                    and t in self._IMPLICIT_MUL_RIGHT_OPS):
+                    and self._should_insert_multiply(out[-1].type, t)):
                 out.append(Token(
                     type="MULTIPLY", lexeme="*",
                     line=tok.line, column=tok.column, file=tok.file,
@@ -2757,6 +2853,11 @@ class Parser:
         try:
             value = int(digits, base) if digits else 0
         except ValueError:
+            self.errors.append(ParserError(
+                f"Invalid {lit} literal {raw}",
+                getattr(tok, "line", 0),
+                getattr(tok, "column", 0),
+            ))
             value = 0
         bit_width = len(digits) * bits_per_digit if digits else None
         return LiteralNode(
@@ -2766,6 +2867,62 @@ class Parser:
             line=getattr(tok, "line", 0),
             column=getattr(tok, "column", 0),
         )
+
+    def _register_declare(self, node: DeclareNode) -> None:
+        """Enter each identifier of a DECLARE into the current scope."""
+        ts = node.type_spec or TypeSpec(data_type=DataType.UNKNOWN)
+        for ident in node.identifiers:
+            try:
+                self.symbol_table.declare(Symbol(
+                    name=ident,
+                    type_spec=ts,
+                    scope=self.symbol_table.current_scope_name,
+                    is_constant=node.is_constant,
+                    line=node.line,
+                    column=node.column,
+                ))
+            except SemanticError as exc:
+                self.errors.append(exc)
+
+    def _collect_symbols(self, node: Optional[ASTNode]) -> None:
+        """Walk the AST, recording DECLAREs and rejecting same-scope duplicates.
+
+        PROGRAM / TASK / PROCEDURE / COMPOOL each open a scope. Structure
+        field names stay inside the template and are not block-level symbols.
+        """
+        if node is None:
+            return
+        if isinstance(node, CompilationNode):
+            for unit in node.units:
+                self._collect_symbols(unit)
+            return
+        if isinstance(node, (ProgramNode, TaskNode, ProcedureNode)):
+            self.symbol_table.enter_scope(node.name.upper())
+            for stmt in node.statements:
+                self._collect_symbols(stmt)
+            for proc in getattr(node, "procedures", None) or []:
+                self._collect_symbols(proc)
+            for task in getattr(node, "tasks", None) or []:
+                self._collect_symbols(task)
+            self.symbol_table.exit_scope()
+            return
+        if isinstance(node, CompoolNode):
+            self.symbol_table.enter_scope(node.name.upper())
+            for decl in node.declarations:
+                if isinstance(decl, DeclareNode):
+                    self._register_declare(decl)
+            self.symbol_table.exit_scope()
+            return
+        if isinstance(node, DeclareNode):
+            self._register_declare(node)
+            return
+        if isinstance(node, StructureDefNode):
+            return
+        for value in vars(node).values():
+            items = value if isinstance(value, list) else [value]
+            for item in items:
+                if isinstance(item, ASTNode):
+                    self._collect_symbols(item)
 
     def _check_exit_context(self, node: ASTNode, in_loop: bool,
                             labels: frozenset = frozenset()) -> None:
@@ -2866,6 +3023,7 @@ class Parser:
 
             self.ast = self.parser.parse(iter(rply_tokens))
             if self.ast is not None:
+                self._collect_symbols(self.ast)
                 self._check_exit_context(self.ast, in_loop=False)
             return self.ast
 

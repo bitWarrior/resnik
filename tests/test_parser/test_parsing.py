@@ -592,6 +592,24 @@ class TestImplicitMultiplyTransform:
             ("IDENTIFIER", "B"), ("RPAREN", ")"),
         ) == ["IDENTIFIER", "LPAREN", "IDENTIFIER", "RPAREN"]
 
+    def test_number_lparen_inserts_multiply(self) -> None:
+        # 2(X+1) is juxtaposition multiply, not a call.
+        assert self._run(
+            ("NUMBER", "2"), ("LPAREN", "("),
+            ("IDENTIFIER", "X"), ("PLUS", "+"), ("NUMBER", "1"),
+            ("RPAREN", ")"),
+        ) == ["NUMBER", "MULTIPLY", "LPAREN",
+              "IDENTIFIER", "PLUS", "NUMBER", "RPAREN"]
+
+    def test_rparen_lparen_inserts_multiply(self) -> None:
+        # (A)(B) is a product of two grouped operands.
+        assert self._run(
+            ("LPAREN", "("), ("IDENTIFIER", "A"), ("RPAREN", ")"),
+            ("LPAREN", "("), ("IDENTIFIER", "B"), ("RPAREN", ")"),
+        ) == ["LPAREN", "IDENTIFIER", "RPAREN",
+              "MULTIPLY",
+              "LPAREN", "IDENTIFIER", "RPAREN"]
+
     def test_declare_variable_name_next_to_template_name(self) -> None:
         # DECLARE PRIMARY NODE STRUCTURE;  -- the case the review named
         # explicitly. PRIMARY (variable) and NODE (template) are BOTH
@@ -738,3 +756,85 @@ class TestRelationalPrecedence:
         cond = self._cond("A <= B >= C")
         assert cond.operator == ">="
         assert cond.left.operator == "<="
+
+
+class TestParserLogicFixes:
+    """End-to-end coverage for the lexer/parser logic-error fixes."""
+
+    def _parse(self, src: str):
+        p = Parser()
+        ast = p.parse(Lexer().tokenize(src, "<t>"))
+        return p, ast
+
+    def test_duplicate_declare_is_a_semantic_error(self) -> None:
+        p, ast = self._parse(
+            "P: PROGRAM; DECLARE X INTEGER; DECLARE X SCALAR; CLOSE P;"
+        )
+        assert ast is not None
+        assert any("already declared" in e.message for e in p.errors)
+
+    def test_same_name_in_nested_procedure_is_allowed(self) -> None:
+        p, ast = self._parse(
+            "P: PROGRAM; DECLARE X INTEGER; "
+            "Q: PROCEDURE; DECLARE X SCALAR; CLOSE Q; CLOSE P;"
+        )
+        assert ast is not None
+        assert p.errors == [], p.errors
+
+    def test_call_arity_checked_inside_procedure(self) -> None:
+        p, ast = self._parse(
+            "P: PROGRAM; "
+            "Q: PROCEDURE(A); DECLARE A INTEGER; CALL Q(A, A); CLOSE Q; "
+            "CLOSE P;"
+        )
+        assert any("2 input argument" in e.message for e in p.errors)
+
+    def test_call_element_arg_is_not_typed_as_the_matrix(self) -> None:
+        p, ast = self._parse(
+            "P: PROGRAM; DECLARE M MATRIX(3,3); DECLARE S SCALAR; "
+            "Q: PROCEDURE(X) ASSIGN(Y); DECLARE X SCALAR; DECLARE Y SCALAR; "
+            "CLOSE Q; CALL Q(M(1, 2)) ASSIGN(S); CLOSE P;"
+        )
+        assert not any("does not match the type" in e.message for e in p.errors)
+
+    def test_goto_one_token_parses(self) -> None:
+        p, ast = self._parse(
+            "P: PROGRAM; GOTO L; L: X = 1; CLOSE P;"
+        )
+        assert p.errors == [], p.errors
+        assert ast is not None
+
+    def test_number_times_paren_group_parses(self) -> None:
+        from resnik.parser.ast_nodes import AssignmentNode
+        p, ast = self._parse(
+            "P: PROGRAM; DECLARE X SCALAR; DECLARE Y SCALAR; "
+            "X = 2(Y+1); CLOSE P;"
+        )
+        assert p.errors == [], p.errors
+        assigns = [s for s in ast.statements if isinstance(s, AssignmentNode)]
+        assert assigns[0].value.operator == "*"
+
+    def test_parameterized_replace_substitutes_args(self) -> None:
+        p, ast = self._parse(
+            "P: PROGRAM; DECLARE Y SCALAR; DECLARE A SCALAR; DECLARE Z SCALAR; "
+            "REPLACE BETA(X, ANGLE) BY X + ANGLE; "
+            "Z = BETA(Y, A); CLOSE P;"
+        )
+        assert p.errors == [], p.errors
+        from resnik.parser.ast_nodes import AssignmentNode
+        assigns = [s for s in ast.statements if isinstance(s, AssignmentNode)]
+        expr = assigns[0].value
+        assert expr.operator == "+"
+        assert expr.left.name == "Y"
+        assert expr.right.name == "A"
+
+    def test_simple_replace_still_works(self) -> None:
+        p, ast = self._parse(
+            "P: PROGRAM; REPLACE K BY 1; X = K; CLOSE P;"
+        )
+        assert p.errors == [], p.errors
+        from resnik.parser.ast_nodes import AssignmentNode, LiteralNode
+        assigns = [s for s in ast.statements if isinstance(s, AssignmentNode)]
+        assert isinstance(assigns[0].value, LiteralNode)
+        assert assigns[0].value.value == 1
+

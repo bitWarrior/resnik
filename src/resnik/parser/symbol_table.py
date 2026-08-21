@@ -66,13 +66,14 @@ class SymbolTable:
         Raises:
             SemanticError: If symbol already declared in current scope
         """
-        if symbol.name in self.scopes[-1]:
+        key = symbol.name.upper()
+        if key in self.scopes[-1]:
             raise SemanticError(
                 f"Variable '{symbol.name}' already declared in this scope",
                 symbol.line,
                 symbol.column,
             )
-        self.scopes[-1][symbol.name] = symbol
+        self.scopes[-1][key] = symbol
 
     def lookup(self, name: str) -> Optional[Symbol]:
         """
@@ -84,9 +85,10 @@ class SymbolTable:
         Returns:
             Symbol if found, None otherwise
         """
+        key = name.upper()
         for scope in reversed(self.scopes):
-            if name in scope:
-                return scope[name]
+            if key in scope:
+                return scope[key]
         return None
 
     def is_declared(self, name: str) -> bool:

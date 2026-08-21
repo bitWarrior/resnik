@@ -104,8 +104,10 @@ class Lexer:
         # Character strings
         self.lg.add("STRING", r"'([^']|'')*'")
 
-        # Identifiers and keywords
-        self.lg.add("IDENTIFIER", r"[A-Za-z][A-Za-z0-9_]{0,31}")
+        # Identifiers and keywords. Length is capped at 32 after the match so a
+        # longer name is one token plus a lexer error, not a silent split
+        # (which juxtaposition-multiply would then treat as a product).
+        self.lg.add("IDENTIFIER", r"[A-Za-z][A-Za-z0-9_]*")
 
         # Ignore whitespace
         self.lg.ignore(r"[ \t]+")
@@ -214,6 +216,9 @@ class Lexer:
                     if i < len(line) - 1 and line[i : i + 2] == "*/":
                         in_block_comment = False
                         i += 2
+                        # HAL/S comments are whitespace; keep a token boundary
+                        # so `X/*c*/Y` stays two identifiers, not `XY`.
+                        processed_line.append(" ")
                         continue
                     i += 1
                     continue
@@ -316,6 +321,35 @@ class Lexer:
                 return False
         return True
 
+    def _validate_bitliteral(
+        self, token_value: str, line: int, column: int
+    ) -> bool:
+        """Validate suffix-form 'digits'[BHO] against the declared base."""
+        match = re.search(r"'([^']*)'([BHObho])\s*$", token_value)
+        if not match:
+            return True
+        content, suffix = match.group(1), match.group(2).upper()
+        if suffix == "B":
+            allowed, kind = "01", "bit"
+        elif suffix == "O":
+            allowed, kind = "01234567", "octal"
+        else:
+            allowed, kind = "0123456789ABCDEFabcdef", "hex"
+        if not all(c in allowed for c in content):
+            self.errors.append(
+                LexerError(
+                    message=(
+                        f"Invalid {kind} string: {token_value}. "
+                        f"Only {allowed} are allowed in '{suffix}' suffix literals."
+                    ),
+                    line=line,
+                    column=column,
+                    filename=self.source_file,
+                )
+            )
+            return False
+        return True
+
     def _is_keyword(self, identifier: str) -> bool:
         """Check if identifier is a HAL/S keyword (case-insensitive)."""
         return identifier.upper() in KEYWORDS
@@ -392,6 +426,20 @@ class Lexer:
                     self._validate_hexstring(token.value, line, column)
                 elif token_type == "OCTSTRING":
                     self._validate_octstring(token.value, line, column)
+                elif token_type == "BITLITERAL":
+                    self._validate_bitliteral(token.value, line, column)
+                elif token_type == "IDENTIFIER" and len(token.value) > 32:
+                    self.errors.append(
+                        LexerError(
+                            message=(
+                                f"Identifier '{token.value}' exceeds the HAL/S "
+                                f"32-character limit ({len(token.value)} characters)"
+                            ),
+                            line=line,
+                            column=column,
+                            filename=self.source_file,
+                        )
+                    )
 
                 # Get actual token type
                 actual_type = self._get_token_type(token)

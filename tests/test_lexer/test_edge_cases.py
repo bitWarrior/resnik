@@ -278,6 +278,39 @@ CLOSE TEST;"""
         assert len(tokens) >= 2
         assert len(lexer.errors) == 0
 
+    def test_identifier_over_32_chars_is_one_token_and_an_error(self, lexer) -> None:
+        """A 33-character name must not split (that would become a product)."""
+        long_id = "A" * 32 + "7"
+        tokens = lexer.tokenize(f"X = {long_id};", "<test>")
+        ident = [t for t in tokens if t.type == "IDENTIFIER" and t.lexeme.startswith("A")]
+        assert len(ident) == 1
+        assert ident[0].lexeme == long_id
+        assert any("32-character" in e.message for e in lexer.errors)
+
+    def test_block_comment_does_not_glue_identifiers(self, lexer) -> None:
+        tokens = lexer.tokenize("X = X/*c*/Y;", "<test>")
+        assert [t.lexeme for t in tokens] == ["X", "=", "X", "Y", ";"]
+        assert len(lexer.errors) == 0
+
+    def test_block_comment_does_not_glue_numbers(self, lexer) -> None:
+        tokens = lexer.tokenize("X = 1/*c*/2;", "<test>")
+        assert [t.lexeme for t in tokens] == ["X", "=", "1", "2", ";"]
+
+    def test_invalid_suffix_bit_literal(self, lexer) -> None:
+        lexer.tokenize("X = '2'B;", "<test>")
+        assert len(lexer.errors) > 0
+        assert any("bit" in e.message.lower() for e in lexer.errors)
+
+    def test_invalid_suffix_octal_literal(self, lexer) -> None:
+        lexer.tokenize("X = '8'O;", "<test>")
+        assert len(lexer.errors) > 0
+        assert any("octal" in e.message.lower() for e in lexer.errors)
+
+    def test_valid_suffix_bit_literal(self, lexer) -> None:
+        tokens = lexer.tokenize("X = '1010'B;", "<test>")
+        assert len(lexer.errors) == 0
+        assert any(t.type == "BITLITERAL" for t in tokens)
+
     def test_scientific_notation_variations(self, lexer) -> None:
         """Test various scientific notation formats."""
         code = "1.5E10 2.5E-5 3.0E+3 4E10"

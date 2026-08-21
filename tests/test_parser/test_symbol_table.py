@@ -123,6 +123,16 @@ class TestSymbolTableBasic:
         
         assert table.is_declared("Z") is True
 
+    def test_declare_and_lookup_are_case_insensitive(self) -> None:
+        table = SymbolTable()
+        type_spec = TypeSpec(data_type=DataType.INTEGER)
+        table.declare(Symbol(name="Count", type_spec=type_spec, scope="global"))
+        found = table.lookup("COUNT")
+        assert found is not None
+        assert found.name == "Count"
+        with pytest.raises(SemanticError):
+            table.declare(Symbol(name="count", type_spec=type_spec, scope="global"))
+
 
 class TestSymbolTableScopes:
     """Test scope management."""

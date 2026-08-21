@@ -1094,7 +1094,7 @@ class TestBitOperations:
         cond = BinaryOpNode(operator="AND", left=left, right=right)
         node = IfNode(condition=cond, then_block=DoBlockNode(statements=[]))
         code = generator.generate(ProgramNode(name="P", statements=[node]))
-        assert "(a == 1) && (b == 0)" in code
+        assert "(a == 1) & (b == 0)" in code
 
 
 class TestCompool:
@@ -1152,8 +1152,9 @@ class TestCompool:
         )
         task = TaskNode(name="T", statements=[rmw])
         code = generator.generate(CompilationNode(units=[self._compool(), task]))
-        assert "let __v = (*SYS_CLOCK.lock().unwrap()) + 0.125;" in code
-        assert "*SYS_CLOCK.lock().unwrap() = __v;" in code
+        assert "__cp_sys_clock" in code
+        assert code.count(".lock().unwrap()") == 1
+        assert "(*__cp_sys_clock) + 0.125" in code
 
     def test_single_unit_unwraps(self) -> None:
         """A one-unit file parses to the unit itself, not a CompilationNode."""
@@ -1183,7 +1184,8 @@ class TestForAndVectorSubscript:
             statements=[],
         )
         code = generator.generate(ProgramNode(name="P", statements=[loop]))
-        assert "for idx in (1) as i32..=(3) as i32 {" in code
+        assert "idx = (1) as i32;" in code
+        assert "if idx > (3) as i32 { break; }" in code
 
     def test_vector_element_lvalue_one_indexed(self) -> None:
         """VEC$IDX is a 1-indexed element place expression."""
@@ -1241,7 +1243,7 @@ class TestStrings:
             initial_value=LiteralNode(value="HI", literal_type="STRING"),
         )
         code = generator.generate(ProgramNode(name="P", declarations=[decl]))
-        assert 'let mut msg: String = "HI".to_string();' in code
+        assert 'format!("{:<10}", "HI")' in code
 
     def test_concatenation_uses_format(self) -> None:
         generator = RustCodeGenerator()
@@ -1259,7 +1261,7 @@ class TestStrings:
         call = FunctionCallNode(name="LENGTH", arguments=[IdentifierNode(name="S")])
         assign = AssignmentNode(target=IdentifierNode(name="N"), value=call)
         code = generator.generate(ProgramNode(name="P", statements=[assign]))
-        assert "s.len() as i32" in code
+        assert "s.trim_end_matches(' ').chars().count() as i32" in code
         # LENGTH alone must not pull in the hal_rt prelude
         assert "mod hal_rt" not in code
 
@@ -1795,6 +1797,20 @@ class TestCharVsBitSlice:
     def test_bit_slice_is_shift_mask(self) -> None:
         code = self._slice_code(DataType.BIT, [32])
         assert "(buf >> 22) & 0x1F" in code
+
+    def test_runtime_bit_slice_parenthesizes_shift_cast(self) -> None:
+        """`1 as u32 << n` is parsed as a generic; the cast must be `(1 as u32)`."""
+        from resnik import Lexer, Parser
+        src = (
+            "T: PROGRAM; DECLARE B BIT(32); DECLARE LO INTEGER; "
+            "DECLARE HI INTEGER; DECLARE R BIT(8); "
+            "R = B$(LO TO HI); CLOSE T;"
+        )
+        p = Parser()
+        ast = p.parse(Lexer().tokenize(src, "t"))
+        code = RustCodeGenerator().generate(ast)
+        assert "(1 as u32) <<" in code
+        assert "1 as u32 <<" not in code.replace("(1 as u32) <<", "")
 
 
 class TestEquateOverlay:
@@ -2596,7 +2612,7 @@ class TestShiftAndLogicalOps:
             "T: PROGRAM; DECLARE A BOOLEAN; DECLARE B BOOLEAN; "
             "DECLARE R BOOLEAN; R = A AND B; CLOSE T;")
         assert not errs
-        assert "a && b" in code
+        assert "a & b" in code
 
     def test_and_on_bits_is_bitwise(self) -> None:
         errs, code = self._run(
@@ -2610,7 +2626,7 @@ class TestShiftAndLogicalOps:
             "T: PROGRAM; DECLARE A BOOLEAN; DECLARE B BOOLEAN; "
             "DECLARE R BOOLEAN; R = A OR B; CLOSE T;")
         assert not errs
-        assert "a || b" in code
+        assert "a | b" in code
 
 
 class TestNamePointers:
@@ -2728,9 +2744,9 @@ class TestWaitForEventExpression:
             "T: PROGRAM; DECLARE A EVENT; DECLARE B EVENT; DECLARE C EVENT; "
             "WAIT FOR (A AND B) OR C; CLOSE T;")
         assert not errs
-        # AND/OR over EVENT leaves become && / || with atomic loads
-        assert "A.load(std::sync::atomic::Ordering::SeqCst) &&" in code
-        assert "|| C.load(std::sync::atomic::Ordering::SeqCst)" in code
+        # AND/OR over EVENT leaves are eager & / | with atomic loads
+        assert "A.load(std::sync::atomic::Ordering::SeqCst) &" in code
+        assert "| C.load(std::sync::atomic::Ordering::SeqCst)" in code
         assert "while !(" in code
 
     def test_event_condition_in_if(self) -> None:
@@ -3045,6 +3061,28 @@ class TestCharacterFixedLength:
         assert not errs
         assert 'format!("{:<10}", "HI")' in code
 
+    def test_initial_pads_to_declared_length(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE S CHARACTER(10) INITIAL('HI'); CLOSE T;")
+        assert not errs
+        assert 'format!("{:<10}", "HI")' in code
+
+    def test_unsized_source_does_not_emit_invalid_format(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE S CHARACTER(10); DECLARE U CHARACTER; "
+            "S = U; CLOSE T;")
+        assert not errs
+        assert "10 = 10" not in code
+        assert 'format!("{:<10}", __s)' in code
+
+    def test_concat_assignment_is_fitted(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE A CHARACTER(4); DECLARE B CHARACTER(4); "
+            "DECLARE S CHARACTER(8); S = A || B; CLOSE T;")
+        assert not errs
+        assert "format!" in code
+        assert 'format!("{:<8}"' in code or "take(8)" in code
+
 
 class TestArrayArithmetic:
     """Element-wise array +/-/*, scalar broadcast, and dimension checking."""
@@ -3350,23 +3388,25 @@ class TestDowntoAndExit:
         errs, code = self._run(
             "T: PROGRAM; DECLARE I INTEGER; DO FOR I = 1 TO 5; END; CLOSE T;")
         assert not errs
-        assert "for i in (1) as i32..=(5) as i32 {" in code
+        assert "i = (1) as i32;" in code
+        assert "if i > (5) as i32 { break; }" in code
+        assert "i = i.wrapping_add((1) as i32);" in code
 
     def test_downto_reverses_range(self) -> None:
         errs, code = self._run(
             "T: PROGRAM; DECLARE I INTEGER; DO FOR I = 10 DOWNTO 1; END; CLOSE T;")
         assert not errs
-        assert "for i in ((1) as i32..=(10) as i32).rev() {" in code
+        assert "i = (10) as i32;" in code
+        assert "if i < (1) as i32 { break; }" in code
+        assert "i = i.wrapping_sub((1) as i32);" in code
 
     def test_downto_with_step(self) -> None:
         errs, code = self._run(
             "T: PROGRAM; DECLARE I INTEGER; "
             "DO FOR I = 10 DOWNTO 1 BY 2; END; CLOSE T;")
         assert not errs
-        assert (
-            "for i in ((1) as i32..=(10) as i32).rev()"
-            ".step_by((2) as usize) {"
-        ) in code
+        assert "i = (10) as i32;" in code
+        assert "i = i.wrapping_sub((2) as i32);" in code
 
     def test_exit_in_loop_lowers_to_break(self) -> None:
         errs, code = self._run(
@@ -3411,7 +3451,7 @@ class TestDowntoAndExit:
     def test_buffer_search_end_to_end(self) -> None:
         errs, code = self._run(self.BUFFER_SEARCH)
         assert not errs
-        assert "for i in ((1) as i32..=(10) as i32).rev() {" in code
+        assert "i = (10) as i32;" in code
         assert "history[(i - 1) as usize] == 99" in code
         assert "break;" in code
 
@@ -3431,7 +3471,8 @@ class TestLabeledExit:
             "T: PROGRAM; DECLARE I INTEGER; "
             "SEARCH: DO FOR I = 1 TO 3; END; CLOSE T;")
         assert not errs
-        assert "'search: for i in (1) as i32..=(3) as i32 {" in code
+        assert "'search: loop {" in code
+        assert "i = (1) as i32;" in code
 
     def test_labeled_while_emits_rust_label(self) -> None:
         errs, code = self._run(
@@ -3448,8 +3489,8 @@ class TestLabeledExit:
             "  DO FOR J = 1 TO 3; EXIT SEARCH; END; "
             "END; CLOSE T;")
         assert not errs
-        assert "'search: for i in (1) as i32..=(3) as i32 {" in code
-        assert "for j in (1) as i32..=(3) as i32 {" in code  # inner unlabeled
+        assert "'search: loop {" in code
+        assert "j = (1) as i32;" in code
         assert "break 'search;" in code
 
     def test_bare_exit_still_breaks_innermost(self) -> None:
@@ -3824,3 +3865,76 @@ class TestExternal:
             "rustc", "t.rs", "t", has_main=False, opt_level="2",
             edition="2021")
         assert "--crate-type" in cmd and "lib" in cmd
+
+
+class TestBackendLogicFixes:
+    """Lowering fixes: FOR index, **, folder, ON ERROR, BIT, GO TO."""
+
+    def _run(self, src: str):
+        from resnik import Lexer, Parser
+        p = Parser()
+        ast = p.parse(Lexer().tokenize(src, "t"))
+        code = RustCodeGenerator().generate(ast) if not p.errors else ""
+        return p.errors, code
+
+    def test_for_does_not_shadow_index(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE I INTEGER; "
+            "DO FOR I = 1 TO 3; EXIT; END; CLOSE T;")
+        assert not errs
+        assert "for i in" not in code
+        assert "i = (1) as i32;" in code
+
+    def test_real_exponent_uses_powf(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE X SCALAR; DECLARE Y SCALAR; "
+            "Y = X ** 0.5; CLOSE T;")
+        assert not errs
+        assert "powf" in code
+        assert "powi(0.5" not in code
+
+    def test_integer_div_fold_stays_integer(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE C INTEGER; C = 7 / 2; CLOSE T;")
+        assert not errs
+        assert "c = 3;" in code
+        assert "3.5" not in code
+
+    def test_goto_is_case_insensitive(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; goto done; DONE: X = 1; CLOSE T;")
+        assert not errs
+        assert "unresolved label" not in code
+        assert "continue 'dispatch" in code
+
+    def test_unsized_bit_subscript_uses_width_32(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE B BIT; X = B$1; CLOSE T;")
+        assert not errs
+        assert "let mut b: u32" in code
+        assert "(b >> 31)" in code or "(b >> (32 - 1))" in code
+
+    def test_bit_assign_keeps_msb_field(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE W BIT(16) INITIAL(HEX 'ABCD'); "
+            "DECLARE B BIT(8); B = W; CLOSE T;")
+        assert not errs
+        assert ">> 8" in code
+
+    def test_on_error_in_compool_plus_program(self) -> None:
+        errs, code = self._run(
+            "POOL: COMPOOL; DECLARE X SCALAR; CLOSE POOL; "
+            "P: PROGRAM; ON ERROR(5): DO; WRITE(6) 'trap'; RESUME; END; "
+            "X = 1.0 / 0.0; CLOSE P;")
+        assert not errs
+        assert "process::exit" not in code
+        assert "trap" in code
+        assert "X.lock" in code or "__cp_x" in code
+
+    def test_compool_rmw_locks_once(self) -> None:
+        errs, code = self._run(
+            "POOL: COMPOOL; DECLARE G SCALAR INITIAL(0.0); CLOSE POOL; "
+            "P: PROGRAM; G = G + 1.0; CLOSE P;")
+        assert not errs
+        assert code.count(".lock().unwrap()") == 1
+        assert "__cp_g" in code

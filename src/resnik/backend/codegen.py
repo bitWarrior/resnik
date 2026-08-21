@@ -164,8 +164,20 @@ class ConstantFolder:
                 if op == "*":
                     return lo * ro
                 if op == "/":
-                    return lo / ro if ro != 0 else None
+                    if ro == 0:
+                        return None
+                    # INTEGER / INTEGER is truncating (toward zero), matching
+                    # the runtime `i32` `/`. Python 3 `/` is always float.
+                    if (isinstance(lo, int) and isinstance(ro, int)
+                            and not isinstance(lo, bool)
+                            and not isinstance(ro, bool)):
+                        return int(lo / ro)
+                    return lo / ro
                 if op == "**":
+                    if (isinstance(lo, int) and isinstance(ro, int)
+                            and not isinstance(lo, bool)
+                            and not isinstance(ro, bool) and ro >= 0):
+                        return lo ** ro
                     return float(lo) ** float(ro)
             except (ValueError, OverflowError, ZeroDivisionError):
                 return None
@@ -365,14 +377,18 @@ class RustCodeGenerator:
         # access rather than a bit extract).
         self._bit_widths = {}
         self._var_info = {}
+        self._compool_guard = {}
+        self._compool_locked = False
         for node in self._walk(ast):
             if isinstance(node, DeclareNode) and node.type_spec is not None:
                 for ident in node.identifiers:
                     self._var_info[ident.lower()] = node.type_spec
                 if node.type_spec.data_type == DataType.BIT:
+                    # Unsized BIT maps to u32 (TypeMapper._bit_type(None));
+                    # subscripting must use the same width so $1 is the MSB.
                     width = (
                         node.type_spec.dimensions[0]
-                        if node.type_spec.dimensions else 1
+                        if node.type_spec.dimensions else 32
                     )
                     for ident in node.identifiers:
                         self._bit_widths[ident.lower()] = width
@@ -1293,7 +1309,8 @@ use hal_rt::*;
         segments = self._split_segments(statements)
         # Map each label to its segment (state) index.
         self._label_states = {
-            name: i for i, (name, _) in enumerate(segments) if name is not None
+            name.upper(): i
+            for i, (name, _) in enumerate(segments) if name is not None
         }
         last = len(segments) - 1
         self.emitter.emit_line("let mut __pc: usize = 0;")
@@ -1327,7 +1344,8 @@ use hal_rt::*;
     def _generate_goto(self, node: GotoNode) -> None:
         """GO TO <label> -> set the dispatch state and branch out via the
         labelled loop, which unwinds any enclosing loops on the way."""
-        state = getattr(self, "_label_states", {}).get(node.label)
+        state = getattr(self, "_label_states", {}).get(
+            (node.label or "").upper())
         if state is None:
             self.emitter.emit_comment(
                 f"GO TO {node.label} (unresolved label -- no matching target)")
@@ -1484,18 +1502,33 @@ use hal_rt::*;
             if node.initial_value is not None:
                 initial_value = self._generate_expression(node.initial_value)
                 # CHARACTER variables are Rust String; a bare string literal is
-                # &str, so convert it to an owned String.
+                # &str, so convert it to an owned String. Fixed-length
+                # CHARACTER(n) is blank-padded / truncated to n.
                 if (
                     node.type_spec is not None
                     and node.type_spec.data_type == DataType.CHARACTER
-                    and isinstance(node.initial_value, LiteralNode)
-                    and node.initial_value.literal_type == "STRING"
                 ):
-                    initial_value += ".to_string()"
+                    slen = self._char_length(node.initial_value)
+                    tlen = self._char_length_of_spec(node.type_spec)
+                    if tlen is not None:
+                        initial_value = self._char_fit(
+                            initial_value, tlen, slen)
+                    elif (
+                        isinstance(node.initial_value, LiteralNode)
+                        and node.initial_value.literal_type == "STRING"
+                    ):
+                        initial_value += ".to_string()"
             elif node.initial_values:
                 initial_value = self._generate_initial_values(node)
             else:
-                initial_value = self.type_mapper.get_default_value(node.type_spec)
+                tlen = self._char_length_of_spec(node.type_spec)
+                if (node.type_spec is not None
+                        and node.type_spec.data_type == DataType.CHARACTER
+                        and tlen is not None):
+                    initial_value = f'format!("{{:<{tlen}}}", "")'
+                else:
+                    initial_value = self.type_mapper.get_default_value(
+                        node.type_spec)
             
             # Emit declaration
             is_mut = not node.is_constant
@@ -1708,13 +1741,14 @@ use hal_rt::*;
         the assignment) or unwound to the caller via `return Err(..)` so an
         enclosing handler in the calling scope runs."""
         code = self._DIVIDE_FAULT_CODE
-        tname = target.name.lower()          # dict-key form
-        rust_lhs = self._rust_ident(target.name)  # Rust place-expression form
-        ts = self._var_info.get(tname)
+        ts = None
+        if isinstance(target, IdentifierNode):
+            ts = self._var_info.get(target.name.lower())
         rust_t = self.type_mapper.map_type(ts) if ts is not None else "f32"
         left = self._generate_expression(binop.left)
         right = self._generate_expression(binop.right)
         unit_handlers = self._unit_handlers.get(self._cur_unit, {})
+        quot = f"{left} / __d"
 
         self.emitter.emit_line("{")
         self.emitter.indent()
@@ -1728,7 +1762,7 @@ use hal_rt::*;
             self.emitter.dedent()
             self.emitter.emit_line("} else {")
             self.emitter.indent()
-            self.emitter.emit_line(f"{rust_lhs} = {left} / __d;")
+            self._emit_store(target, quot, src_node=binop)
             self.emitter.dedent()
             self.emitter.emit_line("}")
         elif self._cur_unit_is_result:
@@ -1737,7 +1771,7 @@ use hal_rt::*;
             self.emitter.emit_line(
                 f"if __d == 0 as {rust_t} {{ "
                 f"return Err(HalFault {{ code: {code} }}); }}")
-            self.emitter.emit_line(f"{rust_lhs} = {left} / __d;")
+            self._emit_store(target, quot, src_node=binop)
         else:
             # Unhandled fault at top level -> HAL/S terminates the program.
             self.emitter.emit_line(f"if __d == 0 as {rust_t} {{")
@@ -1745,7 +1779,7 @@ use hal_rt::*;
             self._emit_unhandled_fault(str(code))
             self.emitter.dedent()
             self.emitter.emit_line("}")
-            self.emitter.emit_line(f"{rust_lhs} = {left} / __d;")
+            self._emit_store(target, quot, src_node=binop)
         self.emitter.dedent()
         self.emitter.emit_line("}")
 
@@ -1825,8 +1859,7 @@ use hal_rt::*;
     def _is_trappable_division(node) -> bool:
         return (isinstance(node, AssignmentNode)
                 and isinstance(node.value, BinaryOpNode)
-                and node.value.operator == "/"
-                and isinstance(node.target, IdentifierNode))
+                and node.value.operator == "/")
 
     def _analyze_faults(self, ast) -> None:
         """Scope pre-pass for the ON ERROR fault model.
@@ -1850,8 +1883,14 @@ use hal_rt::*;
             if isinstance(n, ProcedureNode) and not getattr(n, "is_external", False)
         }
 
-        if isinstance(ast, ProgramNode):
-            self._unit_handlers["@main"] = self._collect_unit_handlers(ast)
+        # A COMPOOL+PROGRAM file is a CompilationNode; still register the
+        # PROGRAM (and any TASK) so same-scope ON ERROR in main fires.
+        for n in self._walk(ast):
+            if isinstance(n, ProgramNode):
+                self._unit_handlers["@main"] = self._collect_unit_handlers(n)
+            elif isinstance(n, TaskNode):
+                self._unit_handlers[n.name.lower()] = (
+                    self._collect_unit_handlers(n))
         for name, proc in procs.items():
             self._unit_handlers[name] = self._collect_unit_handlers(proc)
 
@@ -1920,28 +1959,125 @@ use hal_rt::*;
                 return True
         return False
 
+    def _char_length_of_spec(self, ts) -> Optional[int]:
+        if (ts is not None and ts.data_type == DataType.CHARACTER
+                and ts.dimensions):
+            return ts.dimensions[0]
+        return None
+
     def _char_length(self, node):
         """Declared CHARACTER length of an expression: dimensions[0] for a
         CHARACTER variable, or the literal length for a string literal."""
         if isinstance(node, IdentifierNode):
-            ts = self._var_info.get(node.name.lower())
-            if (ts is not None and ts.data_type == DataType.CHARACTER
-                    and ts.dimensions):
-                return ts.dimensions[0]
-            return None
+            return self._char_length_of_spec(
+                self._var_info.get(node.name.lower()))
         if isinstance(node, LiteralNode) and isinstance(node.value, str):
             return len(node.value)
         return None
+
+    def _is_char_var(self, node) -> bool:
+        if isinstance(node, IdentifierNode):
+            ts = self._var_info.get(node.name.lower())
+            return ts is not None and ts.data_type == DataType.CHARACTER
+        return False
 
     def _is_char_source(self, node) -> bool:
         """True if an expression yields a CHARACTER (String) value that a
         fixed-length assignment should normalize."""
         if isinstance(node, LiteralNode) and isinstance(node.value, str):
             return True
-        if isinstance(node, IdentifierNode):
-            ts = self._var_info.get(node.name.lower())
+        if self._is_char_var(node):
+            return True
+        if (isinstance(node, BinaryOpNode) and node.operator == "||"
+                and self._bit_width_expr(node) is None):
+            return True
+        if (isinstance(node, SubscriptNode)
+                and isinstance(node.operand, IdentifierNode)):
+            ts = self._var_info.get(node.operand.name.lower())
             return ts is not None and ts.data_type == DataType.CHARACTER
         return False
+
+    def _char_fit(self, src_rust: str, tlen: int, slen: Optional[int] = None) -> str:
+        """Blank-pad or right-truncate a String/&str expr to exactly tlen."""
+        if slen is not None:
+            if slen > tlen:
+                return (f"{src_rust}.chars().take({tlen})"
+                        ".collect::<String>()")
+            if slen < tlen:
+                return f'format!("{{:<{tlen}}}", {src_rust})'
+            # Equal length: a &str literal still needs an owned String.
+            if src_rust.startswith('"'):
+                return f"{src_rust}.to_string()"
+            return src_rust
+        return (
+            f'{{ let __s: String = ({src_rust}).to_string(); '
+            f'if __s.chars().count() > {tlen} '
+            f'{{ __s.chars().take({tlen}).collect() }} '
+            f'else {{ format!("{{:<{tlen}}}", __s) }} }}'
+        )
+
+    def _collect_compool_mut(self, node, acc=None):
+        """Mutable COMPOOL names referenced by an AST subtree."""
+        if acc is None:
+            acc = set()
+        if node is None or not isinstance(node, ASTNode):
+            return acc
+        if isinstance(node, IdentifierNode):
+            up = node.name.upper()
+            if up in self._globals and self._globals[up][0] == "mut":
+                acc.add(up)
+        for v in vars(node).values():
+            for x in (v if isinstance(v, list) else [v]):
+                if isinstance(x, ASTNode):
+                    self._collect_compool_mut(x, acc)
+        return acc
+
+    def _bit_assign_cast(self, value_rust: str, src_node, dst_ts) -> str:
+        """Justify BIT assignment to dst width: keep bits 1..n (MSB-first)."""
+        dw = dst_ts.dimensions[0] if dst_ts.dimensions else 32
+        dt = TypeMapper._bit_type(dw)
+        sw = self._bit_width_expr(src_node)
+        if sw is not None and sw > dw:
+            return f"((({value_rust}) >> {sw - dw}) as {dt})"
+        if sw is not None and sw < dw:
+            return f"((({value_rust}) as {dt}) << {dw - sw})"
+        return f"({value_rust}) as {dt}"
+
+    def _emit_store(self, target, value_rust: str, src_node=None) -> None:
+        """Write `value_rust` into `target` (COMPOOL / ASSIGN / NAME / place)."""
+        if isinstance(target, IdentifierNode):
+            lo = target.name.lower()
+            up = target.name.upper()
+            tts = self._var_info.get(lo)
+            if (tts is not None and tts.data_type == DataType.BIT
+                    and src_node is not None):
+                value_rust = self._bit_assign_cast(value_rust, src_node, tts)
+            elif (tts is not None and tts.data_type == DataType.BIT
+                    and tts.dimensions):
+                value_rust = (
+                    f"({value_rust}) as {self.type_mapper.map_type(tts)}")
+            if up in getattr(self, "_compool_guard", {}):
+                self.emitter.emit_line(
+                    f"(*{self._compool_guard[up]}) = {value_rust};")
+                return
+            if up in self._globals and self._globals[up][0] == "mut":
+                self.emitter.emit_line(
+                    f"*{up}.lock().unwrap() = {value_rust};")
+                return
+            if lo in getattr(self, "_assign_params", set()):
+                self.emitter.emit_line(
+                    f"(*{self._rust_ident(target.name)}) = {value_rust};")
+                return
+            if lo in getattr(self, "_name_vars", {}):
+                self.emitter.emit_line(
+                    f"unsafe {{ *{self._rust_ident(target.name)} "
+                    f"= {value_rust}; }}")
+                return
+            self.emitter.emit_line(
+                f"{self._rust_ident(target.name)} = {value_rust};")
+            return
+        place = self._generate_expression(target)
+        self.emitter.emit_line(f"{place} = {value_rust};")
 
     def _generate_assignment(self, node: AssignmentNode) -> None:
         """
@@ -1957,6 +2093,28 @@ use hal_rt::*;
             node: AssignmentNode to generate
         """
         if node.target and node.value:
+            # One MutexGuard per COMPOOL name for the whole statement so
+            # `G$I = G$I + 1` cannot deadlock on a non-reentrant Mutex.
+            if not getattr(self, "_compool_locked", False):
+                tnames = self._collect_compool_mut(node.target)
+                vnames = self._collect_compool_mut(node.value)
+                names = tnames & vnames
+                if names:
+                    self._compool_locked = True
+                    self._compool_guard = {}
+                    self.emitter.emit_line("{")
+                    self.emitter.indent()
+                    for n in sorted(names):
+                        bind = f"__cp_{n.lower()}"
+                        self.emitter.emit_line(
+                            f"let mut {bind} = {n}.lock().unwrap();")
+                        self._compool_guard[n] = bind
+                    self._generate_assignment(node)
+                    self._compool_guard = {}
+                    self._compool_locked = False
+                    self.emitter.dedent()
+                    self.emitter.emit_line("}")
+                    return
             # ARRAY OF STRUCTURE copy between differing memory layouts
             # (ALIGNED <-> DENSE): the two arrays are distinct Rust types
             # (padded vs packed), so convert element-by-element.
@@ -1995,24 +2153,8 @@ use hal_rt::*;
                     tgt = self._rust_ident(node.target.name)
                     src = self._generate_expression(node.value)
                     slen = self._char_length(node.value)
-                    if slen is not None and slen > tlen:
-                        self.emitter.emit_line(
-                            f"{tgt} = {src}.chars().take({tlen})"
-                            ".collect::<String>();")
-                    elif slen is not None and slen < tlen:
-                        self.emitter.emit_line(
-                            f'{tgt} = format!("{{:<{tlen}}}", {src});')
-                    elif slen is not None:
-                        self.emitter.emit_line(f"{tgt} = {src};")
-                    else:
-                        # Unknown source length: normalize to exactly tlen at
-                        # runtime (truncate if longer, pad if shorter).
-                        self.emitter.emit_line(
-                            f"{tgt} = {{ let __s: String = {src}; "
-                            f"if __s.chars().count() > {tlen} "
-                            f"{{ __s.chars().take({tlen}).collect() }} "
-                            f'else {{ format!("{{:<{tlen}$}}", __s, '
-                            f"{tlen} = {tlen}) }} }};")
+                    self.emitter.emit_line(
+                        f"{tgt} = {self._char_fit(src, tlen, slen)};")
                     return
             # Context-sensitive IDENTITY: `M = IDENTITY` builds an identity
             # matrix sized to the (square) target's declared dimensions.
@@ -2066,7 +2208,6 @@ use hal_rt::*;
                 self._uses_faults
                 and isinstance(node.value, BinaryOpNode)
                 and node.value.operator == "/"
-                and isinstance(node.target, IdentifierNode)
             ):
                 self._generate_fault_division(node.target, node.value)
                 return
@@ -2083,7 +2224,8 @@ use hal_rt::*;
             # lock, so a read-modify-write of the same global can't deadlock.
             if isinstance(node.target, IdentifierNode):
                 up = node.target.name.upper()
-                if up in self._globals and self._globals[up][0] == "mut":
+                if (up in self._globals and self._globals[up][0] == "mut"
+                        and up not in getattr(self, "_compool_guard", {})):
                     self.emitter.emit_line("{")
                     self.emitter.indent()
                     self.emitter.emit_line(f"let __v = {value};")
@@ -2091,23 +2233,9 @@ use hal_rt::*;
                     self.emitter.dedent()
                     self.emitter.emit_line("}")
                     return
-            # BIT-target narrowing: after the P0 #5 fix each BIT(w) picks
-            # its own narrow Rust type (u8/u16/u32/u64). Bit-extracts,
-            # bit-slices, and mixed-width XOR/AND/OR chains produce a value
-            # in the operand's type, which Rust refuses to assign to a
-            # narrower BIT target. An explicit `as {target_type}` cast is a
-            # no-op when widths match and truncates otherwise -- exactly
-            # HAL/S BIT-assignment semantics (low-bits taken).
-            if isinstance(node.target, IdentifierNode):
-                tts = self._var_info.get(node.target.name.lower())
-                if (tts is not None and tts.data_type == DataType.BIT
-                        and tts.dimensions):
-                    target_type = self.type_mapper.map_type(tts)
-                    value = f"({value}) as {target_type}"
-            # Subscripted lvalue (vector element). For a VECTOR this renders a
-            # real place expression (vec.0[i]) that can be assigned to.
-            target = self._generate_expression(node.target)
-            self.emitter.emit_assignment(target, value)
+            # BIT-target: keep bits 1..n (MSB-first), then store through the
+            # COMPOOL / ASSIGN / NAME / local place.
+            self._emit_store(node.target, value, src_node=node.value)
     
     def _generate_write(self, node: WriteNode) -> None:
         """
@@ -2341,6 +2469,8 @@ use hal_rt::*;
             return "true"
         if up == "FALSE":
             return "false"
+        if up in getattr(self, "_compool_guard", {}):
+            return f"(*{self._compool_guard[up]})"
         # EVENT read -> atomic load of its shared flag.
         if node.name.lower() in getattr(self, "_event_vars", set()):
             return (f"{node.name.upper()}"
@@ -2397,6 +2527,8 @@ use hal_rt::*;
                 return True
             return isinstance(node.value, bool)
         if isinstance(node, IdentifierNode):
+            if node.name.upper() in ("TRUE", "FALSE"):
+                return True
             ts = self._var_info.get(node.name.lower())
             if node.name.lower() in getattr(self, "_event_vars", set()):
                 return True
@@ -2518,22 +2650,22 @@ use hal_rt::*;
         # handled by its own branch above.)
         rust_op = op_map.get(op) or op_map.get(op.upper(), op)
 
-        # AND/OR are logical on BOOLEAN operands (&&/||) and bitwise on BIT/
-        # INTEGER operands (&/|). Default (above) is bitwise; upgrade to logical
-        # only when both sides are boolean.
-        if op in ("AND", "OR"):
-            if (self._is_boolean_expr(node.left)
-                    and self._is_boolean_expr(node.right)):
-                rust_op = "&&" if op == "AND" else "||"
+        # AND/OR are bitwise on BIT/INTEGER. On BOOLEAN they stay `&`/`|`
+        # (eager: HAL/S evaluates both operands, so ON ERROR still sees
+        # `X / D` in `D ¬= 0 AND X / D > 1`). Comparisons are parenthesized
+        # by _operand because AND binds tighter than `==` in Rust.
 
         # Power has no Rust infix operator. f32 uses .powi(i32); integer
         # bases use .pow(u32). Default to the float form (common in HAL/S math).
         if op == "**":
             base = self._generate_expression(node.left)
             exp = self._generate_expression(node.right)
-            if self._is_integer_operand(node.left):
+            if (self._is_integer_operand(node.left)
+                    and self._is_integer_operand(node.right)):
                 return f"({base}).pow({exp} as u32)"
-            return f"({base}).powi({exp} as i32)"
+            if self._is_integer_operand(node.right):
+                return f"({base}).powi({exp} as i32)"
+            return f"(({base}) as f32).powf(({exp}) as f32)"
 
         my_prec = self._PRECEDENCE.get(op, 0)
         left = self._operand(node.left, my_prec, right_side=False)
@@ -2559,6 +2691,16 @@ use hal_rt::*;
                     left = f"({left} as f64)"
                 elif rp == "single" and lp == "double":
                     right = f"({right} as f64)"
+        # CHARACTER compare: blank-extend the shorter operand to the longer.
+        if rust_op in ("==", "!=") and (
+                self._is_char_var(node.left) or self._is_char_var(node.right)):
+            return (
+                f'({{ let __a = ({left}).to_string(); '
+                f'let __b = ({right}).to_string(); '
+                f'let __n = __a.chars().count().max(__b.chars().count()); '
+                f'format!("{{:<width$}}", __a, width = __n) {rust_op} '
+                f'format!("{{:<width$}}", __b, width = __n) }})'
+            )
         return f"{left} {rust_op} {right}"
 
     def _float_precision(self, node):
@@ -2784,8 +2926,11 @@ use hal_rt::*;
             return f"(({operand_src} >> {shift}) & 0x{mask:X})"
         lo_s = self._generate_expression(rng.lo)
         hi_s = self._generate_expression(rng.hi)
-        return (f"(({operand_src} >> ({width} - ({hi_s}))) "
-                f"& ((1u32 << (({hi_s}) - ({lo_s}) + 1)) - 1))")
+        bt = TypeMapper._bit_type(width)
+        return (
+            f"(({operand_src} >> ({width} - ({hi_s}))) "
+            f"& (((1 as {bt}) << (({hi_s}) - ({lo_s}) + 1)) - 1))"
+        )
 
     def _struct_name(self, name: str) -> str:
         """HAL/S template name -> Rust PascalCase struct name (NODE -> Node)."""
@@ -2992,36 +3137,38 @@ use hal_rt::*;
         return "/* unsupported matrix subscript form */"
 
     def _generate_for(self, node: ForNode, label: str = "") -> None:
-        """Generate a DO FOR loop as an inclusive Rust range loop.
+        """Generate a DO FOR loop that mutates the declared index variable.
 
-        TO counts up (`start..=end`); DOWNTO counts down, which Rust expresses
-        as the ascending range reversed (`(end..=start).rev()`), since Rust
-        ranges must be low..=high. A `label` (from a labeled DO block) becomes
-        a Rust loop label so `EXIT <label>` can target it.
+        Rust `for i in …` would shadow the HAL/S INTEGER `I`, so after EXIT
+        (or normal completion) the declared `I` would still be its pre-loop
+        value. A `loop` that assigns the existing binding matches HAL/S:
+        after EXIT, I is the current index; after falling out, I is one step
+        past the last value. A `label` becomes a Rust loop label for
+        `EXIT <label>`.
         """
         var = self._rust_ident(node.var)
         start = self._generate_expression(node.start)
         end = self._generate_expression(node.end)
-        # Pin the range endpoints to i32 (HAL/S FOR var is INTEGER). Without
-        # this, the loop binding stays `{integer}` and any wrapping_* call
-        # inside the body (from the P0 #2 fix) becomes ambiguous because
-        # those methods exist on multiple integer types.
-        if node.descending:
-            # DOWNTO: iterate start, start-1, ..., end  ->  (end..=start).rev()
-            rng = f"(({end}) as i32..=({start}) as i32).rev()"
-        else:
-            rng = f"({start}) as i32..=({end}) as i32"
+        step = (self._generate_expression(node.step)
+                if node.step is not None else "1")
         lbl = f"'{self._rust_ident(label)}: " if label else ""
-        if node.step is not None:
-            step = self._generate_expression(node.step)
-            self.emitter.emit_line(
-                f"{lbl}for {var} in {rng}.step_by(({step}) as usize) {{"
-            )
-        else:
-            self.emitter.emit_line(f"{lbl}for {var} in {rng} {{")
+        self.emitter.emit_line(f"{var} = ({start}) as i32;")
+        self.emitter.emit_line(f"{lbl}loop {{")
         self.emitter.indent()
+        if node.descending:
+            self.emitter.emit_line(
+                f"if {var} < ({end}) as i32 {{ break; }}")
+        else:
+            self.emitter.emit_line(
+                f"if {var} > ({end}) as i32 {{ break; }}")
         for stmt in node.statements:
             self._generate_node(stmt)
+        if node.descending:
+            self.emitter.emit_line(
+                f"{var} = {var}.wrapping_sub(({step}) as i32);")
+        else:
+            self.emitter.emit_line(
+                f"{var} = {var}.wrapping_add(({step}) as i32);")
         self.emitter.dedent()
         self.emitter.emit_line("}")
 
@@ -3045,7 +3192,10 @@ use hal_rt::*;
         """
         if node.name.upper() == "LENGTH" and len(node.arguments) == 1:
             arg = self._generate_expression(node.arguments[0])
-            return f"({arg}.len() as i32)"
+            # HAL/S LENGTH excludes trailing blanks.
+            return (
+                f"({arg}.trim_end_matches(' ').chars().count() as i32)"
+            )
         # Type-coercion casts: INTEGER(x) / SCALAR(x).
         if node.name.upper() == "INTEGER" and len(node.arguments) == 1:
             arg = self._generate_expression(node.arguments[0])
@@ -3154,6 +3304,8 @@ use hal_rt::*;
         a locked deref for mutable COMPOOL globals, the bare name for global
         constants, an ASSIGN-param deref, else snake_case (Rust-keyword-safe)."""
         up = name.upper()
+        if up in getattr(self, "_compool_guard", {}):
+            return f"(*{self._compool_guard[up]})"
         if up in self._globals:
             kind, _ = self._globals[up]
             return up if kind == "const" else f"(*{up}.lock().unwrap())"
