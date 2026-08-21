@@ -50,6 +50,7 @@ GNC_POOL: COMPOOL;
     /* I-LOADs: phase-plane + FDIR constants, uplinked pre-flight */
     DECLARE ATT_DEADBAND CONSTANT(0.50);   /* attitude deadband, deg */
     DECLARE RATE_LIMIT   CONSTANT(0.20);   /* rate deadband, deg/s */
+    DECLARE JET_ACCEL    CONSTANT(0.50);   /* jet angular accel, deg/s^2 */
     DECLARE RGA_MISCOMP  CONSTANT(1.00);   /* RGA miscompare limit, deg/s */
 CLOSE GNC_POOL;
 
@@ -122,17 +123,23 @@ AXIS_DAP: PROCEDURE(RA, RB, RC, ERR) ASSIGN(JET, SEL_RATE, FAULT);
     IF DEV_B > RGA_MISCOMP THEN FAULT = FAULT | BIN '00000010';
     IF DEV_C > RGA_MISCOMP THEN FAULT = FAULT | BIN '00000100';
 
-    /* Phase-plane switching curve drives (error, rate) toward origin */
-    SWITCH_CURVE = ERR + RATE_EST ABS(RATE_EST) / (2 RATE_LIMIT);
+    /* Phase-plane: S = e + ω|ω|/(2α). Fire against S so (e, ω) goes to origin.
+       Inner dead-zone coasts when both |e| and |ω| are inside their I-LOADs. */
+    SWITCH_CURVE = ERR + RATE_EST ABS(RATE_EST) / (2 JET_ACCEL);
 
-    IF SWITCH_CURVE > ATT_DEADBAND THEN
-        JET = 1;
+    IF ABS(ERR) <= ATT_DEADBAND AND ABS(RATE_EST) <= RATE_LIMIT THEN
+        JET = 0;
     ELSE
         DO;
-            IF SWITCH_CURVE < -ATT_DEADBAND THEN
+            IF SWITCH_CURVE > ATT_DEADBAND THEN
                 JET = 2;
             ELSE
-                JET = 0;
+                DO;
+                    IF SWITCH_CURVE < -ATT_DEADBAND THEN
+                        JET = 1;
+                    ELSE
+                        JET = 0;
+                END;
         END;
 CLOSE AXIS_DAP;
 

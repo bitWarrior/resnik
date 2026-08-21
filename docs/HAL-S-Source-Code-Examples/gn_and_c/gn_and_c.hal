@@ -48,7 +48,7 @@ RCS_DAP: TASK;
     /* 
        Phase plane logic: 
        Check if error exceeds deadband limits.
-       Bit positions simulate forward, aft, left, right thruster manifolds.
+       Bit positions: pitch +/-, yaw +/-, roll +/- thruster manifolds.
        The vertical bar (|) is the HAL/S bitwise OR operator.
     */
     
@@ -68,6 +68,15 @@ RCS_DAP: TASK;
                 FIRE_CMD = FIRE_CMD | BIN '00100000';  /* Nose right */
             ELSE
                 FIRE_CMD = FIRE_CMD | BIN '00010000';  /* Nose left */
+        END;
+
+    /* Roll Axis Logic */
+    IF ABS(ROLL_ERR) > DEADBAND THEN
+        DO;
+            IF ROLL_ERR > 0.0 THEN
+                FIRE_CMD = FIRE_CMD | BIN '00001000';  /* Roll right */
+            ELSE
+                FIRE_CMD = FIRE_CMD | BIN '00000100';  /* Roll left */
         END;
         
     /* Commit commands to the simulated hardware register */

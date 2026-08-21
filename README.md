@@ -162,6 +162,9 @@ resnik compile tests/fixtures/valid/sample_hals_code.hal
 
 # Get help
 resnik --help
+
+# End-to-end HAL/S example regression (needs rustc; see Testing)
+./tests/regression/run_regression.sh
 ```
 
 ### Cross-Compilation (Embedded Targets)
@@ -394,12 +397,12 @@ resnik/
 │   ├── types.py            # Type definitions
 │   └── exceptions.py       # Custom exceptions
 │
-├── tests/                  # Professional test suite
-│   ├── test_lexer/         # Lexer tests
-│   ├── test_parser/        # Parser tests
-│   ├── integration/        # End-to-end tests
-│   └── fixtures/           # Test data
-│   └── regression/         # Regression test
+├── tests/                  # Test suite
+│   ├── test_lexer/         # Lexer unit tests
+│   ├── test_parser/        # Parser unit tests
+│   ├── test_backend/       # Codegen / type-mapper unit tests
+│   ├── fixtures/           # HAL/S snippets used by unit tests
+│   └── regression/         # End-to-end compile of example .hal programs
 │
 ├── docs/                   # Documentation (MkDocs ready)
 ├── examples/               # Usage examples
@@ -410,24 +413,81 @@ resnik/
 
 ## Testing
 
-### Testing Resnik
+Unit tests live under `tests/` and are run with [pytest](https://pytest.org/).
+They exercise the lexer, parser, and Rust backend as Python code — they do
+**not** invoke `rustc`. From the repository root, with the venv from
+[Installation](#installation) activated (`pip install -e ".[dev]"` or
+`pip install -e ".[test]"`):
+
+### Unit tests
 
 ```bash
-# Run all tests
+# Entire suite (lexer + parser + backend)
 pytest
 
-# Run with coverage
-pytest --cov=resnik
-
-# Run specific test file
-pytest tests/test_lexer/test_tokenization.py
-
-# Run with verbose output
+# Verbose (test names as they run)
 pytest -v
 
-# Run only fast tests
-pytest -m "not slow"
+# One compiler stage
+pytest tests/test_lexer
+pytest tests/test_parser
+pytest tests/test_backend
+
+# One file
+pytest tests/test_lexer/test_tokenization.py
+
+# Tests whose names match a substring
+pytest -k tokenize
 ```
+
+`pyproject.toml` already points pytest at `tests/` (`testpaths`), so a bare
+`pytest` from the repo root is enough. With the `dev` extra, tests can also
+run in parallel:
+
+```bash
+pytest -n auto
+```
+
+### Coverage
+
+```bash
+# Terminal report, including uncovered lines
+pytest --cov=resnik --cov-report=term-missing
+
+# HTML report (opens as htmlcov/index.html)
+pytest --cov=resnik --cov-report=html
+```
+
+### Regression tests
+
+`./tests/regression/run_regression.sh` is the end-to-end HAL/S suite. It
+compiles each program under `docs/HAL-S-Source-Code-Examples/` with
+`--emit-exe`, runs the resulting binary, and also exercises the template
+library (`--gen-tpl` / `--templib`) and `EXTERNAL` C-object (`--link-obj`)
+pipelines. Unlike the pytest unit tests, this **does** need `rustc`.
+
+**Prerequisites**
+
+- A git checkout (the script finds the repo root with `git rev-parse`)
+- The venv from [Installation](#installation), so `resnik-venv/bin/resnik` exists
+- `rustc` on the system path (`--emit-exe` shells out to it)
+- `cc` (the `HW_INTERFACE` case compiles `i2c.c`)
+
+The script resets `PATH` to a short system list (`/usr/bin`, `/usr/local/bin`,
+…), so a rustup-only `rustc` under `~/.cargo/bin` is not visible. Install a
+system `rustc` (or place it on one of those directories) before running.
+
+**Run**
+
+```bash
+./tests/regression/run_regression.sh
+```
+
+You can start it from anywhere inside the repo; it does not depend on the
+venv being activated. Each case prints `[✓ PASS]` or `[✗ FAIL]`. A final
+summary lists the pass/fail counts and exits `0` only if every case passed.
+Generated `.rs` files, binaries, and temporary template/link directories are
+removed when the script exits.
 
 ## Space Shuttle Flight Software History
 
