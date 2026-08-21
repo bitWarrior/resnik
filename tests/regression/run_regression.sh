@@ -556,6 +556,46 @@ run_regression_case "Yaw Rotate" \
     "Verify Resnik's ability to parse 2D matrix element assignments and trigonometric built-in functions." \
     "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/yaw_rotate/yaw_rotate.hal --emit-exe
 
+run_regression_case "Lexer Edges" \
+    "Verify block comments are token boundaries (not identifier glue), suffix '1010'B/'FF'H/'17'O and OCT literals, mixed-case hex, and a 32-character identifier." \
+    "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/lexer_edges/lexer_edges.hal --emit-exe
+
+run_regression_case "Goto Token" \
+    "Verify the one-token GOTO spelling (not just GO TO) and case-insensitive label dispatch." \
+    "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/goto_token/goto_token.hal --emit-exe
+
+run_regression_case "Group Multiply" \
+    "Verify juxtaposition multiply for NUMBER+( and )+( forms: 2.0(X+1.0) and (X+1.0)(X-1.0)." \
+    "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/group_multiply/group_multiply.hal --emit-exe
+
+run_regression_case "Replace Parametric" \
+    "Verify parameterized REPLACE name(params) BY substitution, including expansion into NUMBER+( juxtaposition." \
+    "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/replace_parametric/replace_parametric.hal --emit-exe
+
+run_regression_case "Char Pad Length" \
+    "Verify CHARACTER INITIAL blank-padding, LENGTH trailing-blank trim, blank-extended compare, and exact-fit concatenation." \
+    "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/char_pad_length/char_pad_length.hal --emit-exe
+
+run_regression_case "Bit Layout" \
+    "Verify unsized BIT \$1 as MSB of 32, BIT(16)->BIT(8) MSB keep, BIT(8)->BIT(16) MSB justify, and ARRAY OF BIT nested subscripts." \
+    "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/bit_layout/bit_layout.hal --emit-exe
+
+run_regression_case "For Semantics" \
+    "Verify DO FOR mutates the declared index (value after EXIT and after completion), BY step, and EXIT <label> from a nested loop." \
+    "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/for_semantics/for_semantics.hal --emit-exe
+
+run_regression_case "Integer Arith" \
+    "Verify INTEGER constant 7/2 folds to 3, wrapping overflow, Euclidean MOD of a negative, INTEGER ** INTEGER, and SCALAR ** 0.5." \
+    "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/integer_arith/integer_arith.hal --emit-exe
+
+run_regression_case "Compool Fault" \
+    "Verify ON ERROR in a PROGRAM that is a sibling of a COMPOOL, and COMPOOL read-modify-write taking a single lock." \
+    "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/compool_fault/compool_fault.hal --emit-exe
+
+run_regression_case "Aldrin Sys Exec" \
+    "Verify cyclic SCHEDULE ... REPEAT EVERY, WAIT UNTIL on a COMPOOL flag, and CANCEL of the cyclic task." \
+    "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/aldrin_sys_exec/aldrin_sys_exec.hal --emit-exe
+
 run_template_pipeline_case "HAL/S Template Processing" \
     "Verify Resnik template workflow including supporting the OG 'D INCLUDE TEMPLATE' pre-processor directive (Link multiple templates into main)."
 
