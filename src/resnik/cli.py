@@ -20,6 +20,7 @@ from resnik import __version__
 from resnik.lexer import Lexer
 from resnik.parser import Parser
 from resnik.backend.codegen import RustCodeGenerator
+from resnik.backend.target_spec import TARGET_NAMES
 from resnik.exceptions import ResnikError
 
 console = Console()
@@ -245,11 +246,13 @@ def parse(
 )
 @click.option(
     "--target",
-    type=click.Choice(["host", "cortex-m"]),
+    type=click.Choice(list(TARGET_NAMES)),
     default="host",
     show_default=True,
-    help="Code-generation target profile: 'host' (std) or 'cortex-m' (no_std "
-         "bare-metal firmware). Use with --emit-cargo for embedded builds.",
+    help="Code-generation target profile: 'host' (std), 'cortex-m' (ARM "
+         "no_std stub), or 'esp32-c3' (RISC-V no_std via esp-hal). Use with "
+         "--emit-cargo for embedded builds. Profiles are defined in "
+         "resnik.backend.target_spec.",
 )
 @click.option(
     "--gen-tpl",
@@ -428,7 +431,7 @@ def compile(
                 print_info(
                     "--emit-exe builds a single file with rustc; for a "
                     "bare-metal target prefer --emit-cargo (it scaffolds the "
-                    "linker script and cortex-m-rt runtime).")
+                    "runtime, linker script, and target config).")
             with Progress(
                 SpinnerColumn(),
                 TextColumn("[progress.description]{task.description}"),

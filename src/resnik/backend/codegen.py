@@ -9,6 +9,12 @@ from dataclasses import dataclass
 from typing import Optional, List
 from pathlib import Path
 
+from resnik.backend.target_spec import (
+    TARGET_NAMES,
+    TARGET_TRIPLES,
+    TargetSpec,
+    lookup_target,
+)
 from resnik.parser.ast_nodes import (
     NameAssignNode,
     NullNode,
@@ -319,25 +325,22 @@ class RustCodeGenerator:
             return f"r#{lo}"
         return lo
 
-    # Supported code-generation target profiles. "host" is the default hosted
-    # std build; "cortex-m" emits no_std + #[entry] bare-metal firmware.
-    _TARGETS = ("host", "cortex-m")
-
-    # Default cross-compilation triple for a given target profile (used by the
-    # CLI when the user doesn't pass an explicit triple).
-    TARGET_TRIPLES = {"cortex-m": "thumbv7em-none-eabihf"}
+    # Supported profiles (from target_spec.SPECS). "host" is hosted std;
+    # "cortex-m" is the no_std stub; "esp32-c3" is the RISC-V esp-hal
+    # profile. Kept as class attrs so the CLI can build click.Choice /
+    # triples without constructing a generator.
+    _TARGETS = TARGET_NAMES
+    TARGET_TRIPLES = TARGET_TRIPLES
 
     def __init__(self, target: str = "host"):
         """Initialize code generator.
 
         Args:
-            target: Code-generation profile: "host" (hosted std, the default)
-                or "cortex-m" (no_std bare-metal firmware for ARM Cortex-M).
+            target: Code-generation profile name (see ``TargetSpec`` /
+                ``target_spec.SPECS``). Default ``host``.
         """
-        if target not in self._TARGETS:
-            raise ValueError(
-                f"Unknown target '{target}'. Expected one of {self._TARGETS}.")
-        self.target = target
+        self.spec: TargetSpec = lookup_target(target)
+        self.target = self.spec.name
         self.emitter = RustEmitter()
         self.type_mapper = TypeMapper()
         self.in_main = False
@@ -929,7 +932,7 @@ use hal_rt::*;
     @property
     def _embedded(self) -> bool:
         """True for any bare-metal (no_std) target profile."""
-        return self.target != "host"
+        return self.spec.embedded
 
     def _emit_embedded_guard(self, ast: ASTNode) -> None:
         """For a no_std target, emit compile_error! for any feature whose
@@ -974,12 +977,27 @@ use hal_rt::*;
         self.emitter.emit_line("#![allow(unreachable_code)]")
         self.emitter.emit_line("#![allow(dead_code)]")
         self.emitter.emit_line()
-        if self.target == "cortex-m":
+        if self.spec.entry == "cortex-m-rt":
             # Reset vector / entry point, a halting panic handler, and a simple
             # semihosting output sink for WRITE (swap for RTT or UART later).
             self.emitter.emit_line("use cortex_m_rt::entry;")
+        elif self.spec.entry == "esp-hal":
+            self.emitter.emit_line("use esp_hal::main;")
+        if self.spec.panic == "panic-halt":
             self.emitter.emit_line("use panic_halt as _;")
+        elif self.spec.panic == "esp-backtrace":
+            self.emitter.emit_line("use esp_backtrace as _;")
+        if self.spec.write_sink == "hprintln":
             self.emitter.emit_line("use cortex_m_semihosting::hprintln;")
+        elif self.spec.write_sink == "esp-println":
+            self.emitter.emit_line("use esp_println::println;")
+        if self.spec.entry or self.spec.panic != "std" or (
+                self.spec.write_sink != "println"):
+            self.emitter.emit_line()
+        if self.spec.entry == "esp-hal":
+            # ESP-IDF 2nd-stage bootloader requires an app descriptor in the
+            # image; without it a flashed binary is rejected at boot.
+            self.emitter.emit_line("esp_bootloader_esp_idf::esp_app_desc!();")
             self.emitter.emit_line()
     
     def _generate_node(self, node: ASTNode) -> None:
@@ -1204,12 +1222,21 @@ use hal_rt::*;
             self._generate_node(proc)
             self.emitter.emit_line()
 
-        # Generate main function. On a bare-metal target this is the
-        # cortex-m-rt reset entry point: a diverging `fn main() -> !`.
-        if self.target == "cortex-m":
-            self.emitter.emit_line("#[entry]")
+        # Generate main function. On a bare-metal target this is a diverging
+        # `fn main() -> !` with the profile's entry attribute.
+        if self.spec.embedded:
+            if self.spec.entry == "esp-hal":
+                self.emitter.emit_line("#[main]")
+            else:
+                self.emitter.emit_line("#[entry]")
             self.emitter.emit_line("fn main() -> ! {")
             self.emitter.indent()
+            if self.spec.entry == "esp-hal":
+                # Clocks / watchdog; USB-serial WRITE works after this.
+                self.emitter.emit_line(
+                    "let _peripherals = "
+                    "esp_hal::init(esp_hal::Config::default());"
+                )
         else:
             self.emitter.emit_function_header("main", [], None, is_public=False)
         self.in_main = True
@@ -1217,8 +1244,8 @@ use hal_rt::*;
         self._cur_unit_is_result = False
         self._generate_unit_body(node.declarations, body)
         self.in_main = False
-        if self.target == "cortex-m":
-            # A cortex-m-rt entry never returns; park the core when done.
+        if self.spec.embedded:
+            # A no_std entry never returns; park the core when done.
             self.emitter.emit_line("loop {}")
         self.emitter.emit_block_end()
 
@@ -1845,7 +1872,7 @@ use hal_rt::*;
     def _emit_unhandled_fault(self, code_expr: str) -> None:
         """Terminate on a fault that reached the top with no handler. Hosted
         std reports to stderr and exits; a bare-metal target panics, which the
-        panic handler (panic_halt) turns into a halt."""
+        profile panic handler (panic-halt or esp-backtrace) handles."""
         if self._embedded:
             self.emitter.emit_line(
                 f'panic!("HAL/S fault {{}} (unhandled)", {code_expr});')
@@ -2318,9 +2345,9 @@ use hal_rt::*;
                 f"record={record_src}) direct-access is not yet lowered; "
                 "items below are emitted as a sequential WRITE")
 
-        # Output sink is target-dependent: hosted std uses println!; the
-        # cortex-m profile uses semihosting (swap for RTT/UART downstream).
-        if self.target == "cortex-m":
+        # Output sink is target-dependent: hosted std and esp-println use
+        # println!; the cortex-m stub uses semihosting hprintln!.
+        if self.spec.write_sink == "hprintln":
             if not node.items:
                 self.emitter.emit_line('hprintln!("").ok();')
                 return
@@ -3817,10 +3844,18 @@ use hal_rt::*;
 
         crate_name = self._sanitize_crate_name(name or proj.name)
 
-        if self.target == "cortex-m":
-            triple = target or self.TARGET_TRIPLES["cortex-m"]
-            self._emit_cortex_m_scaffold(
-                proj, crate_name, version, edition, opt_level, triple)
+        if self.spec.embedded:
+            triple = target or self.spec.triple
+            if self.spec.entry == "cortex-m-rt":
+                self._emit_cortex_m_scaffold(
+                    proj, crate_name, version, edition, opt_level, triple)
+            elif self.spec.entry == "esp-hal":
+                self._emit_esp32_c3_scaffold(
+                    proj, crate_name, version, edition, opt_level, triple)
+            else:
+                raise RuntimeError(
+                    f"No cargo scaffold for target '{self.spec.name}' "
+                    f"(entry={self.spec.entry!r})")
             main_path = src_dir / "main.rs"
             main_path.write_text(code, encoding="utf-8")
             result = CargoProjectResult(
@@ -3934,6 +3969,61 @@ use hal_rt::*;
             "}\n"
         )
         (proj / "build.rs").write_text(build_rs, encoding="utf-8")
+
+    def _emit_esp32_c3_scaffold(self, proj, crate_name, version, edition,
+                                opt_level, triple) -> None:
+        """Write a buildable no_std Cargo project for ESP32-C3 (RISC-V).
+
+        Pins the 2026 esp-hal 1.x crate family. Flash layout comes from
+        esp-hal's ``linkall.x`` — unlike Cortex-M, there is no ``memory.x``.
+        Classic Xtensa ESP32 is a different profile and is not this scaffold.
+        """
+        (proj / ".cargo").mkdir(parents=True, exist_ok=True)
+
+        cargo_toml = (
+            "[package]\n"
+            f'name = "{crate_name}"\n'
+            f'version = "{version}"\n'
+            f'edition = "{edition}"\n'
+            "\n"
+            "[dependencies]\n"
+            # Chip feature required; `rt` is on by default (#[main] + init).
+            'esp-hal = { version = "1.1", features = ["esp32c3"] }\n'
+            "esp-backtrace = { version = \"0.19\", "
+            'features = ["esp32c3", "panic-handler", "println"] }\n'
+            'esp-println = { version = "0.17", features = ["esp32c3"] }\n'
+            # 2nd-stage bootloader app descriptor (esp_app_desc! in main.rs).
+            "esp-bootloader-esp-idf = { version = \"0.5\", "
+            'features = ["esp32c3"] }\n'
+            "\n"
+            "[profile.release]\n"
+            f"opt-level = {self._toml_opt_level(opt_level)}\n"
+            "lto = true\n"
+            "codegen-units = 1\n"
+            "debug = true\n"
+        )
+        (proj / "Cargo.toml").write_text(cargo_toml, encoding="utf-8")
+
+        config_toml = (
+            f'[build]\ntarget = "{triple}"\n\n'
+            f"[target.{triple}]\n"
+            'runner = "espflash flash --monitor"\n'
+            "rustflags = [\n"
+            '  "-C", "link-arg=-Tlinkall.x",\n'
+            "  # Backtraces via esp-backtrace (RISC-V).\n"
+            '  "-C", "force-frame-pointers",\n'
+            "]\n"
+        )
+        (proj / ".cargo" / "config.toml").write_text(
+            config_toml, encoding="utf-8")
+
+        toolchain = (
+            "[toolchain]\n"
+            'channel = "stable"\n'
+            'components = ["rust-src"]\n'
+            f'targets = ["{triple}"]\n'
+        )
+        (proj / "rust-toolchain.toml").write_text(toolchain, encoding="utf-8")
 
     def _cargo_build(self, proj, crate_name, result, *, release, target):
         """Run `cargo build` for a scaffolded project and record the outcome."""
