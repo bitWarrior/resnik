@@ -62,3 +62,44 @@ class TestLoadSave:
         save_settings(IdeSettings(geometry="1x1+0+0"))
         assert p.exists()
         assert load_settings()[0].geometry == "1x1+0+0"
+
+
+class TestRecentAndView:
+    def test_touch_recent_moves_to_front_and_bounds(self):
+        s = IdeSettings()
+        for i in range(12):
+            s.touch_recent(f"/f{i}.hal")
+        assert len(s.recent) == 10 and s.recent[0] == "/f11.hal"
+        s.touch_recent("/f5.hal")
+        assert s.recent[0] == "/f5.hal" and s.recent.count("/f5.hal") == 1
+
+    def test_round_trip_recent_font_highlight(self, tmp_path):
+        p = tmp_path / "ide.json"
+        s = IdeSettings(recent=["/a.hal", "/b.hal"], font_size=14, highlighting=False)
+        save_settings(s, p)
+        loaded, _ = load_settings(p)
+        assert loaded.recent == ["/a.hal", "/b.hal"]
+        assert loaded.font_size == 14 and loaded.highlighting is False
+
+    def test_bad_values_fall_back(self):
+        s = IdeSettings.from_dict({"recent": "nope", "font_size": "huge", "highlighting": 0})
+        assert s.recent == [] and s.font_size == 11 and s.highlighting is False
+        assert IdeSettings.from_dict({"font_size": 1000}).font_size == 40
+        assert IdeSettings.from_dict({"recent": ["/x", 3, None]}).recent == ["/x"]
+        assert IdeSettings.from_dict({"theme": "dark"}).theme == "dark"
+        assert IdeSettings.from_dict({"theme": "purple"}).theme == "light"
+        assert IdeSettings().theme == "light"
+        assert IdeSettings().show_target_panel is True
+        assert IdeSettings.from_dict({"show_target_panel": 0}).show_target_panel is False
+        assert IdeSettings.from_dict({"log_height": "x"}).log_height == 0
+        assert IdeSettings.from_dict({"log_height": 333}).log_height == 333
+        assert IdeSettings.from_dict({"sash_target_panel": 640}).sash_target_panel == 640
+        assert IdeSettings().sash_target_panel == 0
+        assert IdeSettings().log_font_size == 10
+        assert IdeSettings.from_dict({"log_font_size": 13}).log_font_size == 13
+        assert IdeSettings.from_dict({"log_font_size": "big"}).log_font_size == 10
+        s2 = IdeSettings.from_dict({"ui_font_family": "Noto Sans", "ui_font_size": 13,
+                                    "mono_font_family": "Fira Code"})
+        assert (s2.ui_font_family, s2.ui_font_size, s2.mono_font_family) == ("Noto Sans", 13, "Fira Code")
+        assert IdeSettings.from_dict({"ui_font_size": 99}).ui_font_size == 24
+        assert IdeSettings().ui_font_family == "" and IdeSettings().ui_font_size == 0

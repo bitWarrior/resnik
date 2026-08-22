@@ -12,9 +12,11 @@ from __future__ import annotations
 import time
 import tkinter as tk
 from tkinter import filedialog, ttk
+from tkinter import font as tkfont
 from tkinter.scrolledtext import ScrolledText
 from typing import Callable, Optional
 
+from resnik_ide import theme
 from resnik_ide.dispatch import Dispatcher
 
 LEVELS = ("info", "ok", "warn", "error", "cmd", "raw", "diag")
@@ -23,15 +25,23 @@ LEVELS = ("info", "ok", "warn", "error", "cmd", "raw", "diag")
 class LogView(ttk.Frame):
     """Scrolling, read-only log with per-level colours and clickable lines."""
 
-    def __init__(self, master: tk.Misc, **kwargs) -> None:
+    DEFAULT_FONT_SIZE = 10
+
+    def __init__(self, master: tk.Misc, *, font_size: int = DEFAULT_FONT_SIZE,
+                 on_font_size: Optional[Callable[[int], None]] = None, **kwargs) -> None:
         super().__init__(master, **kwargs)
+        self.font = tkfont.nametofont("TkFixedFont").copy()
+        self.bold_font = self.font.copy()
+        self.bold_font.configure(weight="bold")
+        self._on_font_size = on_font_size
         self.text = ScrolledText(
-            self, wrap="word", state="disabled", height=10, undo=False
+            self, wrap="word", state="disabled", height=10, undo=False, font=self.font
         )
         self.text.pack(fill="both", expand=True)
         self._link_seq = 0
         self._links = {}  # link tag -> callback (for click_at / tests)
         self._configure_tags()
+        self.set_font_size(font_size, notify=False)
 
         self._menu = tk.Menu(self, tearoff=False)
         self._menu.add_command(label="Clear", command=self.clear)
@@ -39,19 +49,60 @@ class LogView(ttk.Frame):
         self._menu.add_command(label="Save log…", command=self.save_dialog)
         self.text.bind("<Button-3>", self._popup)
         self.text.bind("<Button-2>", self._popup)  # macOS two-finger / middle
+        self.text.bind("<Control-MouseWheel>", self._on_ctrl_wheel)
+        self.text.bind("<Control-Button-4>", lambda e: self.zoom(+1) or "break")
+        self.text.bind("<Control-Button-5>", lambda e: self.zoom(-1) or "break")
 
     # -- appearance ---------------------------------------------------------
 
     def _configure_tags(self) -> None:
+        self.apply_palette(theme.palette())
+
+    def apply_palette(self, p: dict) -> None:
+        """Recolour the log text and its level tags for palette ``p``."""
         t = self.text
-        t.tag_configure("ts", foreground="#888888")
-        t.tag_configure("info", foreground="#1f4e79")
-        t.tag_configure("ok", foreground="#1a7f37")
-        t.tag_configure("warn", foreground="#9a6700")
-        t.tag_configure("error", foreground="#c42b1c")
-        t.tag_configure("cmd", foreground="#5a32a3", font=("TkFixedFont", 10, "bold"))
-        t.tag_configure("raw", foreground="#444444", font="TkFixedFont")
-        t.tag_configure("diag", foreground="#c42b1c", underline=True)
+        theme.style_text(t, p, kind="log")
+        t.tag_configure("ts", foreground=p["ts"])
+        t.tag_configure("info", foreground=p["info"])
+        t.tag_configure("ok", foreground=p["ok"])
+        t.tag_configure("warn", foreground=p["warn"])
+        t.tag_configure("error", foreground=p["error"])
+        t.tag_configure("cmd", foreground=p["cmd"], font=self.bold_font)
+        t.tag_configure("raw", foreground=p["raw"], font=self.font)
+        t.tag_configure("diag", foreground=p["link"], underline=True)
+        theme.style_menu(self._menu, p) if hasattr(self, "_menu") else None
+
+    # -- font -----------------------------------------------------------------
+
+    @property
+    def font_size(self) -> int:
+        return int(self.font.cget("size"))
+
+    def set_font_size(self, size: int, *, notify: bool = True) -> int:
+        size = max(6, min(40, int(size)))
+        self.font.configure(size=size)
+        self.bold_font.configure(size=size)
+        if notify and self._on_font_size is not None:
+            self._on_font_size(size)
+        return size
+
+    def set_font_family(self, family: str) -> None:
+        family = family or tkfont.nametofont("TkFixedFont").cget("family")
+        self.font.configure(family=family)
+        self.bold_font.configure(family=family)
+
+    @property
+    def font_family(self) -> str:
+        return self.font.cget("family")
+
+    def zoom(self, delta: int) -> int:
+        """+1 / -1 / 0 (reset to the default size)."""
+        size = self.DEFAULT_FONT_SIZE if delta == 0 else self.font_size + delta
+        return self.set_font_size(size)
+
+    def _on_ctrl_wheel(self, event: tk.Event) -> str:
+        self.zoom(+1 if event.delta > 0 else -1)
+        return "break"
 
     # -- API ----------------------------------------------------------------
 

@@ -85,3 +85,22 @@ class TestLogSink:
         d.drain()
         assert v.get_text().splitlines()[-1].endswith("tail-no-newline")
         assert sink.isatty() is False
+
+
+class TestLogFont:
+    def test_default_and_zoom_clamped(self, tk_root):
+        v = LogView(tk_root)
+        assert v.font_size == LogView.DEFAULT_FONT_SIZE
+        assert v.zoom(+1) == 11 and v.font_size == 11
+        assert int(v.bold_font.cget("size")) == 11
+        assert v.zoom(0) == LogView.DEFAULT_FONT_SIZE
+        assert v.set_font_size(1) == 6 and v.set_font_size(100) == 40
+
+    def test_initial_size_and_callback(self, tk_root):
+        seen = []
+        v = LogView(tk_root, font_size=14, on_font_size=seen.append)
+        assert v.font_size == 14 and seen == []  # constructor does not notify
+        v.zoom(-1)
+        assert seen == [13]
+        assert v.text.tag_cget("raw", "font") == str(v.font)
+        assert v.text.tag_cget("cmd", "font") == str(v.bold_font)

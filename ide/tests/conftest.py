@@ -90,6 +90,11 @@ def app(settings_file, fake_toolchain):
     ide.update()
     pump(ide, lambda: not ide.probing and ide.dispatcher.pending == 0)
     yield ide
+    try:
+        if ide.theme_name != "light":
+            ide.set_theme("light")  # theme state is process-global; leave it clean
+    except Exception:
+        pass
     ide.shutdown()
 
 

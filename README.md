@@ -305,8 +305,10 @@ in `~/.config/resnik/ide.json`. The **Target** panel checks the Rust
 toolchain for the selected profile (`rustup target add`, `rust-src`,
 `espflash` / `probe-rs` — one-click Install), lists serial ports, and runs
 **Build / Flash & Run / Monitor / Run on host / Stop** through a streamed,
-cancellable process runner. See `ide/README.md` for details and
-`docs/Resnik IDE/` for the roadmap.
+cancellable process runner. The editor highlights HAL/S syntax using the
+compiler's own lexer and remembers recent files, font size and window
+layout. See `ide/README.md` and the "Desktop IDE" chapter of the Users
+Guide (`docs/Resnik Users Guide/`) for details.
 
 ### Cross-Compilation (Embedded Targets)
 

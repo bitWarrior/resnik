@@ -4,8 +4,11 @@ extra-arguments field, with a live "equivalent command" preview.
 
 Usage::
 
-    dlg = OptionsDialog(parent, settings, source=current_file)
+    dlg = OptionsDialog(parent, settings, source=current_file, on_apply=callback)
     new_settings = dlg.show()        # None if cancelled
+
+**Apply** calls ``on_apply(settings)`` and keeps the dialog open; **OK**
+applies (if anything changed since the last Apply) and closes.
 
 ``show()`` is modal.  Tests build the dialog, poke the widgets/vars, and
 call ``collect()`` / ``_on_ok()`` directly without ``show()``.
@@ -20,6 +23,7 @@ from typing import Callable, List, Optional, Union
 
 from resnik.backend.target_spec import TARGET_NAMES
 
+from resnik_ide import theme
 from resnik_ide.options import OPT_LEVELS, IdeCompileSettings
 
 _PAD = {"padx": 6, "pady": 3}
@@ -32,6 +36,7 @@ class _ListField(ttk.Frame):
                  on_change: Optional[Callable[[], None]] = None, height: int = 4):
         super().__init__(master)
         self.text = tk.Text(self, height=height, width=48, wrap="none", undo=True)
+        theme.style_text(self.text, kind="field")
         self.text.grid(row=0, column=0, sticky="nsew", rowspan=3)
         sb = ttk.Scrollbar(self, orient="vertical", command=self.text.yview)
         sb.grid(row=0, column=1, sticky="ns", rowspan=3)
@@ -84,13 +89,17 @@ class OptionsDialog(tk.Toplevel):
     """Modal editor for :class:`IdeCompileSettings`."""
 
     def __init__(self, master: tk.Misc, settings: IdeCompileSettings,
-                 source: Union[str, Path, None] = None) -> None:
+                 source: Union[str, Path, None] = None,
+                 on_apply: Optional[Callable[[IdeCompileSettings], None]] = None) -> None:
         super().__init__(master)
         self.title("Compiler Options")
         self.resizable(True, True)
+        self.configure(background=theme.palette()["bg"])
         self.result: Optional[IdeCompileSettings] = None
         self._source = str(source) if source else None
         self._initial = settings.copy()
+        self._on_apply = on_apply
+        self._applied = settings.copy()  # what the app currently has
 
         # -- variables -----------------------------------------------------------
         self.v_target = tk.StringVar(value=settings.target)
@@ -136,7 +145,7 @@ class OptionsDialog(tk.Toplevel):
                        command=lambda: self._browse(var, browse)).grid(
                 row=row, column=2, sticky="ew", **_PAD)
         if hint:
-            ttk.Label(parent, text=hint, foreground="#666666").grid(
+            ttk.Label(parent, text=hint, style="Muted.TLabel").grid(
                 row=row + 1, column=1, sticky="w", padx=6, pady=(0, 4))
         parent.columnconfigure(1, weight=1)
 
@@ -149,7 +158,7 @@ class OptionsDialog(tk.Toplevel):
         self.cb_target.grid(row=0, column=1, sticky="w", **_PAD)
         ttk.Label(f, text="host = std Rust on this machine; cortex-m / esp32-c3 = no_std "
                           "firmware (use with --emit-cargo)",
-                  foreground="#666666", wraplength=420, justify="left").grid(
+                  style="Muted.TLabel", wraplength=420, justify="left").grid(
             row=1, column=1, sticky="w", padx=6, pady=(0, 8))
 
         ttk.Checkbutton(f, text="Build a native executable with rustc (--emit-exe)",
@@ -177,7 +186,7 @@ class OptionsDialog(tk.Toplevel):
         f = ttk.Frame(nb, padding=8)
         nb.add(f, text="Linking")
         ttk.Label(f, text="For EXTERNAL symbols with --emit-exe (one entry per line).",
-                  foreground="#666666").grid(row=0, column=0, columnspan=2, sticky="w", **_PAD)
+                  style="Muted.TLabel").grid(row=0, column=0, columnspan=2, sticky="w", **_PAD)
         ttk.Label(f, text="Linker search dirs (-L / --link-search)").grid(row=1, column=0, sticky="nw", **_PAD)
         self.lf_link_search = _ListField(f, browse="dir", on_change=self.refresh_preview)
         self.lf_link_search.grid(row=1, column=1, sticky="ew", **_PAD)
@@ -198,7 +207,7 @@ class OptionsDialog(tk.Toplevel):
         self.lf_templib = _ListField(f, browse="dir", on_change=self.refresh_preview)
         self.lf_templib.grid(row=2, column=1, sticky="ew", **_PAD)
         ttk.Label(f, text="Searched by 'D INCLUDE TEMPLATE <name>'; the source's own directory "
-                          "is always searched.", foreground="#666666", wraplength=420,
+                          "is always searched.", style="Muted.TLabel", wraplength=420,
                   justify="left").grid(row=3, column=1, sticky="w", padx=6)
         f.columnconfigure(1, weight=1)
 
@@ -216,7 +225,7 @@ class OptionsDialog(tk.Toplevel):
         self.preview.pack(side="left", fill="x", expand=True)
         ttk.Button(pf, text="Copy", command=self._copy_preview).pack(side="left", padx=(6, 0))
         ttk.Label(self, text="Relative paths are resolved against the source file's directory.",
-                  foreground="#666666").pack(anchor="w", padx=14)
+                  style="Muted.TLabel").pack(anchor="w", padx=14)
 
         bf = ttk.Frame(self, padding=(8, 6))
         bf.pack(fill="x")
@@ -224,6 +233,8 @@ class OptionsDialog(tk.Toplevel):
         ttk.Button(bf, text="Cancel", command=self._on_cancel).pack(side="right")
         self.btn_ok = ttk.Button(bf, text="OK", command=self._on_ok, default="active")
         self.btn_ok.pack(side="right", padx=(0, 6))
+        self.btn_apply = ttk.Button(bf, text="Apply", command=self.apply)
+        self.btn_apply.pack(side="right", padx=(0, 6))
 
         # list fields are created in tabs; populate now that they exist
         self.lf_link_search.set(self._initial.link_search)
@@ -252,8 +263,8 @@ class OptionsDialog(tk.Toplevel):
             extra_args=self.v_extra.get().strip(),
         )
 
-    def apply(self, settings: IdeCompileSettings) -> None:
-        """Push settings into the widgets."""
+    def load(self, settings: IdeCompileSettings) -> None:
+        """Push settings into the widgets (does not apply them to the app)."""
         self.v_target.set(settings.target)
         self.v_emit_exe.set(settings.emit_exe)
         self.v_opt_level.set(settings.opt_level)
@@ -271,7 +282,7 @@ class OptionsDialog(tk.Toplevel):
         self.refresh_preview()
 
     def reset_defaults(self) -> None:
-        self.apply(IdeCompileSettings())
+        self.load(IdeCompileSettings())
 
     def refresh_preview(self) -> None:
         try:
@@ -299,8 +310,16 @@ class OptionsDialog(tk.Toplevel):
             return
         self._on_ok()
 
+    def apply(self) -> IdeCompileSettings:
+        """Hand the current settings to the app without closing."""
+        current = self.collect()
+        if self._on_apply is not None and current != self._applied:
+            self._on_apply(current)
+        self._applied = current
+        return current
+
     def _on_ok(self) -> None:
-        self.result = self.collect()
+        self.result = self.apply()
         self.destroy()
 
     def _on_cancel(self) -> None:

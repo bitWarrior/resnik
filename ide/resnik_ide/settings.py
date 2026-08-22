@@ -16,12 +16,21 @@ import os
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from resnik_ide.options import IdeCompileSettings
 
 SETTINGS_VERSION = 1
 ENV_VAR = "RESNIK_IDE_CONFIG"
+MAX_RECENT = 10
+
+
+def _int_or(val: Any, default: int, lo: int, hi: int) -> int:
+    try:
+        v = int(val)
+    except (TypeError, ValueError):
+        return default
+    return max(lo, min(hi, v))
 
 
 def settings_path() -> Path:
@@ -41,6 +50,17 @@ class IdeSettings:
     geometry: str = ""
     port: str = ""   # serial port for espflash
     chip: str = ""   # probe-rs --chip
+    recent: List[str] = field(default_factory=list)  # most recent first
+    font_size: int = 11
+    log_font_size: int = 10
+    ui_font_family: str = ""   # "" = platform default
+    ui_font_size: int = 0      # 0 = platform default
+    mono_font_family: str = "" # editor/log family; "" = TkFixedFont default
+    highlighting: bool = True
+    theme: str = "light"
+    show_target_panel: bool = True
+    log_height: int = 0  # log pane height in pixels; 0 = default split
+    sash_target_panel: int = 0  # pixels from the left edge; 0 = default width
     version: int = SETTINGS_VERSION
 
     def to_dict(self) -> Dict[str, Any]:
@@ -49,8 +69,24 @@ class IdeSettings:
             "geometry": self.geometry,
             "port": self.port,
             "chip": self.chip,
+            "recent": list(self.recent),
+            "font_size": self.font_size,
+            "log_font_size": self.log_font_size,
+            "ui_font_family": self.ui_font_family,
+            "ui_font_size": self.ui_font_size,
+            "mono_font_family": self.mono_font_family,
+            "highlighting": self.highlighting,
+            "theme": self.theme,
+            "show_target_panel": self.show_target_panel,
+            "log_height": self.log_height,
+            "sash_target_panel": self.sash_target_panel,
             "compile": self.compile.to_dict(),
         }
+
+    def touch_recent(self, path: str, limit: int = MAX_RECENT) -> None:
+        """Move ``path`` to the front of the recent list (bounded)."""
+        self.recent = [path] + [p for p in self.recent if p != path]
+        del self.recent[limit:]
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "IdeSettings":
@@ -62,6 +98,18 @@ class IdeSettings:
             geometry=str(data.get("geometry", "") or ""),
             port=str(data.get("port", "") or ""),
             chip=str(data.get("chip", "") or ""),
+            recent=[str(p) for p in (data.get("recent") if isinstance(data.get("recent"), list) else [])
+                    if isinstance(p, str)][:MAX_RECENT],
+            font_size=_int_or(data.get("font_size"), 11, 6, 40),
+            log_font_size=_int_or(data.get("log_font_size"), 10, 6, 40),
+            ui_font_family=str(data.get("ui_font_family") or ""),
+            ui_font_size=_int_or(data.get("ui_font_size"), 0, 0, 24),
+            mono_font_family=str(data.get("mono_font_family") or ""),
+            highlighting=bool(data.get("highlighting", True)),
+            theme=data.get("theme") if data.get("theme") in ("light", "dark") else "light",
+            show_target_panel=bool(data.get("show_target_panel", True)),
+            log_height=_int_or(data.get("log_height"), 0, 0, 100000),
+            sash_target_panel=_int_or(data.get("sash_target_panel"), 0, 0, 100000),
             version=int(data.get("version", SETTINGS_VERSION) or SETTINGS_VERSION),
         )
 

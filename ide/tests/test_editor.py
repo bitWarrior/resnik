@@ -126,3 +126,45 @@ class TestProxyRobustness:
         e.text.edit_undo()          # nothing to undo
         e.text.index("tk::anchor1")  # missing selection anchor
         assert reported == []
+
+
+class TestHighlightingAndFont:
+    def test_set_text_highlights_immediately(self, tk_root):
+        e = Editor(tk_root)
+        e.set_text("A: PROGRAM;\n  DECLARE X INTEGER;\nCLOSE A;\n")
+        assert ("2.2", "2.9") in e.highlighted("hl_keyword")
+        assert ("2.12", "2.19") in e.highlighted("hl_type")
+        assert e.highlighted("hl_label") == [("1.0", "1.1")]
+
+    def test_typing_rehighlights_after_debounce(self, tk_root):
+        e = Editor(tk_root)
+        e.set_text("A: PROGRAM;\n")
+        e.text.insert("end", "  WRITE(6) 'hi';\n")
+        tk_root.update()
+        # schedule fired via <<Modified>>; run the pending after() callbacks
+        import time
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline and not e.highlighted("hl_string"):
+            tk_root.update()
+            time.sleep(0.02)
+        assert e.highlighted("hl_string") == [("2.11", "2.15")]
+
+    def test_highlighting_can_be_disabled(self, tk_root):
+        e = Editor(tk_root)
+        e.set_text("A: PROGRAM;\nCLOSE A;\n")
+        assert e.highlighted("hl_keyword")
+        e.set_highlighting(False)
+        assert e.highlighted("hl_keyword") == []
+        e.text.insert("end", "DECLARE X INTEGER;\n")
+        e.highlight_now()
+        assert e.highlighted("hl_keyword") == []
+        e.set_highlighting(True)
+        assert e.highlighted("hl_keyword")
+
+    def test_font_size_clamped(self, tk_root):
+        e = Editor(tk_root)
+        assert e.font_size == 11
+        assert e.set_font_size(14) == 14 and e.font_size == 14
+        assert e.set_font_size(2) == 6
+        assert e.set_font_size(99) == 40
+        assert int(e._bold_font.cget("size")) == 40

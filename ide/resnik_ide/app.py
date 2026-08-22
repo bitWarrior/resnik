@@ -22,6 +22,7 @@ from __future__ import annotations
 import contextlib
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import tkinter as tk
@@ -45,12 +46,14 @@ from resnik_ide.dispatch import Dispatcher, Job
 from resnik_ide.editor import Editor
 from resnik_ide.logview import LogSink, LogView
 from resnik_ide.options import IdeCompileSettings, OptionsError
-from resnik_ide import devices, toolchain
+from resnik_ide import desktop, devices, fonts, theme, toolchain
+from resnik_ide.font_dialog import FontDialog
 from resnik_ide.options_dialog import OptionsDialog
 from resnik_ide.reporter import LogReporter
 from resnik_ide.runner import ProcessResult, ProcessRunner
 from resnik_ide.settings import load_settings, save_settings, settings_path
 from resnik_ide.target_panel import TargetPanel
+from resnik_ide.targetcheck import target_issues
 from resnik_ide.toolchain import Requirement, ToolchainStatus
 
 HAL_FILETYPES = [("HAL/S source", "*.hal *.hs"), ("All files", "*")]
@@ -61,10 +64,13 @@ class ResnikIDE(tk.Tk):
     """The IDE window."""
 
     def __init__(self) -> None:
-        super().__init__()
+        # WM_CLASS = (resnik-ide, resnik-ide): what a .desktop entry's
+        # StartupWMClass matches, so GNOME & co. show our icon/launcher.
+        super().__init__(className=desktop.WM_CLASS, baseName=desktop.WM_CLASS)
         self.title(f"Resnik IDE — {UNTITLED}")
         self.geometry("1100x780")
         self.minsize(700, 480)
+        self._set_window_icon()
 
         self.current_path: Optional[Path] = None
         self._job: Optional[Job] = None
@@ -79,6 +85,8 @@ class ResnikIDE(tk.Tk):
         self.var_chip = tk.StringVar(value=self.settings.chip)
         self._syncing = False  # guard: toolbar vars <-> settings
 
+        theme.apply(self, self.settings.theme)
+        fonts.apply_ui_font(self, self.settings.ui_font_family, self.settings.ui_font_size)
         self.dispatcher = Dispatcher(self)
         self.runner = ProcessRunner(self.dispatcher)
         self.toolchain_status: Optional[ToolchainStatus] = None
@@ -109,6 +117,25 @@ class ResnikIDE(tk.Tk):
         self.var_target.trace_add("write", lambda *_a: self._toolbar_changed())
         self.var_port.trace_add("write", lambda *_a: self._device_changed())
         self.var_chip.trace_add("write", lambda *_a: self._device_changed())
+        self.editor.set_font_size(self.settings.font_size)
+        if self.settings.mono_font_family:
+            self.editor.set_font_family(self.settings.mono_font_family)
+            self.log.set_font_family(self.settings.mono_font_family)
+        self.editor.set_highlighting(self.settings.highlighting)
+        if not self.settings.show_target_panel:
+            self.set_target_panel_visible(False, save=False)
+        self._paned.bind("<ButtonRelease-1>", self._on_sash_release)
+        self._outer.bind("<ButtonRelease-1>", self._on_sash_release)
+        # Keep re-applying the saved split while the window manager is still
+        # delivering the initial geometry; stop once the user grabs a sash or
+        # the startup window has passed.
+        self._sash_restore_active = True
+        self._paned.bind("<Configure>", lambda e: self._restore_sash_if_active())
+        self._outer.bind("<Configure>", lambda e: self._restore_sash_if_active())
+        self.after(2000, self._end_sash_restore)
+        if self.settings.log_height > 0 or self.settings.sash_target_panel > 0:
+            self.after(50, self._restore_sash)
+        self._rebuild_recent_menu()
         self.log.log("Ready. File → Open… to load a .hal file, or start typing.", "info")
         self._update_title()
         self.refresh_devices()
@@ -125,9 +152,15 @@ class ResnikIDE(tk.Tk):
         m_file.add_command(label="Save", accelerator="Ctrl+S", command=self.save_file)
         m_file.add_command(label="Save As…", accelerator="Ctrl+Shift+S",
                            command=self.save_file_as)
+        self._menu_recent = tk.Menu(m_file, tearoff=False)
+        m_file.add_cascade(label="Open Recent", menu=self._menu_recent)
+        m_file.add_separator()
+        m_file.add_command(label="Open Containing Folder", command=self.open_folder)
+        m_file.add_command(label="Open Cargo Project Folder", command=self.open_project_folder)
         m_file.add_separator()
         m_file.add_command(label="Exit", accelerator="Ctrl+Q", command=self.on_close)
         menubar.add_cascade(label="File", menu=m_file)
+        self._menu_file = m_file
 
         m_edit = tk.Menu(menubar, tearoff=False)
         for item in (
@@ -148,6 +181,20 @@ class ResnikIDE(tk.Tk):
                     label=label, accelerator=accel,
                     command=lambda e=ev: self.editor.text.event_generate(e))
         menubar.add_cascade(label="Edit", menu=m_edit)
+
+        m_view = tk.Menu(menubar, tearoff=False)
+        self.var_highlight = tk.BooleanVar(value=self.settings.highlighting)
+        m_view.add_checkbutton(label="Syntax Highlighting", variable=self.var_highlight,
+                               command=self._toggle_highlight)
+        self.var_dark = tk.BooleanVar(value=self.settings.theme == "dark")
+        m_view.add_checkbutton(label="Dark Mode", accelerator="Ctrl+Shift+D",
+                               variable=self.var_dark, command=self._toggle_dark)
+        self.var_show_target = tk.BooleanVar(value=self.settings.show_target_panel)
+        m_view.add_checkbutton(label="Target Panel", accelerator="Ctrl+Shift+T",
+                               variable=self.var_show_target, command=self._toggle_target_panel)
+        m_view.add_separator()
+        m_view.add_command(label="Fonts…", command=self.open_fonts)
+        menubar.add_cascade(label="View", menu=m_view)
 
         m_run = tk.Menu(menubar, tearoff=False)
         m_run.add_command(label="Semantic Check", accelerator="F7",
@@ -174,10 +221,16 @@ class ResnikIDE(tk.Tk):
         menubar.add_cascade(label="Log", menu=m_log)
 
         m_help = tk.Menu(menubar, tearoff=False)
+        m_help.add_command(label="Install Desktop Entry (launcher + icon)",
+                           command=self.install_desktop_entry)
+        m_help.add_command(label="Remove Desktop Entry", command=self.uninstall_desktop_entry)
+        m_help.add_separator()
         m_help.add_command(label="About", command=self.about)
         menubar.add_cascade(label="Help", menu=m_help)
 
         self.config(menu=menubar)
+        self._menubar = menubar
+        self._style_menus()
 
     def _build_toolbar(self) -> None:
         bar = ttk.Frame(self, padding=(6, 4))
@@ -195,7 +248,7 @@ class ResnikIDE(tk.Tk):
         self.cb_target.pack(side="left")
         self.btn_options = ttk.Button(bar, text="Options…", command=self.open_options)
         self.btn_options.pack(side="left", padx=(10, 0))
-        self.busy_label = ttk.Label(bar, text="", foreground="#5a32a3")
+        self.busy_label = ttk.Label(bar, text="", style="Accent.TLabel")
         self.busy_label.pack(side="right")
 
     def _build_panes(self) -> None:
@@ -203,7 +256,8 @@ class ResnikIDE(tk.Tk):
         outer.pack(side="top", fill="both", expand=True)
         paned = ttk.PanedWindow(outer, orient="vertical")
         self.editor = Editor(paned, on_dirty=self._on_dirty, on_cursor=self._on_cursor)
-        self.log = LogView(paned)
+        self.log = LogView(paned, font_size=self.settings.log_font_size,
+                           on_font_size=self._log_font_changed)
         paned.add(self.editor, weight=3)
         paned.add(self.log, weight=1)
         self.target_panel = TargetPanel(
@@ -246,6 +300,13 @@ class ResnikIDE(tk.Tk):
         self.bind_all("<F8>", lambda e: self.flash_run())
         self.bind_all("<F9>", lambda e: self.build_and_run())
         self.bind_all("<Escape>", lambda e: self.stop())
+        for seq in ("<Control-plus>", "<Control-equal>", "<Control-KP_Add>"):
+            self.bind_all(seq, lambda e: self.zoom(+1))
+        for seq in ("<Control-minus>", "<Control-KP_Subtract>"):
+            self.bind_all(seq, lambda e: self.zoom(-1))
+        self.bind_all("<Control-0>", lambda e: self.zoom(0))
+        self.bind_all("<Control-D>", lambda e: self.toggle_dark())
+        self.bind_all("<Control-T>", lambda e: self.toggle_target_panel())
 
     # -------------------------------------------------------------- state --
 
@@ -322,6 +383,7 @@ class ResnikIDE(tk.Tk):
         self.log.log(f"Opened {self.current_path}", "info")
         self._update_title()
         self.set_status("")
+        self._touch_recent(self.current_path)
         return True
 
     def save_file(self) -> bool:
@@ -336,7 +398,10 @@ class ResnikIDE(tk.Tk):
         if not path:
             return False
         self.current_path = Path(path).resolve()
-        return self._save_to(self.current_path)
+        ok = self._save_to(self.current_path)
+        if ok:
+            self._touch_recent(self.current_path)
+        return ok
 
     def _save_to(self, path: Path) -> bool:
         try:
@@ -369,6 +434,261 @@ class ResnikIDE(tk.Tk):
             self.log.log(f"Could not write scratch file: {exc}", "error")
             return None
         return tmp
+
+    # ------------------------------------------------------ recent / view --
+
+    def _touch_recent(self, path: Path) -> None:
+        self.settings.touch_recent(str(path))
+        self._save_settings()
+        self._rebuild_recent_menu()
+
+    def _rebuild_recent_menu(self) -> None:
+        m = self._menu_recent
+        m.delete(0, "end")
+        if not self.settings.recent:
+            m.add_command(label="(empty)", state="disabled")
+            return
+        for p in self.settings.recent:
+            m.add_command(label=p, command=lambda q=p: self.open_recent(q))
+        m.add_separator()
+        m.add_command(label="Clear Recent", command=self._clear_recent)
+
+    def _clear_recent(self) -> None:
+        self.settings.recent = []
+        self._save_settings()
+        self._rebuild_recent_menu()
+
+    def open_recent(self, path: str) -> bool:
+        if not os.path.exists(path):
+            self.log.log(f"Recent file no longer exists: {path}", "warn")
+            self.settings.recent = [p for p in self.settings.recent if p != path]
+            self._save_settings()
+            self._rebuild_recent_menu()
+            return False
+        return self.open_file(path)
+
+    def zoom(self, delta: int) -> int:
+        """Change the editor font size (+1 / -1 / 0 = reset to 11)."""
+        size = 11 if delta == 0 else self.editor.font_size + delta
+        size = self.editor.set_font_size(size)
+        if size != self.settings.font_size:
+            self.settings.font_size = size
+            self._save_settings()
+        self.set_status(f"Font size {size}")
+        return size
+
+    # -- theme --------------------------------------------------------------------------
+
+    def _style_menus(self) -> None:
+        for m in theme.all_menus(self._menubar):
+            theme.style_menu(m)
+        theme.style_menu(self._menu_recent)
+
+    def set_theme(self, name: str) -> None:
+        """Switch light/dark: ttk styles, editor, log, menus; persisted."""
+        if name not in theme.THEME_NAMES:
+            name = "light"
+        p = theme.apply(self, name)
+        self.editor.apply_palette(p)
+        self.log.apply_palette(p)
+        self._style_menus()
+        self.var_dark.set(name == "dark")
+        if self.settings.theme != name:
+            self.settings.theme = name
+            self._save_settings()
+        self.log.log(f"Theme: {name}", "info")
+
+    # -- editor/log sash ------------------------------------------------------------
+
+    @property
+    def log_height(self) -> int:
+        """Current height of the log pane in pixels (0 if not laid out yet)."""
+        try:
+            height = self._paned.winfo_height()
+            if height <= 1:
+                return 0
+            return max(0, height - int(self._paned.sashpos(0)))
+        except tk.TclError:
+            return 0
+
+    def _sash_positions(self) -> tuple:
+        """(log height, target-panel sash) in pixels; 0 if unknown/hidden."""
+        h = 0
+        if self.target_panel_visible:
+            try:
+                if self._outer.winfo_width() > 1:
+                    h = int(self._outer.sashpos(0))
+            except tk.TclError:
+                pass
+        return self.log_height, h
+
+    def _on_sash_release(self, _event=None) -> None:
+        self._end_sash_restore()
+        self._remember_sash()
+
+    def _end_sash_restore(self) -> None:
+        self._sash_restore_active = False
+
+    def _restore_sash_if_active(self) -> None:
+        if getattr(self, "_sash_restore_active", False):
+            self._restore_sash(attempts=0)
+
+    def _remember_sash(self) -> None:
+        """Persist the log height and the Target panel width (called on sash
+        release and on close)."""
+        lh, h = self._sash_positions()
+        changed = False
+        if lh > 0 and lh != self.settings.log_height:
+            self.settings.log_height = lh
+            changed = True
+        if h > 0 and h != self.settings.sash_target_panel:
+            self.settings.sash_target_panel = h
+            changed = True
+        if changed:
+            self._save_settings()
+
+    def _restore_sash(self, attempts: int = 20) -> None:
+        """Apply the saved log height / panel width once the paned windows
+        have real sizes (geometry arrives asynchronously from the WM)."""
+        want_log, want_h = self.settings.log_height, self.settings.sash_target_panel
+        height, width = self._paned.winfo_height(), self._outer.winfo_width()
+        if (height <= 1 or width <= 1) and attempts > 0:
+            self.after(50, lambda: self._restore_sash(attempts - 1))
+            return
+        if want_log > 0 and height > 1:
+            pos = height - want_log
+            try:
+                self._paned.sashpos(0, max(60, min(pos, max(60, height - 60))))
+            except tk.TclError:
+                pass
+        if want_h > 0 and self.target_panel_visible and width > 1:
+            try:
+                self._outer.sashpos(0, max(200, min(want_h, max(200, width - 150))))
+            except tk.TclError:
+                pass
+
+    # -- target panel visibility ---------------------------------------------------
+
+    @property
+    def target_panel_visible(self) -> bool:
+        return str(self.target_panel) in self._outer.panes()
+
+    def set_target_panel_visible(self, visible: bool, *, save: bool = True) -> None:
+        """Show/hide the right-hand Target panel (actions stay available via
+        the Run menu and shortcuts)."""
+        visible = bool(visible)
+        if visible and not self.target_panel_visible:
+            self._outer.add(self.target_panel, weight=0)
+            if self.settings.sash_target_panel > 0:
+                self.after(50, self._restore_sash)
+        elif not visible and self.target_panel_visible:
+            self._outer.forget(self.target_panel)
+        self.var_show_target.set(visible)
+        if save and self.settings.show_target_panel != visible:
+            self.settings.show_target_panel = visible
+            self._save_settings()
+
+    def toggle_target_panel(self) -> None:
+        self.set_target_panel_visible(not self.target_panel_visible)
+
+    def _toggle_target_panel(self) -> None:
+        self.set_target_panel_visible(bool(self.var_show_target.get()))
+
+    def toggle_dark(self) -> None:
+        self.set_theme("light" if theme.is_dark() else "dark")
+
+    def _toggle_dark(self) -> None:
+        self.set_theme("dark" if self.var_dark.get() else "light")
+
+    @property
+    def theme_name(self) -> str:
+        return theme.current_name()
+
+    def _log_font_changed(self, size: int) -> None:
+        if size != self.settings.log_font_size:
+            self.settings.log_font_size = size
+            self._save_settings()
+        self.set_status(f"Log font size {size}")
+
+    # -- fonts ----------------------------------------------------------------------
+
+    def set_fonts(self, ui_family: str = "", ui_size: int = 0, mono_family: str = "",
+                  editor_size: Optional[int] = None, log_size: Optional[int] = None) -> None:
+        """Apply + persist every font setting ("" / 0 = platform default for
+        the UI font; editor/log sizes default to 11 / 10 when None)."""
+        def_fam, def_size = fonts.default_ui_font(self)
+        fam, size = fonts.apply_ui_font(self, ui_family, ui_size)
+        ui_family = "" if (fam == def_fam and not ui_family) else fam
+        ui_size = 0 if (size == def_size and not ui_size) else size
+        mono_family = mono_family or ""
+        if mono_family == fonts.default_mono_family(self):
+            mono_family = ""
+        self.editor.set_font_family(mono_family)
+        self.log.set_font_family(mono_family)
+        if editor_size is not None:
+            self.settings.font_size = self.editor.set_font_size(editor_size)
+        if log_size is not None:
+            self.settings.log_font_size = self.log.set_font_size(log_size, notify=False)
+        self.settings.ui_font_family = ui_family
+        self.settings.ui_font_size = ui_size
+        self.settings.mono_font_family = mono_family
+        self._save_settings()  # sizes may have changed too; always persist
+        self.editor._redraw_gutter()
+        self.log.log(f"Fonts: UI {fam} {size}; editor/log {self.editor.font_family} "
+                     f"{self.editor.font_size}/{self.log.font_size}", "info")
+
+    def open_fonts(self) -> None:
+        dlg = FontDialog(self, ui_family=self.settings.ui_font_family,
+                         ui_size=self.settings.ui_font_size,
+                         mono_family=self.settings.mono_font_family,
+                         editor_size=self.editor.font_size, log_size=self.log.font_size,
+                         on_apply=self.set_fonts)
+        dlg.show()
+
+    def _toggle_highlight(self) -> None:
+        on = bool(self.var_highlight.get())
+        self.editor.set_highlighting(on)
+        self.settings.highlighting = on
+        self._save_settings()
+
+    @staticmethod
+    def _reveal(path: Path) -> Optional[str]:
+        """Open a folder in the desktop file manager; returns the command used."""
+        if sys.platform.startswith("win"):  # pragma: no cover - windows
+            os.startfile(str(path))  # type: ignore[attr-defined]
+            return "explorer"
+        cmd = "open" if sys.platform == "darwin" else "xdg-open"
+        exe = shutil.which(cmd)
+        if exe is None:
+            return None
+        subprocess.Popen([exe, str(path)], stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
+        return cmd
+
+    def _open_dir(self, path: Optional[Path], what: str) -> bool:
+        if path is None or not path.is_dir():
+            self.log.log(f"✗ {what}: no such folder" + (f" ({path})" if path else ""), "error")
+            return False
+        cmd = self._reveal(path)
+        if cmd is None:
+            self.log.log(f"✗ Cannot open a file manager (xdg-open/open not found): {path}", "error")
+            return False
+        self.log.log(f"Opened folder {path} ({cmd})", "info")
+        return True
+
+    def open_folder(self) -> bool:
+        if self.current_path is None:
+            self.log.log("No file is open — save it first to have a folder.", "warn")
+            return False
+        return self._open_dir(self.current_path.parent, "Containing folder")
+
+    def open_project_folder(self) -> bool:
+        proj = self._project_dir()
+        if proj is None:
+            self.log.log("No Cargo project dir configured (Options… → --emit-cargo).", "warn")
+            return False
+        return self._open_dir(proj, "Cargo project folder")
 
     # ---------------------------------------------------------------- run --
 
@@ -433,8 +753,11 @@ class ResnikIDE(tk.Tk):
         # Preview with the bare file name: relative paths are resolved against
         # the source's directory, so that is the exact shell equivalent from there.
         dlg = OptionsDialog(self, self.settings.compile,
-                            source=self.current_path.name if self.current_path else None)
+                            source=self.current_path.name if self.current_path else None,
+                            on_apply=self.apply_compile_settings)
         new = dlg.show()
+        # Apply / OK already went through on_apply; this only catches a
+        # dialog implementation that returns a result without calling it.
         if new is not None and new != self.settings.compile:
             self.apply_compile_settings(new)
 
@@ -445,12 +768,21 @@ class ResnikIDE(tk.Tk):
         if source is None:
             return
         self.editor.clear_error_marks()
-        self.log.log(f"── Semantic Check: {source.name} ──", "cmd")
+        target = self.var_target.get() or "host"
+        self.log.log(f"── Semantic Check: {source.name} ──"
+                     + (f" (target {target})" if target != "host" else ""), "cmd")
         reporter = LogReporter(self.log_sink, on_diagnostic=self._jump_to)
+        templib = [Path(t) for t in self.settings.compile.templib]
+
+        def job():
+            res = check(source, templib, reporter=reporter)
+            issues = target_issues(res, target) if res.ok else []
+            return res, issues
+
         self._start_job(
             "Semantic Check",
-            lambda: check(source, reporter=reporter),
-            lambda res: self._check_done(res, reporter),
+            job,
+            lambda pair: self._check_done(pair[0], reporter, pair[1]),
         )
 
     def compile(self) -> None:
@@ -583,11 +915,21 @@ class ResnikIDE(tk.Tk):
             return
         self.editor.goto(diag.line, diag.column)
 
-    def _check_done(self, res: CheckResult, reporter: LogReporter) -> None:
+    def _check_done(self, res: CheckResult, reporter: LogReporter,
+                    issues: Optional[list] = None) -> None:
         self.last_result = res
         self._apply_marks(res.diagnostics)
         n = len(res.errors)
-        if res.ok:
+        if res.ok and issues:
+            target = self.var_target.get() or "host"
+            self.log.log(f"✓ HAL/S semantics OK, but {len(issues)} feature(s) are not yet "
+                         f"supported on the '{target}' (no_std) target:", "warn")
+            for msg in issues:
+                self.log.log("  ⚠ " + msg, "warn")
+            self.log.log("  The firmware build would fail with compile_error!; switch the "
+                         "target to host or avoid these features.", "warn")
+            self.set_status(f"Semantic Check: OK; {len(issues)} target issue(s)")
+        elif res.ok:
             self.log.log("✓ Semantic Check passed — no errors.", "ok")
             self.set_status("Semantic Check: OK")
         else:
@@ -870,17 +1212,100 @@ class ResnikIDE(tk.Tk):
         win.geometry("900x650")
         from tkinter.scrolledtext import ScrolledText
         txt = ScrolledText(win, wrap="none", font=self.editor.font)
+        theme.style_text(txt, kind="editor")
+        win.configure(background=theme.palette()["bg"])
         txt.pack(fill="both", expand=True)
         txt.insert("1.0", self.last_rust_path.read_text(encoding="utf-8"))
         txt.configure(state="disabled")
 
+    IMAGES_DIR = Path(__file__).resolve().parent.parent / "images"
+
+    def _set_window_icon(self) -> None:
+        """Use the Resnik logo as the window/taskbar icon (inherited by every
+        Toplevel: dialogs, About, Rust viewer).  Silently skipped if the PNGs
+        are missing or Tk refuses."""
+        self._icon_images = []
+        for name in ("resnik_logo.png", "resnik_icon_64.png", "resnik_icon_32.png"):
+            path = self.IMAGES_DIR / name
+            if path.exists():
+                try:
+                    self._icon_images.append(tk.PhotoImage(file=str(path)))
+                except tk.TclError:
+                    pass
+        if self._icon_images:
+            try:
+                self.iconphoto(True, *self._icon_images)
+            except tk.TclError:
+                self._icon_images = []
+
+    def install_desktop_entry(self) -> Optional[Path]:
+        """Write ~/.local/share/applications/resnik-ide.desktop so the desktop
+        shows the Resnik logo for this window and offers a launcher."""
+        try:
+            path = desktop.install_desktop_entry()
+        except OSError as exc:
+            self.log.log(f"✗ Could not install desktop entry: {exc}", "error")
+            return None
+        self.log.log(f"✓ Desktop entry installed: {path}", "ok")
+        self.log.log("  GNOME picks the icon up for new windows; log out/in if the "
+                     "dash still shows the generic one.", "info")
+        return path
+
+    def uninstall_desktop_entry(self) -> bool:
+        try:
+            removed = desktop.uninstall_desktop_entry()
+        except OSError as exc:
+            self.log.log(f"✗ Could not remove desktop entry: {exc}", "error")
+            return False
+        self.log.log("✓ Desktop entry removed." if removed else "No desktop entry to remove.",
+                     "ok" if removed else "info")
+        return removed
+
+    ABOUT_TEXT = (
+        "Resnik is an open-source compiler for HAL/S — the real-time aerospace "
+        "language written for the Space Shuttle's flight software — that "
+        "translates legacy HAL/S source into safe, modern Rust. Programs can be "
+        "built as native host executables or as bare-metal firmware for "
+        "embedded targets such as ARM Cortex-M and ESP32-C3.\n\n"
+        "This IDE wraps the compiler: edit HAL/S, run a Semantic Check, compile "
+        "to Rust, build and run, and flash hardware — with everything logged."
+    )
+
     def about(self) -> None:
-        messagebox.showinfo(
-            "About Resnik IDE",
-            f"Resnik IDE {__version__}\nResnik HAL/S compiler {compiler_version}\n\n"
-            "A minimal editor + log front end over resnik.driver.",
-            parent=self,
-        )
+        """About window: logo, short description, versions, license."""
+        win = tk.Toplevel(self)
+        win.title("About Resnik")
+        win.resizable(False, False)
+        win.configure(background=theme.palette()["bg"])
+        win.transient(self)
+        body = ttk.Frame(win, padding=14)
+        body.pack(fill="both", expand=True)
+
+        logo_path = self.IMAGES_DIR / "resnik_logo.png"
+        self._about_logo = None
+        if logo_path.exists():
+            try:
+                self._about_logo = tk.PhotoImage(file=str(logo_path))
+            except tk.TclError:
+                self._about_logo = None
+        if self._about_logo is not None:
+            ttk.Label(body, image=self._about_logo).grid(row=0, column=0, rowspan=4,
+                                                          padx=(0, 16), sticky="n")
+        ttk.Label(body, text="Resnik HAL/S Compiler", style="Title.TLabel").grid(
+            row=0, column=1, sticky="w")
+        ttk.Label(body, text=f"Compiler {compiler_version} · IDE {__version__} · "
+                             f"Python {sys.version.split()[0]}",
+                  style="Muted.TLabel").grid(row=1, column=1, sticky="w", pady=(0, 8))
+        ttk.Label(body, text=self.ABOUT_TEXT, wraplength=420, justify="left").grid(
+            row=2, column=1, sticky="w")
+        ttk.Label(body, text="License: GPL-3.0-or-later · github.com/bitWarrior/resnik",
+                  style="Muted.TLabel").grid(row=3, column=1, sticky="sw", pady=(10, 0))
+        ttk.Button(body, text="OK", command=win.destroy, default="active").grid(
+            row=4, column=0, columnspan=2, sticky="e", pady=(12, 0))
+        win.bind("<Escape>", lambda _e: win.destroy())
+        win.bind("<Return>", lambda _e: win.destroy())
+        self._about_window = win
+        return None
 
     def on_close(self) -> None:
         if self.busy:
@@ -898,6 +1323,11 @@ class ResnikIDE(tk.Tk):
         try:
             if self.state() == "normal":
                 self.settings.geometry = self.geometry()
+                lh, h = self._sash_positions()
+                if lh > 0:
+                    self.settings.log_height = lh
+                if h > 0:
+                    self.settings.sash_target_panel = h
                 self._save_settings()
         except tk.TclError:  # pragma: no cover
             pass
@@ -914,8 +1344,21 @@ class ResnikIDE(tk.Tk):
 
 
 def main(argv: Optional[list] = None) -> int:
-    """Console-script entry point: ``resnik-ide [file.hal]``."""
+    """Console-script entry point: ``resnik-ide [file.hal]``.
+
+    ``--install-desktop`` / ``--uninstall-desktop`` manage the freedesktop
+    launcher entry (application icon in GNOME & co.) and exit without
+    opening a window.
+    """
     argv = sys.argv[1:] if argv is None else list(argv)
+    if "--install-desktop" in argv:
+        path = desktop.install_desktop_entry()
+        print(f"Installed {path}")
+        return 0
+    if "--uninstall-desktop" in argv:
+        removed = desktop.uninstall_desktop_entry()
+        print("Removed desktop entry." if removed else "No desktop entry installed.")
+        return 0
     try:
         app = ResnikIDE()
     except tk.TclError as exc:

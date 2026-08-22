@@ -56,3 +56,43 @@ class TestOptionsDialog:
         dlg.lf_link_search.clear()
         assert dlg.lf_link_search.get() == []
         dlg.destroy()
+
+
+class TestApplyButton:
+    def test_apply_calls_back_without_closing_and_ok_does_not_repeat(self, tk_root):
+        applied = []
+        dlg = OptionsDialog(tk_root, IdeCompileSettings(), on_apply=applied.append)
+        dlg.v_target.set("esp32-c3")
+        dlg.apply()
+        assert applied == [IdeCompileSettings(target="esp32-c3")]
+        assert dlg.winfo_exists()  # still open
+        dlg.apply()  # unchanged → no second callback
+        assert len(applied) == 1
+        dlg.v_emit_cargo.set("fw")
+        dlg._on_ok()
+        assert len(applied) == 2 and applied[-1].emit_cargo == "fw"
+        assert dlg.result == applied[-1]
+
+    def test_ok_without_changes_after_apply_is_silent(self, tk_root):
+        applied = []
+        dlg = OptionsDialog(tk_root, IdeCompileSettings(), on_apply=applied.append)
+        dlg.v_opt_level.set("3")
+        dlg.apply()
+        dlg._on_ok()
+        assert len(applied) == 1
+        assert dlg.result == IdeCompileSettings(opt_level="3")
+
+    def test_cancel_after_apply_keeps_applied_value(self, tk_root):
+        applied = []
+        dlg = OptionsDialog(tk_root, IdeCompileSettings(), on_apply=applied.append)
+        dlg.v_opt_level.set("z")
+        dlg.apply()
+        dlg.v_opt_level.set("0")
+        dlg._on_cancel()
+        assert dlg.result is None and applied == [IdeCompileSettings(opt_level="z")]
+
+    def test_without_callback_apply_is_harmless(self, tk_root):
+        dlg = OptionsDialog(tk_root, IdeCompileSettings())
+        dlg.v_build.set(True)
+        assert dlg.apply() == IdeCompileSettings(build=True)
+        dlg.destroy()

@@ -10,7 +10,11 @@ from tkinter import font as tkfont
 from tkinter import ttk
 from typing import Callable, Iterable, List, Optional
 
+from resnik_ide import theme
+from resnik_ide.highlight import TAGS, compute_spans
+
 TAB_SPACES = 2
+HIGHLIGHT_DELAY_MS = 150
 
 
 class _ProxiedText(tk.Text):
@@ -105,8 +109,7 @@ class Editor(ttk.Frame):
         self.font = tkfont.nametofont("TkFixedFont").copy()
         self.font.configure(size=11)
 
-        self.gutter = tk.Canvas(self, width=48, highlightthickness=0, bd=0,
-                                background="#f0f0f0")
+        self.gutter = tk.Canvas(self, width=48, highlightthickness=0, bd=0)
         self.gutter.pack(side="left", fill="y")
 
         self.vbar = ttk.Scrollbar(self, orient="vertical")
@@ -124,8 +127,17 @@ class Editor(ttk.Frame):
         self.text.pack(side="left", fill="both", expand=True)
         self.vbar.configure(command=self.text.yview)
 
-        self.text.tag_configure("error_line", background="#ffd6d6")
-        self.text.tag_configure("current_line", background="#f5f7ff")
+        self._bold_font = self.font.copy()
+        self._bold_font.configure(weight="bold")
+        self._italic_font = self.font.copy()
+        self._italic_font.configure(slant="italic")
+        self._palette = theme.palette()
+        self.apply_palette(self._palette)
+        # error/current-line backgrounds must win over syntax colours
+        self.text.tag_raise("current_line")
+        self.text.tag_raise("error_line")
+        self._hl_after: Optional[str] = None
+        self.highlighting = True
 
         self.text.bind("<<Change>>", self._on_change)
         self.text.bind("<Configure>", self._on_change)
@@ -152,6 +164,7 @@ class Editor(ttk.Frame):
         self.set_dirty(False)
         self._redraw_gutter()
         self._report_cursor()
+        self.highlight_now()
 
     def load(self, path: str) -> None:
         with open(path, "r", encoding="utf-8") as fh:
@@ -189,6 +202,7 @@ class Editor(ttk.Frame):
         if not self.text.edit_modified():
             return  # our own reset of the flag
         self.clear_error_marks()
+        self.schedule_highlight()
         if not self._dirty:
             self.set_dirty(True)
         else:
@@ -231,6 +245,77 @@ class Editor(ttk.Frame):
     def error_lines(self) -> List[int]:
         return list(self._error_lines)
 
+    # -- theme ------------------------------------------------------------------------
+
+    def apply_palette(self, p: dict) -> None:
+        """Recolour text, gutter, marks and syntax tags for palette ``p``."""
+        self._palette = p
+        theme.style_text(self.text, p, kind="editor")
+        self.gutter.configure(background=p["gutter_bg"])
+        self.text.tag_configure("error_line", background=p["error_line"])
+        self.text.tag_configure("current_line", background=p["current_line"])
+        for tag, style in TAGS.items():
+            kw = {"foreground": p.get(tag, style["foreground"])}
+            if style.get("font_weight") == "bold":
+                kw["font"] = self._bold_font
+            elif style.get("font_slant") == "italic":
+                kw["font"] = self._italic_font
+            self.text.tag_configure(tag, **kw)
+        self._redraw_gutter()
+
+    # -- syntax highlighting ----------------------------------------------------------
+
+    def schedule_highlight(self) -> None:
+        """Re-highlight after a short pause in typing (debounced)."""
+        if not self.highlighting:
+            return
+        if self._hl_after is not None:
+            self.after_cancel(self._hl_after)
+        self._hl_after = self.after(HIGHLIGHT_DELAY_MS, self.highlight_now)
+
+    def highlight_now(self) -> None:
+        self._hl_after = None
+        for tag in TAGS:
+            self.text.tag_remove(tag, "1.0", "end")
+        if not self.highlighting:
+            return
+        for tag, start, end in compute_spans(self.get_text()):
+            self.text.tag_add(tag, start, end)
+
+    def set_highlighting(self, on: bool) -> None:
+        self.highlighting = bool(on)
+        self.highlight_now()
+
+    def highlighted(self, tag: str) -> List[tuple]:
+        """(start, end) index pairs currently carrying ``tag`` (tests/tools)."""
+        ranges = self.text.tag_ranges(tag)
+        return [(str(ranges[i]), str(ranges[i + 1])) for i in range(0, len(ranges), 2)]
+
+    # -- font -----------------------------------------------------------------------
+
+    def set_font_size(self, size: int) -> int:
+        size = max(6, min(40, int(size)))
+        for f in (self.font, self._bold_font, self._italic_font):
+            f.configure(size=size)
+        self._redraw_gutter()
+        return size
+
+    @property
+    def font_size(self) -> int:
+        return int(self.font.cget("size"))
+
+    def set_font_family(self, family: str) -> None:
+        """Change the editor's monospace family ("" = TkFixedFont default)."""
+        from tkinter import font as tkfont
+        family = family or tkfont.nametofont("TkFixedFont").cget("family")
+        for f in (self.font, self._bold_font, self._italic_font):
+            f.configure(family=family)
+        self._redraw_gutter()
+
+    @property
+    def font_family(self) -> str:
+        return self.font.cget("family")
+
     # -- internals -------------------------------------------------------------
 
     def _on_tab(self, _event) -> str:
@@ -264,7 +349,7 @@ class Editor(ttk.Frame):
                 break
             y = dline[1]
             ln = int(index.split(".")[0])
-            fill = "#c42b1c" if ln in self._error_lines else "#777777"
+            fill = self._palette["gutter_err"] if ln in self._error_lines else self._palette["gutter_fg"]
             g.create_text(
                 g.winfo_width() - 6, y, anchor="ne", text=str(ln),
                 font=self.font, fill=fill,

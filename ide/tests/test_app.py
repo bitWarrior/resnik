@@ -9,6 +9,7 @@ import pytest
 
 from ide.tests.conftest import LEX_ERROR, SEMANTIC_DUP, VALID, pump
 from resnik.driver import Diagnostic
+from resnik_ide import theme
 from resnik_ide.options import IdeCompileSettings
 from resnik_ide.settings import load_settings
 
@@ -271,17 +272,36 @@ class TestOptionsIntegration:
         import resnik_ide.app as appmod
 
         class FakeDialog:
-            def __init__(self, master, settings, source=None):
+            def __init__(self, master, settings, source=None, on_apply=None):
                 self.settings = settings
+                self.on_apply = on_apply
 
             def show(self):
-                return IdeCompileSettings(target="esp32-c3", emit_cargo="fw")
+                # Apply pressed mid-way, then OK with a further change
+                self.on_apply(IdeCompileSettings(target="cortex-m"))
+                new = IdeCompileSettings(target="esp32-c3", emit_cargo="fw")
+                self.on_apply(new)
+                return new
 
         monkeypatch.setattr(appmod, "OptionsDialog", FakeDialog)
         app.open_options()
         assert app.settings.compile.emit_cargo == "fw"
         assert app.var_target.get() == "esp32-c3"
         assert load_settings(settings_file)[0].compile.emit_cargo == "fw"
+        log = app.log.get_text()
+        assert "--target cortex-m" in log and "--emit-cargo fw --target esp32-c3" in log
+
+    def test_real_options_dialog_apply_path(self, app, settings_file):
+        from resnik_ide.options_dialog import OptionsDialog
+        dlg = OptionsDialog(app, app.settings.compile, on_apply=app.apply_compile_settings)
+        dlg.v_target.set("cortex-m")
+        dlg.btn_apply.invoke()
+        assert app.settings.compile.target == "cortex-m"
+        assert app.var_target.get() == "cortex-m"
+        assert load_settings(settings_file)[0].compile.target == "cortex-m"
+        assert dlg.winfo_exists()
+        dlg._on_cancel()
+        assert app.settings.compile.target == "cortex-m"  # Apply is not undone by Cancel
 
     def test_geometry_saved_on_shutdown(self, app, settings_file):
         app.deiconify()
@@ -293,6 +313,7 @@ class TestOptionsIntegration:
 
 
 import sys as _sys
+from tkinter import ttk
 
 from resnik_ide.toolchain import Tool
 
@@ -542,3 +563,454 @@ class TestBuildAndRun:
         app.build_and_run()
         self._wait_all(app, "nothing to run")
         assert "── Run" not in app.log.get_text()
+
+
+class TestPhase4Polish:
+    def test_open_file_updates_recent_and_menu(self, app, tmp_path, settings_file):
+        a = _write(tmp_path, "a.hal", VALID)
+        b = _write(tmp_path, "b.hal", VALID)
+        app.open_file(str(a))
+        app.open_file(str(b))
+        assert app.settings.recent == [str(b.resolve()), str(a.resolve())]
+        assert load_settings(settings_file)[0].recent[0] == str(b.resolve())
+        labels = [app._menu_recent.entrycget(i, "label")
+                  for i in range(app._menu_recent.index("end") + 1)
+                  if app._menu_recent.type(i) == "command"]
+        assert labels[:2] == [str(b.resolve()), str(a.resolve())]
+        assert labels[-1] == "Clear Recent"
+
+    def test_open_recent_missing_file_is_pruned(self, app, tmp_path):
+        app.settings.recent = [str(tmp_path / "gone.hal")]
+        assert app.open_recent(str(tmp_path / "gone.hal")) is False
+        assert app.settings.recent == []
+        assert "no longer exists" in app.log.get_text()
+
+    def test_zoom_persists(self, app, settings_file):
+        assert app.zoom(+1) == 12 and app.editor.font_size == 12
+        assert load_settings(settings_file)[0].font_size == 12
+        assert app.zoom(0) == 11
+
+    def test_highlight_toggle_persists(self, app, tmp_path, settings_file):
+        app.open_file(str(_write(tmp_path, "a.hal", VALID)))
+        assert app.editor.highlighted("hl_keyword")
+        app.var_highlight.set(False)
+        app._toggle_highlight()
+        assert app.editor.highlighted("hl_keyword") == []
+        assert load_settings(settings_file)[0].highlighting is False
+
+    def test_settings_restore_font_and_highlight(self, app, tmp_path, settings_file):
+        from resnik_ide.app import ResnikIDE
+        app.zoom(+3)
+        app.var_highlight.set(False)
+        app._toggle_highlight()
+        second = ResnikIDE()
+        try:
+            second.withdraw()
+            second.update()
+            assert second.editor.font_size == 14
+            assert second.editor.highlighting is False
+        finally:
+            second.shutdown()
+
+    def test_open_folder_uses_file_manager(self, app, tmp_path, monkeypatch):
+        calls = []
+        monkeypatch.setattr(type(app), "_reveal", staticmethod(lambda p: calls.append(p) or "xdg-open"))
+        assert app.open_folder() is False  # nothing open
+        app.open_file(str(_write(tmp_path, "a.hal", VALID)))
+        assert app.open_folder() is True and calls == [tmp_path.resolve()]
+        assert app.open_project_folder() is False  # not configured
+        app.apply_compile_settings(IdeCompileSettings(emit_cargo="fw"))
+        assert app.open_project_folder() is False  # not created yet
+        (tmp_path / "fw").mkdir()
+        assert app.open_project_folder() is True and calls[-1] == tmp_path.resolve() / "fw"
+
+    def test_target_aware_semantic_check_warns_on_embedded(self, app, tmp_path):
+        src = _write(tmp_path, "vec.hal",
+                     "T: PROGRAM;\n  DECLARE V VECTOR(3);\n  V = V * 2;\nCLOSE T;\n")
+        app.open_file(str(src))
+        app.var_target.set("esp32-c3")
+        app.update()
+        app.semantic_check()
+        _wait(app)
+        log = app.log.get_text()
+        assert "(target esp32-c3)" in log
+        assert "not yet supported on the 'esp32-c3'" in log and "VECTOR/MATRIX" in log
+        assert app.status_msg.cget("text") == "Semantic Check: OK; 1 target issue(s)"
+        assert app.last_result.ok is True
+        # host: clean
+        app.var_target.set("host")
+        app.update()
+        app.semantic_check()
+        _wait(app)
+        assert app.status_msg.cget("text") == "Semantic Check: OK"
+
+
+class TestDarkMode:
+    def test_default_is_light(self, app):
+        assert app.theme_name == "light" and app.var_dark.get() is False
+        assert app.editor.text.cget("background") == theme.LIGHT["editor_bg"]
+
+    def test_toggle_dark_restyles_and_persists(self, app, settings_file):
+        app.toggle_dark()
+        assert app.theme_name == "dark" and app.var_dark.get() is True
+        assert app.editor.text.cget("background") == theme.DARK["editor_bg"]
+        assert app.editor.gutter.cget("background") == theme.DARK["gutter_bg"]
+        assert app.log.text.cget("background") == theme.DARK["log_bg"]
+        assert app.editor.text.tag_cget("hl_keyword", "foreground") == theme.DARK["hl_keyword"]
+        assert app.log.text.tag_cget("error", "foreground") == theme.DARK["error"]
+        assert str(app._menubar.cget("background")) == theme.DARK["bg"]
+        assert ttk.Style(app).theme_use() == "clam"
+        assert load_settings(settings_file)[0].theme == "dark"
+        assert "Theme: dark" in app.log.get_text()
+        app.toggle_dark()
+        assert app.theme_name == "light"
+        assert app.editor.text.cget("background") == theme.LIGHT["editor_bg"]
+        assert load_settings(settings_file)[0].theme == "light"
+
+    def test_menu_checkbutton_path(self, app):
+        app.var_dark.set(True)
+        app._toggle_dark()
+        assert app.theme_name == "dark"
+        app.var_dark.set(False)
+        app._toggle_dark()
+        assert app.theme_name == "light"
+
+    def test_dark_theme_restored_on_next_start(self, app, settings_file):
+        from resnik_ide.app import ResnikIDE
+        app.set_theme("dark")
+        second = ResnikIDE()
+        try:
+            second.withdraw()
+            second.update()
+            assert second.theme_name == "dark"
+            assert second.editor.text.cget("background") == theme.DARK["editor_bg"]
+            second.set_theme("light")
+        finally:
+            second.shutdown()
+
+    def test_options_dialog_follows_theme(self, app):
+        from resnik_ide.options_dialog import OptionsDialog
+        app.set_theme("dark")
+        dlg = OptionsDialog(app, IdeCompileSettings())
+        assert dlg.cget("background") == theme.DARK["bg"]
+        assert dlg.lf_templib.text.cget("background") == theme.DARK["field_bg"]
+        dlg.destroy()
+        app.set_theme("light")
+
+
+class TestTargetPanelVisibility:
+    def test_default_visible(self, app):
+        assert app.target_panel_visible is True
+        assert app.var_show_target.get() is True
+
+    def test_toggle_hides_and_persists(self, app, settings_file):
+        app.toggle_target_panel()
+        assert app.target_panel_visible is False
+        assert app.var_show_target.get() is False
+        assert str(app.target_panel) not in app._outer.panes()
+        assert load_settings(settings_file)[0].show_target_panel is False
+        # actions still work without the panel
+        app.run_process([_sys.executable, "-c", "print('still here')"], what="Ping")
+        _wait(app)
+        assert "still here" in app.log.get_text()
+        app.toggle_target_panel()
+        assert app.target_panel_visible is True
+        assert load_settings(settings_file)[0].show_target_panel is True
+
+    def test_menu_checkbutton_path(self, app):
+        app.var_show_target.set(False)
+        app._toggle_target_panel()
+        assert app.target_panel_visible is False
+        app.var_show_target.set(True)
+        app._toggle_target_panel()
+        assert app.target_panel_visible is True
+
+    def test_hidden_state_restored_on_next_start(self, app, settings_file):
+        from resnik_ide.app import ResnikIDE
+        app.set_target_panel_visible(False)
+        second = ResnikIDE()
+        try:
+            second.withdraw()
+            second.update()
+            pump(second, lambda: not second.probing and second.dispatcher.pending == 0)
+            assert second.target_panel_visible is False
+            assert second.var_show_target.get() is False
+            # toolchain probe still updates the (hidden) panel without error
+            assert second.target_panel.requirements
+        finally:
+            second.shutdown()
+
+
+class TestLogHeightPersistence:
+    def _shown(self, app, geo="1000x700+5+5"):
+        app.deiconify()
+        app.geometry(geo)
+        pump(app, lambda: app._paned.winfo_height() > 1, timeout=10)
+        app._end_sash_restore()  # simulate "startup window over"
+
+    def test_log_height_saved_on_release_and_shutdown(self, app, settings_file):
+        self._shown(app)
+        h = app._paned.winfo_height()
+        app._paned.sashpos(0, h - 250)
+        app.update()
+        app._on_sash_release()  # what the <ButtonRelease-1> binding calls
+        assert abs(app.log_height - 250) <= 2
+        assert abs(load_settings(settings_file)[0].log_height - 250) <= 2
+        app._paned.sashpos(0, h - 180)
+        app.update()
+        app.shutdown()
+        assert abs(load_settings(settings_file)[0].log_height - 180) <= 2
+
+    def test_log_height_restored_even_with_a_different_window_size(self, app, settings_file):
+        from resnik_ide.app import ResnikIDE
+        self._shown(app)
+        app._paned.sashpos(0, app._paned.winfo_height() - 220)
+        app.update()
+        app.shutdown()
+        second = ResnikIDE()
+        try:
+            second.deiconify()
+            second.geometry("1000x850+5+5")  # taller window than last time
+            pump(second, lambda: abs(second.log_height - 220) <= 2, timeout=10)
+            assert abs(second.log_height - 220) <= 2
+            assert second._paned.winfo_height() > 750  # taller than before: the editor got the extra space
+        finally:
+            second.shutdown()
+
+    def test_zero_means_default_split(self, app):
+        assert app.settings.log_height == 0
+        app._restore_sash()  # no-op, must not raise
+
+
+class TestTargetPanelWidthPersistence:
+    def _shown(self, app):
+        app.deiconify()
+        app.geometry("1100x700+5+5")
+        pump(app, lambda: app._outer.winfo_width() > 1 and app._paned.winfo_height() > 1,
+             timeout=10)
+
+    def test_width_saved_and_restored(self, app, settings_file):
+        from resnik_ide.app import ResnikIDE
+        self._shown(app)
+        app._end_sash_restore()
+        app._outer.sashpos(0, 600)
+        app.update()
+        app._remember_sash()
+        saved = load_settings(settings_file)[0].sash_target_panel
+        assert abs(saved - 600) <= 2
+        app.shutdown()
+        second = ResnikIDE()
+        try:
+            second.deiconify()
+            second.geometry("1100x700+5+5")
+            pump(second, lambda: abs(second._outer.sashpos(0) - 600) <= 2, timeout=10)
+            assert abs(second._outer.sashpos(0) - 600) <= 2
+        finally:
+            second.shutdown()
+
+    def test_hidden_panel_does_not_overwrite_width(self, app, settings_file):
+        self._shown(app)
+        app._end_sash_restore()
+        app._outer.sashpos(0, 650)
+        app.update()
+        app._remember_sash()
+        before = load_settings(settings_file)[0].sash_target_panel
+        assert before > 0
+        app.set_target_panel_visible(False)
+        app.update()
+        app._remember_sash()
+        assert load_settings(settings_file)[0].sash_target_panel == before
+        app.set_target_panel_visible(True)
+        pump(app, lambda: abs(app._outer.sashpos(0) - before) <= 2, timeout=10)
+        assert abs(app._outer.sashpos(0) - before) <= 2
+
+
+class TestLogFontPersistence:
+    def test_log_zoom_persists_and_restores(self, app, settings_file):
+        assert app.log.font_size == 10
+        app.log.zoom(+2)
+        assert app.settings.log_font_size == 12
+        assert load_settings(settings_file)[0].log_font_size == 12
+        assert app.status_msg.cget("text") == "Log font size 12"
+        from resnik_ide.app import ResnikIDE
+        second = ResnikIDE()
+        try:
+            second.withdraw()
+            second.update()
+            assert second.log.font_size == 12
+        finally:
+            second.shutdown()
+
+    def test_editor_and_log_fonts_are_independent(self, app):
+        app.zoom(+3)
+        assert app.editor.font_size == 14 and app.log.font_size == 10
+
+
+class TestIdeFonts:
+    def test_set_fonts_applies_and_persists(self, app, settings_file):
+        from tkinter import font as tkfont
+        app.set_fonts("DejaVu Sans", 13, "DejaVu Sans Mono")
+        assert tkfont.nametofont("TkDefaultFont", root=app).cget("family") == "DejaVu Sans"
+        assert int(tkfont.nametofont("TkDefaultFont", root=app).cget("size")) == 13
+        assert app.editor.font_family == "DejaVu Sans Mono"
+        assert app.log.font_family == "DejaVu Sans Mono"
+        assert app.editor.font_size == 11 and app.log.font_size == 10  # sizes untouched
+        s = load_settings(settings_file)[0]
+        assert (s.ui_font_family, s.ui_font_size, s.mono_font_family) == \
+            ("DejaVu Sans", 13, "DejaVu Sans Mono")
+        assert "Fonts: UI DejaVu Sans 13" in app.log.get_text()
+        # sizes through the same call
+        app.set_fonts("DejaVu Sans", 13, "DejaVu Sans Mono", editor_size=14, log_size=9)
+        assert app.editor.font_size == 14 and app.log.font_size == 9
+        s = load_settings(settings_file)[0]
+        assert s.font_size == 14 and s.log_font_size == 9
+
+    def test_defaults_are_stored_as_empty(self, app, settings_file):
+        from resnik_ide import fonts
+        def_fam, def_size = fonts.default_ui_font(app)
+        app.set_fonts("", 0, "")
+        s = load_settings(settings_file)[0]
+        assert (s.ui_font_family, s.ui_font_size, s.mono_font_family) == ("", 0, "")
+        assert fonts.current_ui_font(app) == (def_fam, def_size)
+        assert app.editor.font_family == fonts.default_mono_family(app)
+
+    def test_fonts_restored_on_next_start(self, app, settings_file):
+        from tkinter import font as tkfont
+        from resnik_ide.app import ResnikIDE
+        app.set_fonts("DejaVu Sans", 14, "DejaVu Sans Mono")
+        second = ResnikIDE()
+        try:
+            second.withdraw()
+            second.update()
+            assert tkfont.nametofont("TkDefaultFont", root=second).cget("family") == "DejaVu Sans"
+            assert int(tkfont.nametofont("TkDefaultFont", root=second).cget("size")) == 14
+            assert second.editor.font_family == "DejaVu Sans Mono"
+            assert second.log.font_family == "DejaVu Sans Mono"
+        finally:
+            second.shutdown()
+
+    def test_open_fonts_dialog_applies_via_callback(self, app, monkeypatch):
+        import resnik_ide.app as appmod
+
+        class FakeDialog:
+            def __init__(self, master, **kw):
+                self.kw = kw
+
+            def show(self):
+                self.kw["on_apply"]("DejaVu Sans", 12, "", 13, 11)
+                return ("DejaVu Sans", 12, "", 13, 11)
+
+        monkeypatch.setattr(appmod, "FontDialog", FakeDialog)
+        app.zoom(+1)  # editor 12 → the dialog must be opened with current sizes
+        app.open_fonts()
+        assert app.settings.ui_font_size == 12 and app.settings.ui_font_family == "DejaVu Sans"
+        assert app.editor.font_size == 13 and app.log.font_size == 11
+
+    def test_dialog_opens_with_current_sizes(self, app, monkeypatch):
+        import resnik_ide.app as appmod
+        seen = {}
+
+        class FakeDialog:
+            def __init__(self, master, **kw):
+                seen.update(kw)
+
+            def show(self):
+                return None
+
+        monkeypatch.setattr(appmod, "FontDialog", FakeDialog)
+        app.zoom(+2)
+        app.log.zoom(-1)
+        app.open_fonts()
+        assert seen["editor_size"] == 13 and seen["log_size"] == 9
+
+    def test_view_menu_has_no_size_entries(self, app):
+        labels = []
+        m = app._menubar
+        for i in range(m.index("end") + 1):
+            if m.type(i) == "cascade" and m.entrycget(i, "label") == "View":
+                sub = m.nametowidget(m.entrycget(i, "menu"))
+                labels = [sub.entrycget(j, "label") for j in range(sub.index("end") + 1)
+                          if sub.type(j) in ("command", "checkbutton")]
+        assert "Fonts…" in labels
+        assert not any("Font Size" in lab or "Larger" in lab or "Smaller" in lab for lab in labels)
+
+
+class TestAbout:
+    def test_about_window_has_logo_and_description(self, app):
+        import tkinter as tk
+        app.about()
+        win = app._about_window
+        assert isinstance(win, tk.Toplevel) and win.winfo_exists()
+        assert win.title() == "About Resnik"
+        assert app._about_logo is not None and app._about_logo.width() > 0
+        texts = []
+
+        def walk(w):
+            for c in w.winfo_children():
+                try:
+                    texts.append(str(c.cget("text")))
+                except tk.TclError:
+                    pass
+                walk(c)
+        walk(win)
+        blob = "\n".join(texts)
+        assert "Resnik HAL/S Compiler" in blob
+        assert "Space Shuttle" in blob and "Rust" in blob
+        assert "GPL-3.0" in blob
+        from resnik import __version__ as cv
+        assert cv in blob
+        win.destroy()
+
+    def test_about_without_logo_still_opens(self, app, monkeypatch):
+        import tkinter as tk
+        real = tk.PhotoImage
+
+        def boom(*a, **k):
+            raise tk.TclError("no image")
+
+        monkeypatch.setattr(tk, "PhotoImage", boom)
+        app.about()
+        assert app._about_window.winfo_exists() and app._about_logo is None
+        app._about_window.destroy()
+        monkeypatch.setattr(tk, "PhotoImage", real)
+
+
+class TestWindowIcon:
+    def test_icon_images_loaded_in_three_sizes(self, app):
+        sizes = sorted(img.width() for img in app._icon_images)
+        assert sizes == [32, 64, 200]
+
+    def test_missing_icons_are_tolerated(self, settings_file, fake_toolchain, monkeypatch, tmp_path):
+        from resnik_ide.app import ResnikIDE
+        monkeypatch.setattr(ResnikIDE, "IMAGES_DIR", tmp_path / "nope")
+        app = ResnikIDE()
+        try:
+            app.withdraw()
+            assert app._icon_images == []
+        finally:
+            app.shutdown()
+
+
+class TestDesktopIntegration:
+    def test_wm_class_matches_desktop_entry(self, app):
+        from resnik_ide import desktop
+        # Tk capitalises the class part; the .desktop entry must carry exactly that.
+        assert app.winfo_class() == desktop.STARTUP_WM_CLASS == "Resnik-ide"
+        assert "StartupWMClass=" + app.winfo_class() in desktop.desktop_entry_text()
+
+    def test_install_and_remove_from_help_menu(self, app, tmp_path, monkeypatch):
+        monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+        path = app.install_desktop_entry()
+        assert path == tmp_path / "applications" / "resnik-ide.desktop" and path.exists()
+        assert "Desktop entry installed" in app.log.get_text()
+        assert app.uninstall_desktop_entry() is True and not path.exists()
+        assert app.uninstall_desktop_entry() is False
+
+    def test_cli_flags(self, tmp_path, monkeypatch, capsys):
+        from resnik_ide.app import main
+        monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+        assert main(["--install-desktop"]) == 0
+        assert (tmp_path / "applications" / "resnik-ide.desktop").exists()
+        assert "Installed" in capsys.readouterr().out
+        assert main(["--uninstall-desktop"]) == 0
+        assert not (tmp_path / "applications" / "resnik-ide.desktop").exists()

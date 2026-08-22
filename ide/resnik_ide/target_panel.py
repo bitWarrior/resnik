@@ -32,7 +32,7 @@ class TargetPanel(ttk.Frame):
         self._req_rows: List[tk.Widget] = []
         self.requirements: List[Requirement] = []
 
-        ttk.Label(self, text="Target", font=("TkDefaultFont", 10, "bold")).pack(anchor="w")
+        ttk.Label(self, text="Target", style="Title.TLabel").pack(anchor="w")
         row = ttk.Frame(self)
         row.pack(fill="x", pady=(2, 8))
         ttk.Label(row, text="Profile:").pack(side="left")
@@ -46,7 +46,7 @@ class TargetPanel(ttk.Frame):
         self.req_frame = ttk.Frame(tc)
         self.req_frame.pack(fill="x")
         self.req_frame.columnconfigure(1, weight=1)
-        self.lbl_toolchain = ttk.Label(tc, text="not probed yet", foreground="#666666",
+        self.lbl_toolchain = ttk.Label(tc, text="not probed yet", style="Muted.TLabel",
                                        wraplength=280, justify="left")
         self.lbl_toolchain.pack(anchor="w", pady=(4, 0))
         self.btn_refresh_tc = ttk.Button(tc, text="Refresh", command=actions["refresh_toolchain"])
@@ -63,7 +63,7 @@ class TargetPanel(ttk.Frame):
         ttk.Label(dv, text="Chip (probe-rs --chip):").grid(row=2, column=0, sticky="w", pady=(6, 0))
         self.ent_chip = ttk.Entry(dv, textvariable=var_chip, width=24)
         self.ent_chip.grid(row=3, column=0, sticky="ew")
-        self.lbl_device = ttk.Label(dv, text="", foreground="#666666", wraplength=280, justify="left")
+        self.lbl_device = ttk.Label(dv, text="", style="Muted.TLabel", wraplength=280, justify="left")
         self.lbl_device.grid(row=4, column=0, columnspan=2, sticky="w", pady=(4, 0))
         dv.columnconfigure(0, weight=1)
 
@@ -77,7 +77,7 @@ class TargetPanel(ttk.Frame):
         self.btn_stop = ttk.Button(ac, text="■ Stop", command=actions["stop"], state="disabled")
         for b in (self.btn_build, self.btn_flash, self.btn_monitor, self.btn_run, self.btn_stop):
             b.pack(fill="x", pady=2)
-        self.lbl_hint = ttk.Label(self, text="", foreground="#666666", wraplength=280, justify="left")
+        self.lbl_hint = ttk.Label(self, text="", style="Muted.TLabel", wraplength=280, justify="left")
         self.lbl_hint.pack(anchor="w", pady=(8, 0))
 
         var_target.trace_add("write", lambda *_a: self._update_hint())
@@ -95,7 +95,7 @@ class TargetPanel(ttk.Frame):
         for r in reqs:
             head, _, tail = r.label.partition("\n")
             mark = ttk.Label(self.req_frame, text="✓" if r.satisfied else "✗",
-                             foreground="#1a7f37" if r.satisfied else "#c42b1c", width=2)
+                             style="Ok.TLabel" if r.satisfied else "Err.TLabel", width=2)
             mark.grid(row=row, column=0, sticky="w")
             lab = ttk.Label(self.req_frame, text=head, wraplength=180, justify="left")
             lab.grid(row=row, column=1, sticky="w")
@@ -110,7 +110,7 @@ class TargetPanel(ttk.Frame):
                 # e.g. the target triple: its own line spanning under the button,
                 # so long unbreakable names are not clipped.
                 sub = ttk.Label(self.req_frame, text=tail, font="TkSmallCaptionFont",
-                                foreground="#444444")
+                                style="Muted.TLabel")
                 sub.grid(row=row, column=1, columnspan=2, sticky="w", pady=(0, 3))
                 self._req_rows.append(sub)
                 row += 1
