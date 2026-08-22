@@ -908,6 +908,7 @@ use hal_rt::*;
             "body",        # OnErrorNode handler
             "selector",    # CaseNode
             "start", "end", "step",   # ForNode bounds
+            "until",                  # ForNode UNTIL guard (WhileNode.until is bool)
             "delay", "period",        # ScheduleNode timing
             "lo", "hi",               # RangeNode bounds
             "statement",              # LabelNode
@@ -1673,10 +1674,25 @@ use hal_rt::*;
         self.emitter.emit_block_end()
 
     def _generate_while(self, node: WhileNode, label: str = "") -> None:
-        """Generate a DO WHILE <cond>; ... END; loop as a Rust while loop.
-        A `label` (from a labeled DO block) becomes a Rust loop label."""
+        """Generate a DO WHILE or DO UNTIL loop.
+
+        DO WHILE tests before the first cycle (`while cond { body }`).
+        DO UNTIL always runs the body once, then breaks when cond is TRUE
+        (`loop { body; if cond { break; } }`). A `while !cond` lowering
+        would skip the first cycle when cond is already true, which is
+        not HAL/S §7.6.3. A `label` becomes a Rust loop label for EXIT.
+        """
         condition = self._generate_expression(node.condition)
         lbl = f"'{self._rust_ident(label)}: " if label else ""
+        if node.until:
+            self.emitter.emit_line(f"{lbl}loop {{")
+            self.emitter.indent()
+            for stmt in node.statements:
+                self._generate_node(stmt)
+            self.emitter.emit_line(f"if {condition} {{ break; }}")
+            self.emitter.dedent()
+            self.emitter.emit_line("}")
+            return
         self.emitter.emit_line(f"{lbl}while {condition} {{")
         self.emitter.indent()
         for stmt in node.statements:
@@ -3145,6 +3161,9 @@ use hal_rt::*;
         after EXIT, I is the current index; after falling out, I is one step
         past the last value. A `label` becomes a Rust loop label for
         `EXIT <label>`.
+
+        Optional UNTIL: skipped on the first cycle, then tested after the
+        bound check (USA003088 §7.6.5). An empty range still never enters.
         """
         var = self._rust_ident(node.var)
         start = self._generate_expression(node.start)
@@ -3152,7 +3171,12 @@ use hal_rt::*;
         step = (self._generate_expression(node.step)
                 if node.step is not None else "1")
         lbl = f"'{self._rust_ident(label)}: " if label else ""
+        has_until = node.until is not None
+        until_src = (
+            self._generate_expression(node.until) if has_until else None)
         self.emitter.emit_line(f"{var} = ({start}) as i32;")
+        if has_until:
+            self.emitter.emit_line("let mut __first = true;")
         self.emitter.emit_line(f"{lbl}loop {{")
         self.emitter.indent()
         if node.descending:
@@ -3161,6 +3185,10 @@ use hal_rt::*;
         else:
             self.emitter.emit_line(
                 f"if {var} > ({end}) as i32 {{ break; }}")
+        if has_until:
+            self.emitter.emit_line(
+                f"if !__first && ({until_src}) {{ break; }}")
+            self.emitter.emit_line("__first = false;")
         for stmt in node.statements:
             self._generate_node(stmt)
         if node.descending:

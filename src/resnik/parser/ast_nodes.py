@@ -476,13 +476,20 @@ class MatrixSubscriptNode(ASTNode):
 
 @dataclass
 class ForNode(ASTNode):
-    """DO FOR <var> = <start> TO <end> [BY <step>]; ... END; counted loop."""
+    """DO FOR <var> = <start> TO/DOWNTO <end> [BY <step>] [UNTIL <cond>];
+
+    `until` is the optional iterative guard (USA003088 §7.6.5): skipped on
+    the first cycle, then tested after the index is assigned; the loop
+    stops when the condition is TRUE. An empty TO/DOWNTO range still
+    never enters — the bound check runs first.
+    """
 
     var: str = ""
     start: Optional[ASTNode] = None
     end: Optional[ASTNode] = None
     step: Optional[ASTNode] = None
     descending: bool = False  # True for DOWNTO (decrementing), False for TO
+    until: Optional[ASTNode] = None
     statements: List[ASTNode] = field(default_factory=list)
 
     def __post_init__(self) -> None:
@@ -497,6 +504,7 @@ class ForNode(ASTNode):
                 "end": self.end.to_dict() if self.end else None,
                 "step": self.step.to_dict() if self.step else None,
                 "descending": self.descending,
+                "until": self.until.to_dict() if self.until else None,
                 "statements": [s.to_dict() for s in self.statements],
             }
         )
@@ -642,13 +650,20 @@ class DoBlockNode(ASTNode):
 
 @dataclass
 class WhileNode(ASTNode):
-    """DO WHILE <condition>; ... END; loop."""
+    """DO WHILE / DO UNTIL <condition>; ... END; loop.
+
+    `until` is False for DO WHILE (test before the first cycle) and True
+    for DO UNTIL (body always runs once; stop when the condition is TRUE).
+    """
 
     condition: Optional[ASTNode] = None
     statements: List[ASTNode] = field(default_factory=list)
+    until: bool = False
 
     def __post_init__(self) -> None:
-        self.node_type = NodeType.DO_WHILE
+        self.node_type = (
+            NodeType.DO_UNTIL if self.until else NodeType.DO_WHILE
+        )
 
     def to_dict(self) -> Dict[str, Any]:
         result = super().to_dict()
@@ -656,6 +671,7 @@ class WhileNode(ASTNode):
             {
                 "condition": self.condition.to_dict() if self.condition else None,
                 "statements": [s.to_dict() for s in self.statements],
+                "until": self.until,
             }
         )
         return result

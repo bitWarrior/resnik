@@ -1618,21 +1618,48 @@ class Parser:
                 column=getattr(p[0], "column", 0),
             )
 
-        # ---- DO FOR <var> = <start> TO <end> [BY <step>]; ... END; -------
+        # ---- DO UNTIL <cond>; ... END; ---------------------------------
+        # First cycle is unguarded; later cycles stop when <cond> is TRUE
+        # (USA003088 §7.6.3). Same AST class as DO WHILE, until=True.
+        @self.pg.production(
+            "do_block : KEYWORD_DO KEYWORD_UNTIL expression SEMICOLON "
+            "statement_list KEYWORD_END SEMICOLON"
+        )
+        def do_until_block(p: List[Any]) -> WhileNode:
+            return WhileNode(
+                condition=p[2],
+                statements=p[4],
+                until=True,
+                line=getattr(p[0], "line", 0),
+                column=getattr(p[0], "column", 0),
+            )
+
+        # ---- DO FOR <var> = <start> TO/DOWNTO <end> [BY <step>]
+        #      [UNTIL <cond>]; ... END; ----------------------------------
+        # Direction is forked on TO vs DOWNTO (same as before). UNTIL is an
+        # optional iterative guard: first cycle unguarded, later cycles stop
+        # when the condition is TRUE (USA003088 §7.6.5). Bound check still
+        # runs first, so an empty range never enters.
+        def _mk_for(p, *, end, statements, step=None, descending=False,
+                    until=None) -> ForNode:
+            return ForNode(
+                var=p[2].value,
+                start=p[4],
+                end=end,
+                step=step,
+                descending=descending,
+                until=until,
+                statements=statements,
+                line=getattr(p[0], "line", 0),
+                column=getattr(p[0], "column", 0),
+            )
+
         @self.pg.production(
             "do_block : KEYWORD_DO KEYWORD_FOR IDENTIFIER ASSIGN expression "
             "KEYWORD_TO expression SEMICOLON statement_list KEYWORD_END SEMICOLON"
         )
         def do_for_block(p: List[Any]) -> ForNode:
-            return ForNode(
-                var=p[2].value,
-                start=p[4],
-                end=p[6],
-                step=None,
-                statements=p[8],
-                line=getattr(p[0], "line", 0),
-                column=getattr(p[0], "column", 0),
-            )
+            return _mk_for(p, end=p[6], statements=p[8])
 
         @self.pg.production(
             "do_block : KEYWORD_DO KEYWORD_FOR IDENTIFIER ASSIGN expression "
@@ -1640,36 +1667,32 @@ class Parser:
             "statement_list KEYWORD_END SEMICOLON"
         )
         def do_for_step_block(p: List[Any]) -> ForNode:
-            return ForNode(
-                var=p[2].value,
-                start=p[4],
-                end=p[6],
-                step=p[8],
-                statements=p[10],
-                line=getattr(p[0], "line", 0),
-                column=getattr(p[0], "column", 0),
-            )
+            return _mk_for(p, end=p[6], step=p[8], statements=p[10])
 
-        # ---- DO FOR <var> = <start> DOWNTO <end> [BY <step>]; ... END; ----
-        # The directional token forks the rule: DOWNTO builds a decrementing
-        # ForNode (descending=True), which the backend lowers to a reversed
-        # range.
+        @self.pg.production(
+            "do_block : KEYWORD_DO KEYWORD_FOR IDENTIFIER ASSIGN expression "
+            "KEYWORD_TO expression KEYWORD_UNTIL expression SEMICOLON "
+            "statement_list KEYWORD_END SEMICOLON"
+        )
+        def do_for_until_block(p: List[Any]) -> ForNode:
+            return _mk_for(p, end=p[6], until=p[8], statements=p[10])
+
+        @self.pg.production(
+            "do_block : KEYWORD_DO KEYWORD_FOR IDENTIFIER ASSIGN expression "
+            "KEYWORD_TO expression KEYWORD_BY expression KEYWORD_UNTIL "
+            "expression SEMICOLON statement_list KEYWORD_END SEMICOLON"
+        )
+        def do_for_step_until_block(p: List[Any]) -> ForNode:
+            return _mk_for(
+                p, end=p[6], step=p[8], until=p[10], statements=p[12])
+
         @self.pg.production(
             "do_block : KEYWORD_DO KEYWORD_FOR IDENTIFIER ASSIGN expression "
             "KEYWORD_DOWNTO expression SEMICOLON statement_list "
             "KEYWORD_END SEMICOLON"
         )
         def do_for_down_block(p: List[Any]) -> ForNode:
-            return ForNode(
-                var=p[2].value,
-                start=p[4],
-                end=p[6],
-                step=None,
-                descending=True,
-                statements=p[8],
-                line=getattr(p[0], "line", 0),
-                column=getattr(p[0], "column", 0),
-            )
+            return _mk_for(p, end=p[6], descending=True, statements=p[8])
 
         @self.pg.production(
             "do_block : KEYWORD_DO KEYWORD_FOR IDENTIFIER ASSIGN expression "
@@ -1677,16 +1700,27 @@ class Parser:
             "statement_list KEYWORD_END SEMICOLON"
         )
         def do_for_down_step_block(p: List[Any]) -> ForNode:
-            return ForNode(
-                var=p[2].value,
-                start=p[4],
-                end=p[6],
-                step=p[8],
-                descending=True,
-                statements=p[10],
-                line=getattr(p[0], "line", 0),
-                column=getattr(p[0], "column", 0),
-            )
+            return _mk_for(
+                p, end=p[6], step=p[8], descending=True, statements=p[10])
+
+        @self.pg.production(
+            "do_block : KEYWORD_DO KEYWORD_FOR IDENTIFIER ASSIGN expression "
+            "KEYWORD_DOWNTO expression KEYWORD_UNTIL expression SEMICOLON "
+            "statement_list KEYWORD_END SEMICOLON"
+        )
+        def do_for_down_until_block(p: List[Any]) -> ForNode:
+            return _mk_for(
+                p, end=p[6], descending=True, until=p[8], statements=p[10])
+
+        @self.pg.production(
+            "do_block : KEYWORD_DO KEYWORD_FOR IDENTIFIER ASSIGN expression "
+            "KEYWORD_DOWNTO expression KEYWORD_BY expression KEYWORD_UNTIL "
+            "expression SEMICOLON statement_list KEYWORD_END SEMICOLON"
+        )
+        def do_for_down_step_until_block(p: List[Any]) -> ForNode:
+            return _mk_for(
+                p, end=p[6], step=p[8], descending=True, until=p[10],
+                statements=p[12])
 
         # ---- EXIT [<label>]; -- break the innermost or a named loop -------
         @self.pg.production("statement : KEYWORD_EXIT SEMICOLON")

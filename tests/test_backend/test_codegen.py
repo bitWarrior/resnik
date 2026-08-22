@@ -642,6 +642,17 @@ class TestWalkerCoverage:
         code = RustCodeGenerator().generate(program)
         assert "mod hal_rt" in code
 
+    def test_walk_descends_into_for_until(self) -> None:
+        loop = ForNode(
+            var="I",
+            start=LiteralNode(value=1, literal_type="INTEGER"),
+            end=LiteralNode(value=3, literal_type="INTEGER"),
+            until=SubscriptNode(operand=self._prelude_trigger(), index=1),
+        )
+        program = ProgramNode(name="T", statements=[loop])
+        code = RustCodeGenerator().generate(program)
+        assert "mod hal_rt" in code
+
     def test_walk_descends_into_unary_operand(self) -> None:
         # UnaryOpNode.operand — historically dropped by the walker.
         unary = UnaryOpNode(operator="-", operand=self._prelude_trigger())
@@ -954,6 +965,30 @@ class TestProceduresAndLoops:
         code = generator.generate(program)
         assert "while i < 10 {" in code
         assert "i = i + 1;" in code
+
+    def test_do_until_loop(self) -> None:
+        """DO UNTIL runs the body once, then breaks when cond is TRUE."""
+        generator = RustCodeGenerator()
+        cond = BinaryOpNode(
+            operator=">",
+            left=IdentifierNode(name="I"),
+            right=LiteralNode(value=3, literal_type="INTEGER"),
+        )
+        body = AssignmentNode(
+            target=IdentifierNode(name="I"),
+            value=BinaryOpNode(
+                operator="+",
+                left=IdentifierNode(name="I"),
+                right=LiteralNode(value=1, literal_type="INTEGER"),
+            ),
+        )
+        loop = WhileNode(condition=cond, statements=[body], until=True)
+        program = ProgramNode(name="P", statements=[loop])
+        code = generator.generate(program)
+        assert "loop {" in code
+        assert "if i > 3 { break; }" in code
+        assert "while i > 3" not in code
+        assert "while !" not in code
 
     def test_equals_is_equality_in_expression(self) -> None:
         """`=` inside an expression maps to Rust `==`."""
@@ -3455,6 +3490,54 @@ class TestDowntoAndExit:
         assert "history[(i - 1) as usize] == 99" in code
         assert "break;" in code
 
+    def test_for_until_skips_first_cycle_then_breaks(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE I INTEGER; "
+            "DO FOR I = 1 TO 10 UNTIL I = 4; END; CLOSE T;")
+        assert not errs
+        assert "let mut __first = true;" in code
+        assert "if i > (10) as i32 { break; }" in code
+        idx_bound = code.find("if i > (10) as i32 { break; }")
+        idx_until = code.find("if !__first &&")
+        assert idx_bound != -1 and idx_until != -1
+        assert idx_bound < idx_until
+        assert "__first = false;" in code
+        assert "i == 4" in code
+
+    def test_plain_for_has_no_first_flag(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE I INTEGER; "
+            "DO FOR I = 1 TO 5; END; CLOSE T;")
+        assert not errs
+        assert "__first" not in code
+
+    def test_for_until_empty_range_still_bound_checks_first(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE I INTEGER; "
+            "DO FOR I = 5 TO 1 UNTIL TRUE; END; CLOSE T;")
+        assert not errs
+        assert "if i > (1) as i32 { break; }" in code
+        assert "if !__first && (true) { break; }" in code
+
+    def test_for_downto_until_lowers(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE I INTEGER; "
+            "DO FOR I = 10 DOWNTO 1 BY 2 UNTIL I = 6; END; CLOSE T;")
+        assert not errs
+        assert "i = i.wrapping_sub((2) as i32);" in code
+        assert "if i < (1) as i32 { break; }" in code
+        assert "if !__first &&" in code
+
+    def test_labeled_for_until_keeps_rust_label(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE I INTEGER; "
+            "SEARCH: DO FOR I = 1 TO 10 UNTIL I = 4; EXIT SEARCH; END; "
+            "CLOSE T;")
+        assert not errs
+        assert "'search: loop {" in code
+        assert "break 'search;" in code
+        assert "let mut __first = true;" in code
+
 
 class TestLabeledExit:
     """Labeled loops (SEARCH: DO ...) and EXIT <label> -> Rust labeled break."""
@@ -3481,6 +3564,36 @@ class TestLabeledExit:
         assert not errs
         assert "'l: while i < 5 {" in code
         assert "break 'l;" in code
+
+    def test_do_until_lowers_to_loop_then_break(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE I INTEGER INITIAL(0); "
+            "DO UNTIL I > 3; I = I + 1; END; CLOSE T;")
+        assert not errs
+        assert "loop {" in code
+        assert "if i > 3 { break; }" in code
+        assert "while i > 3" not in code
+        assert "while !" not in code
+
+    def test_labeled_do_until_emits_rust_label(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE I INTEGER INITIAL(0); "
+            "L: DO UNTIL I > 3; EXIT L; END; CLOSE T;")
+        assert not errs
+        assert "'l: loop {" in code
+        assert "break 'l;" in code
+        assert "if i > 3 { break; }" in code
+
+    def test_do_until_true_still_runs_body_once(self) -> None:
+        """A true UNTIL condition must not become `while !true` (skip body)."""
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE I INTEGER INITIAL(0); "
+            "DO UNTIL TRUE; I = 1; END; CLOSE T;")
+        assert not errs
+        assert "loop {" in code
+        assert "if true { break; }" in code
+        assert "while !" not in code
+        assert "while true" not in code
 
     def test_exit_label_breaks_outer_from_inner(self) -> None:
         errs, code = self._run(

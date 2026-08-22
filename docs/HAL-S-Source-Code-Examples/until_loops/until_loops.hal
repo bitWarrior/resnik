@@ -1,0 +1,71 @@
+UNTIL_LOOPS: PROGRAM;
+
+/* ****************************************************************
+   DO UNTIL and iterative DO FOR ... UNTIL (USA003088 §7.6.3, §7.6.5).
+
+     - DO UNTIL always runs the body once; later cycles stop when
+       the condition is TRUE.
+     - DO FOR ... UNTIL skips the guard on the first cycle, then
+       tests after the index is assigned. Bound check still wins:
+       an empty TO range never enters.
+**************************************************************** */
+
+  DECLARE N INTEGER INITIAL(0);
+  DECLARE ONCE INTEGER INITIAL(0);
+  DECLARE I INTEGER;
+  DECLARE BODY_COUNT INTEGER INITIAL(0);
+  DECLARE EMPTY_FLAG BOOLEAN INITIAL(FALSE);
+  DECLARE K INTEGER;
+  DECLARE DOWN_COUNT INTEGER INITIAL(0);
+  DECLARE ZERO INTEGER INITIAL(1);
+  DECLARE TRAP INTEGER;
+  DECLARE FAIL_FLAG BOOLEAN INITIAL(FALSE);
+
+  /* N = 0,1,2 then increment to 3; next cycle UNTIL N = 3 stops. */
+  DO UNTIL N = 3;
+    N = N + 1;
+  END;
+  WRITE(6) 'DO UNTIL FINAL N:', N;
+  IF N NOT = 3 THEN FAIL_FLAG = TRUE;
+
+  /* Condition already TRUE: body must still run once. */
+  DO UNTIL TRUE;
+    ONCE = 1;
+  END;
+  WRITE(6) 'DO UNTIL TRUE RAN ONCE:', ONCE;
+  IF ONCE NOT = 1 THEN FAIL_FLAG = TRUE;
+
+  /* Bodies at I = 1,2,3; cycle I = 4 hits UNTIL before the body. */
+  DO FOR I = 1 TO 10 UNTIL I = 4;
+    BODY_COUNT = BODY_COUNT + 1;
+  END;
+  WRITE(6) 'FOR UNTIL INDEX AND COUNT:', I, BODY_COUNT;
+  IF I NOT = 4 THEN FAIL_FLAG = TRUE;
+  IF BODY_COUNT NOT = 3 THEN FAIL_FLAG = TRUE;
+
+  /* Empty range: bound check first, body must not run. */
+  DO FOR I = 5 TO 1 UNTIL TRUE;
+    EMPTY_FLAG = TRUE;
+  END;
+  WRITE(6) 'EMPTY RANGE INDEX AND FLAG:', I, EMPTY_FLAG;
+  IF I NOT = 5 THEN FAIL_FLAG = TRUE;
+  IF EMPTY_FLAG THEN FAIL_FLAG = TRUE;
+
+  /* DOWNTO BY: bodies at 10 and 8; I = 6 trips UNTIL. */
+  DO FOR K = 10 DOWNTO 1 BY 2 UNTIL K = 6;
+    DOWN_COUNT = DOWN_COUNT + 1;
+  END;
+  WRITE(6) 'DOWNTO UNTIL INDEX AND COUNT:', K, DOWN_COUNT;
+  IF K NOT = 6 THEN FAIL_FLAG = TRUE;
+  IF DOWN_COUNT NOT = 2 THEN FAIL_FLAG = TRUE;
+
+  IF FAIL_FLAG THEN
+  DO;
+    WRITE(6) 'UNTIL LOOPS CHECK FAILED';
+    ZERO = ZERO - 1;
+    TRAP = 1 / ZERO;
+  END;
+  ELSE
+    WRITE(6) 'UNTIL LOOPS PASSED';
+
+CLOSE UNTIL_LOOPS;

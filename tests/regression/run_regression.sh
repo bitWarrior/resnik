@@ -596,6 +596,10 @@ run_regression_case "Aldrin Sys Exec" \
     "Verify cyclic SCHEDULE ... REPEAT EVERY, WAIT UNTIL on a COMPOOL flag, and CANCEL of the cyclic task." \
     "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/aldrin_sys_exec/aldrin_sys_exec.hal --emit-exe
 
+run_regression_case "Until Loops" \
+    "Verify DO UNTIL (first cycle unguarded, stop when TRUE) and DO FOR ... UNTIL (guard after bound check, empty range never enters)." \
+    "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/until_loops/until_loops.hal --emit-exe
+
 run_template_pipeline_case "HAL/S Template Processing" \
     "Verify Resnik template workflow including supporting the OG 'D INCLUDE TEMPLATE' pre-processor directive (Link multiple templates into main)."
 

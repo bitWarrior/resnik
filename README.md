@@ -41,6 +41,63 @@ Designed decades before "memory safety" was a common term, HAL/S emphasized
 strong typing, explicit real-time semantics, and verifiability — the same
 properties that make Rust a fitting modern compilation target.
 
+## HAL/S keywords
+
+USA003088 Appendix B is the official HAL/S keyword list. Resnik implements a
+working subset and a few convenience spellings of its own.
+
+### Resnik-only words
+
+Resnik also reserves and implements the words below, which are **not**
+Appendix B keywords. The lexer treats them as reserved, so they cannot be used
+as identifiers.
+
+| Word | Official HAL/S | What Resnik accepts |
+| ---- | -------------- | ------------------- |
+| `GOTO` | Two-word `GO TO` only | One-token `GOTO <label>;` (same AST as `GO TO`) |
+| `DOWNTO` | `DO FOR I = N TO 1 BY -1` | `DO FOR I = N DOWNTO 1;` |
+| `OF` | `ARRAY(n) INTEGER` | Optional `OF`: `ARRAY(n) OF INTEGER` |
+| `MACRO` / `MEND` | Percent-macros (`%name`) | Parameterized `MACRO name(params); ... MEND;` preprocessor |
+| `TEMPLATE` | Not an Appendix B keyword | Signature-only prototype on `PROCEDURE` / `FUNCTION` / `COMPOOL` (see [Templates & Separate Compilation](#templates--separate-compilation)) |
+| `XOR` | Built-in function `XOR(a, b)` | Infix `A XOR B` as well as the function |
+| `MOD` | Built-in function `MOD(a, b)` | Infix `A MOD B` as well as the function |
+| `RESUME` | Error-handler cancel is `OFF ERROR` | Continues after the faulting statement in an `ON ERROR` handler |
+
+The official spellings remain valid: `GO TO`, `ARRAY(n) T`, `XOR(A, B)`, and
+`MOD(A, B)` all parse.
+
+### Future work
+
+These Appendix B keywords are not yet accepted as real language (no parser
+production, or only a different construct uses the same word). Several are
+already reserved by the lexer, so they also cannot be used as identifiers.
+`HEX` / `BIN` / `OCT` literal prefixes and the `REPLACE` preprocessor are
+implemented and are not listed here.
+
+| Area | Keywords | Official construct still to do |
+| ---- | -------- | ------------------------------ |
+| Blocks and real-time | `UPDATE` | `UPDATE` block (shared-data mutual exclusion) and `UPDATE PRIORITY(...)` |
+| | `AFTER`, `AT`, `DEPENDENT` | `SCHEDULE T AFTER S`, `SCHEDULE T AT <time>`, `SCHEDULE ... DEPENDENT` |
+| | `ON` | `SCHEDULE ... ON <event>` (`ON ERROR` already parses) |
+| | `UNTIL` | `SCHEDULE ... UNTIL ...` (`WAIT UNTIL`, `DO UNTIL`, and `DO FOR ... UNTIL` already parse) |
+| | `WHILE` | `SCHEDULE ... WHILE <cond>` (`DO WHILE` already parses) |
+| | `REENTRANT`, `EXCLUSIVE` | Procedure / function attributes |
+| Declarations | `LATCHED` | `DECLARE E EVENT LATCHED;` |
+| | `LOCK` | `DECLARE X INTEGER LOCK;` and lock groups |
+| | `ACCESS`, `REMOTE`, `TEMPORARY` | Compool access control, remote data, temporary declarations |
+| | `RIGID` | Structure layout (no field reordering); `ALIGNED` / `DENSE` already parse |
+| | `NULL` | Null `NAME` value (`NAME(P) = NULL`) |
+| | `SEND` | Process / event send |
+| I/O | `READALL`, `FILE` | `READALL(channel) ...`, file/channel binding |
+| | `SKIP`, `TAB`, `COLUMN`, `LINE`, `PAGE` | `WRITE` format controls (`WRITE(6) SKIP(2), TAB(10), X`) |
+| Error handling | `OFF`, `IGNORE` | `OFF ERROR`, `ON ERROR IGNORE` |
+| Bit / character | `SUBBIT` | Bit-view pseudo-variable (`SUBBIT(X)`, `SUBBIT 5 TO 8 (K)`) |
+| | `CAT` | Linear-form catenation (same meaning as `\|\|`, which already parses) |
+| | `CHAR` | Repeated character literal (`CHAR 5 'AB'`) |
+| Literals | `TRUE`, `FALSE` | Reserved boolean literals. Resnik currently special-cases identifiers named `TRUE` / `FALSE` but does not reserve them, so `DECLARE TRUE INTEGER;` is accepted |
+| | `DEC` | Decimal radix literal (`DEC '...'`), analogous to `HEX` / `BIN` / `OCT` |
+| Other | `SYSTEM` | System / process attribute |
+
 ## Why Python or the Lexer / Parser?
 
 Resnik is *implemented in* Python and *emits* Rust — each language is used where
@@ -413,40 +470,78 @@ resnik/
 
 ## Testing
 
-Unit tests live under `tests/` and are run with [pytest](https://pytest.org/).
-They exercise the lexer, parser, and Rust backend as Python code — they do
-**not** invoke `rustc`. From the repository root, with the venv from
-[Installation](#installation) activated (`pip install -e ".[dev]"` or
-`pip install -e ".[test]"`):
+Resnik has two test layers:
+
+| Layer | Command | What it covers | Needs `rustc`? |
+| ----- | ------- | -------------- | -------------- |
+| Unit tests | `python -m pytest` | Lexer, parser, and Python-side Rust codegen | No |
+| Regression | `./tests/regression/run_regression.sh` | Compile example `.hal` files to binaries and run them | Yes |
+
+Run the unit tests on every change. Run the regression suite before a release
+or when you touch code generation, the CLI, or an example under
+`docs/HAL-S-Source-Code-Examples/`.
 
 ### Unit tests
 
+The unit suite is [pytest](https://pytest.org/). It imports `resnik` and checks
+tokens, ASTs, and the **text** of generated Rust. It never shells out to
+`rustc`, so it is the fast, no-toolchain check for a new clone.
+
+**Once per clone** (same venv as [Installation](#installation)):
+
+```bash
+python3 -m venv resnik-venv
+. resnik-venv/bin/activate          # Windows: resnik-venv\Scripts\activate
+pip install -e ".[dev]"             # pytest, coverage, xdist, linters
+# pip install -e ".[test]"          # pytest + coverage only
+```
+
+Python 3.9 or newer is required (`requires-python` in `pyproject.toml`).
+Use `python -m pytest` so the tests run from the venv even if another
+`pytest` is on `PATH`.
+
+**From the repository root:**
+
 ```bash
 # Entire suite (lexer + parser + backend)
-pytest
+python -m pytest
 
-# Verbose (test names as they run)
-pytest -v
+# Verbose (print each test name)
+python -m pytest -v
 
 # One compiler stage
-pytest tests/test_lexer
-pytest tests/test_parser
-pytest tests/test_backend
+python -m pytest tests/test_lexer
+python -m pytest tests/test_parser
+python -m pytest tests/test_backend
 
 # One file
-pytest tests/test_lexer/test_tokenization.py
+python -m pytest tests/test_lexer/test_tokenization.py
+
+# One test (node id from pytest -v)
+python -m pytest tests/test_parser/test_parsing.py::TestDoUntil
 
 # Tests whose names match a substring
-pytest -k tokenize
+python -m pytest -k tokenize
 ```
 
-`pyproject.toml` already points pytest at `tests/` (`testpaths`), so a bare
-`pytest` from the repo root is enough. With the `dev` extra, tests can also
-run in parallel:
+`pyproject.toml` sets `testpaths = ["tests"]`, so a bare `python -m pytest`
+from the repo root is enough. A successful run prints a short summary and
+exits `0`. Failures print the assertion and a traceback; fix those before
+opening a pull request.
+
+The `dev` extra also installs `pytest-xdist` for parallel runs:
 
 ```bash
-pytest -n auto
+python -m pytest -n auto
 ```
+
+| Path | Stage |
+| ---- | ----- |
+| `tests/test_lexer/` | Tokenization and lexer edge cases |
+| `tests/test_parser/` | Grammar, macros, `REPLACE`, symbol table, AST |
+| `tests/test_backend/` | HAL/S → Rust lowering and type mapping |
+| `tests/fixtures/` | Shared `.hal` snippets |
+| `tests/regression/` | Not collected by pytest (shell script; see below) |
 
 ### Coverage
 

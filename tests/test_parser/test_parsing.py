@@ -838,3 +838,117 @@ class TestParserLogicFixes:
         assert isinstance(assigns[0].value, LiteralNode)
         assert assigns[0].value.value == 1
 
+
+class TestDoUntil:
+    """DO UNTIL <cond>; ... END; is WhileNode(until=True), distinct from
+    DO WHILE and from WAIT UNTIL."""
+
+    def _parse(self, src: str):
+        p = Parser()
+        ast = p.parse(Lexer().tokenize(src, "<t>"))
+        return p, ast
+
+    def test_do_until_parses_as_until_while_node(self) -> None:
+        from resnik.parser.ast_nodes import WhileNode
+        from resnik.types import NodeType
+
+        p, ast = self._parse(
+            "T: PROGRAM; DECLARE I INTEGER INITIAL(0); "
+            "DO UNTIL I > 3; I = I + 1; END; CLOSE T;"
+        )
+        assert p.errors == [], p.errors
+        loops = [s for s in ast.statements if isinstance(s, WhileNode)]
+        assert len(loops) == 1
+        assert loops[0].until is True
+        assert loops[0].node_type == NodeType.DO_UNTIL
+
+    def test_do_while_is_not_until(self) -> None:
+        from resnik.parser.ast_nodes import WhileNode
+        from resnik.types import NodeType
+
+        p, ast = self._parse(
+            "T: PROGRAM; DECLARE I INTEGER INITIAL(0); "
+            "DO WHILE I < 3; I = I + 1; END; CLOSE T;"
+        )
+        assert p.errors == [], p.errors
+        loops = [s for s in ast.statements if isinstance(s, WhileNode)]
+        assert len(loops) == 1
+        assert loops[0].until is False
+        assert loops[0].node_type == NodeType.DO_WHILE
+
+    def test_wait_until_is_not_a_do_until(self) -> None:
+        from resnik.parser.ast_nodes import WaitNode, WhileNode
+
+        p, ast = self._parse(
+            "T: PROGRAM; DECLARE E EVENT; WAIT UNTIL E; CLOSE T;"
+        )
+        assert p.errors == [], p.errors
+        assert any(isinstance(s, WaitNode) for s in ast.statements)
+        assert not any(isinstance(s, WhileNode) for s in ast.statements)
+
+
+class TestDoForUntil:
+    """DO FOR ... UNTIL <cond> attaches a guard on ForNode.until."""
+
+    def _parse(self, src: str):
+        p = Parser()
+        ast = p.parse(Lexer().tokenize(src, "<t>"))
+        return p, ast
+
+    def _for(self, ast):
+        from resnik.parser.ast_nodes import ForNode
+
+        loops = [s for s in ast.statements if isinstance(s, ForNode)]
+        assert len(loops) == 1, ast.statements
+        return loops[0]
+
+    def test_for_to_until_parses(self) -> None:
+        p, ast = self._parse(
+            "T: PROGRAM; DECLARE I INTEGER; "
+            "DO FOR I = 1 TO 10 UNTIL I = 4; END; CLOSE T;"
+        )
+        assert p.errors == [], p.errors
+        node = self._for(ast)
+        assert node.until is not None
+        assert node.descending is False
+        assert node.step is None
+
+    def test_for_to_by_until_parses(self) -> None:
+        p, ast = self._parse(
+            "T: PROGRAM; DECLARE I INTEGER; "
+            "DO FOR I = 1 TO 10 BY 2 UNTIL I = 5; END; CLOSE T;"
+        )
+        assert p.errors == [], p.errors
+        node = self._for(ast)
+        assert node.until is not None
+        assert node.step is not None
+
+    def test_for_downto_until_parses(self) -> None:
+        p, ast = self._parse(
+            "T: PROGRAM; DECLARE I INTEGER; "
+            "DO FOR I = 10 DOWNTO 1 UNTIL I = 7; END; CLOSE T;"
+        )
+        assert p.errors == [], p.errors
+        node = self._for(ast)
+        assert node.until is not None
+        assert node.descending is True
+
+    def test_for_downto_by_until_parses(self) -> None:
+        p, ast = self._parse(
+            "T: PROGRAM; DECLARE I INTEGER; "
+            "DO FOR I = 10 DOWNTO 1 BY 2 UNTIL I = 6; END; CLOSE T;"
+        )
+        assert p.errors == [], p.errors
+        node = self._for(ast)
+        assert node.until is not None
+        assert node.descending is True
+        assert node.step is not None
+
+    def test_plain_for_has_no_until(self) -> None:
+        p, ast = self._parse(
+            "T: PROGRAM; DECLARE I INTEGER; "
+            "DO FOR I = 1 TO 3; END; CLOSE T;"
+        )
+        assert p.errors == [], p.errors
+        assert self._for(ast).until is None
+
