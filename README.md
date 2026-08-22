@@ -5,6 +5,10 @@ An open-source compiler for the HAL/S aerospace programming language, translatin
 **Version:** 1.0.0 (Modern Edition)  
 **Status:** Lexer ✓ | Parser ✓ | Backend ✓ | Cross-compilation (ARM Cortex-M stub, ESP32-C3) ✓ | Separate compilation (TEMPLIB) ✓
 
+## License
+
+This project is licensed under the GNU General Public License v3.0 or later — see the [LICENSE.md](LICENSE.md) file for details.
+
 ## About HAL/S
 
 HAL/S (*High-order Assembly Language / Shuttle*) is a real-time aerospace
@@ -181,10 +185,6 @@ HAL/S code:
   functional-safety standards (ISO 26262, IEC 61508, IEC 62304) and provide
   tooling to support aerospace DO-178C (DAL C) certification efforts.
 
-## License
-
-This project is licensed under the GNU General Public License v3.0 or later — see the [LICENSE.md](LICENSE.md) file for details.
-
 ## Requirements
 
 **To install and run the compiler** (`resnik lex`, `resnik parse`, and
@@ -203,20 +203,37 @@ it is a Linux environment, so the install, Bash regression script, and
 verified on this project.
 
 Python dependencies (`rply`, `click`, `rich`) are installed by
-`pip install -e .` in the next section. You do not need Rust to emit `.rs`
-files.
+`pip install -e .` in the next section. You do **not** need Rust to run
+Resnik or to emit `.rs` files (`resnik compile program.hal`).
 
-**Also needed for some commands:**
+**Rust toolchain** — install this when you want a binary, the regression
+suite, or an embedded target. Resnik emits Rust; `rustc` / `cargo` compile
+it. Get the toolchain from [rustup.rs](https://rustup.rs/):
 
-| You want to… | Also install |
-| ------------ | ------------ |
-| `resnik compile … --emit-exe`, or `./tests/regression/run_regression.sh` | `rustc` (and `cc` for the `HW_INTERFACE` example) |
-| `--target cortex-m` / `--target esp32-c3` and flash | See [Cross-Compilation](#cross-compilation-embedded-targets) |
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+. "$HOME/.cargo/env"          # or open a new shell
+rustc --version
+cargo --version
+```
+
+That puts `rustc` and `cargo` in `~/.cargo/bin` and is the supported way to
+install Rust on Linux. Extra targets for Cortex-M and ESP32-C3 are listed
+under [Cross-Compilation](#cross-compilation-embedded-targets).
+
+| You want to… | Also need |
+| ------------ | --------- |
+| `resnik compile … --emit-exe`, or `./tests/regression/run_regression.sh` | `rustc` (and `cc` for the `HW_INTERFACE` example — e.g. `sudo apt install build-essential`) |
+| `--emit-cargo`, `--target cortex-m`, or `--target esp32-c3` and flash | `cargo` (included with rustup); then the target-specific steps below |
 
 The regression script is Bash and expects a git checkout. It resets `PATH` to
 a short system list (`/usr/bin`, `/usr/local/bin`, …), so a rustup-only
-`rustc` under `~/.cargo/bin` is not visible. Install a system `rustc` or place
-the binary in one of those directories.
+`rustc` under `~/.cargo/bin` is **not** visible. After rustup, put `rustc`
+on that list (a symlink is enough):
+
+```bash
+sudo ln -sf "$HOME/.cargo/bin/rustc" /usr/local/bin/rustc
+```
 
 ## Installation
 
@@ -236,6 +253,10 @@ pip install -e ".[dev]"
 pip install -e .
 ```
 
+Install the Rust toolchain from [Requirements](#requirements) if you will
+use `--emit-exe`, `./tests/regression/run_regression.sh`, `--emit-cargo`, or
+an embedded `--target`. Skip it if you only need Resnik to write `.rs` files.
+
 ### Usage
 
 ```bash
@@ -251,9 +272,33 @@ resnik compile tests/fixtures/valid/sample_hals_code.hal
 # Get help
 resnik --help
 
-# End-to-end HAL/S example regression (needs rustc; see Testing)
+# End-to-end HAL/S example regression (needs rustc; see Requirements)
 ./tests/regression/run_regression.sh
 ```
+
+### IDE
+
+Resnik ships a minimal desktop IDE (Tk) for editing a HAL/S file, running a
+**Semantic Check** (lexer + parser) or a full **Compile**, and watching the
+result in a log pane. It lives in [`ide/`](ide/README.md) and is installed
+together with the compiler by `pip install -e .`.
+
+```bash
+# From the repository root, no need to activate the venv:
+./start_ide.sh                                   # empty editor
+./start_ide.sh docs/HAL-S-Source-Code-Examples/hello_word/hello_world.hal
+
+# Equivalent, with the venv active:
+resnik-ide [file.hal]
+python -m resnik_ide [file.hal]
+```
+
+`start_ide.sh` uses `resnik-venv/bin/python` when present (else `python3` on
+PATH) and tells you what to install if Tk (`python3-tk` on Debian/Ubuntu) or
+the `resnik_ide` package is missing. Keyboard: **F7** Semantic Check, **F5**
+Compile, Ctrl+O/S/N open/save/new. Click a diagnostic in the log to jump to
+its line. See `ide/README.md` for details and `docs/Resnik IDE/` for the
+roadmap (compiler-argument dialog, rustup/cargo hardware flashing).
 
 ### Cross-Compilation (Embedded Targets)
 
@@ -287,6 +332,7 @@ HAL/S `WRITE` output to semihosting (swappable for RTT or UART downstream).
 It is a crate *shape*, not a complete board support package.
 
 ```bash
+# rustup / rustc: see Requirements if these commands are missing
 rustup target add thumbv7em-none-eabihf
 resnik compile program.hal --target cortex-m --emit-cargo ./firmware
 cd firmware
@@ -328,8 +374,10 @@ on the DevKit USB serial / JTAG console. Stay inside the `no_std` subset
 You can copy that file or save the same text as `hello_world.hal` in the
 current directory.
 
-**2. Install the RISC-V target and flasher** (once per machine). You need a
-recent stable Rust (esp-hal 1.1 wants **1.88+**), stock `rustc` — not `espup`:
+**2. Install the RISC-V target and flasher** (once per machine). Install
+Rust with rustup first if `rustc` is missing ([Requirements](#requirements)).
+You need a recent stable toolchain (esp-hal 1.1 wants **1.88+**), stock
+`rustc` — not `espup`:
 
 ```bash
 rustup update stable
@@ -576,14 +624,21 @@ resnik/
 │   │   ├── rust_emitter.py # Rust source emission helpers
 │   │   └── type_mapper.py  # HAL/S → Rust type mapping
 │   ├── cli.py              # Beautiful CLI with Click + Rich
+│   ├── driver.py           # Reusable compile pipeline (used by the CLI and the IDE)
 │   ├── templib.py          # Template-library (.tpl) generation for --gen-tpl
 │   ├── types.py            # Type definitions
 │   └── exceptions.py       # Custom exceptions
+│
+├── ide/                    # Desktop IDE (Tk) — see ide/README.md
+│   ├── resnik_ide/         # resnik-ide package: editor, log pane, driver bridge
+│   └── tests/              # IDE tests (Tk tests skip without a display)
+├── start_ide.sh            # Launch the IDE (uses resnik-venv if present)
 │
 ├── tests/                  # Test suite
 │   ├── test_lexer/         # Lexer unit tests
 │   ├── test_parser/        # Parser unit tests
 │   ├── test_backend/       # Codegen / type-mapper unit tests
+│   ├── test_driver/        # Compile-driver + CLI wrapper tests
 │   ├── fixtures/           # HAL/S snippets used by unit tests
 │   └── regression/         # End-to-end compile of example .hal programs
 │

@@ -57,6 +57,7 @@ test = [
 resnik = "resnik.cli:main"
 resnik-lex = "resnik.cli:lex_command"
 resnik-parse = "resnik.cli:parse_command"
+resnik-ide = "resnik_ide.app:main"
 
 [project.urls]
 Homepage = "https://github.com/resnik-compiler/resnik"
@@ -71,6 +72,7 @@ path = "src/resnik/__init__.py"
 [tool.hatch.build.targets.sdist]
 include = [
     "/src",
+    "/ide",
     "/tests",
     "/docs",
     "/examples",
@@ -79,10 +81,10 @@ include = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/resnik"]
+packages = ["src/resnik", "ide/resnik_ide"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["tests", "ide/tests"]
 python_files = "test_*.py"
 python_classes = "Test*"
 python_functions = "test_*"
@@ -139,7 +141,7 @@ ignore = [
 "tests/**/*.py" = ["ARG"]  # unused arguments in tests
 
 [tool.ruff.isort]
-known-first-party = ["resnik"]
+known-first-party = ["resnik", "resnik_ide"]
 
 [tool.mypy]
 python_version = "3.9"

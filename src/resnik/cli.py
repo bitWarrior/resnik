@@ -19,8 +19,8 @@ from rich.tree import Tree
 from resnik import __version__
 from resnik.lexer import Lexer
 from resnik.parser import Parser
-from resnik.backend.codegen import RustCodeGenerator
 from resnik.backend.target_spec import TARGET_NAMES
+from resnik.driver import CompileOptions, Diagnostic, Reporter, generate
 from resnik.exceptions import ResnikError
 
 console = Console()
@@ -293,185 +293,28 @@ def compile(
             subtitle=f"v{__version__}",
         )
     )
-    if target != "host":
-        print_info(f"Target profile: {target} (no_std bare-metal)")
+
+    options = CompileOptions(
+        input_file=input_file,
+        tokens=tokens,
+        ast=ast,
+        rust=rust,
+        emit_exe=emit_exe,
+        opt_level=opt_level,
+        link_search=list(link_search),
+        link_lib=list(link_lib),
+        link_obj=list(link_obj),
+        emit_cargo=emit_cargo,
+        build=build,
+        target=target,
+        gen_tpl=gen_tpl,
+        templib=list(templib),
+    )
 
     try:
-        # Phase 1: Lexer
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            console=console,
-        ) as progress:
-            task = progress.add_task("[cyan]Phase 1: Lexical Analysis", total=None)
-
-            lexer = Lexer()
-            lexer.template_dirs = [str(d) for d in templib]
-            token_list = lexer.tokenize_file(str(input_file))
-
-            progress.update(task, completed=True)
-
-        if lexer.errors:
-            print_error(f"Lexer found {len(lexer.errors)} error(s)")
-            for error in lexer.errors:
-                console.print(f"  {error}")
+        result = generate(options, RichReporter())
+        if not result.ok:
             sys.exit(1)
-
-        print_success(f"Tokenized {len(token_list)} tokens")
-
-        if tokens:
-            lexer.export_json(str(tokens))
-            print_info(f"Tokens exported to {tokens}")
-
-        # Phase 2: Parser
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            console=console,
-        ) as progress:
-            task = progress.add_task("[cyan]Phase 2: Syntactic Analysis", total=None)
-
-            parser = Parser()
-            ast_result = parser.parse(token_list)
-
-            progress.update(task, completed=True)
-
-        if parser.errors:
-            print_error(f"Parser found {len(parser.errors)} error(s)")
-            for error in parser.errors:
-                console.print(f"  {error}")
-            sys.exit(1)
-
-        if ast_result:
-            print_success("Generated Abstract Syntax Tree")
-
-            if ast:
-                parser.export_ast_json(str(ast))
-                print_info(f"AST exported to {ast}")
-        else:
-            print_error("Failed to generate AST")
-            sys.exit(1)
-
-        # Phase 3: Code Generation
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            console=console,
-        ) as progress:
-            task = progress.add_task("[cyan]Phase 3: Code Generation", total=None)
-
-            generator = RustCodeGenerator(target=target)
-            rust_code = generator.generate(ast_result)
-            rust_path = rust if rust else input_file.with_suffix(".rs")
-            generator.write_to_file(str(rust_path), rust_code)
-
-            progress.update(task, completed=True)
-
-        print_success(f"Generated Rust source: {rust_path}")
-
-        # Template-library generation (mimics the original HAL/S TEMPLIB): a
-        # perfect prototype for each reusable unit, saved for later D INCLUDE.
-        if gen_tpl:
-            from resnik.templib import write_templates
-            written = write_templates(ast_result, gen_tpl)
-            if written:
-                print_success(
-                    f"Generated {len(written)} template(s) into {gen_tpl}:")
-                for path in written:
-                    print_info(f"  {path}")
-            else:
-                print_info(
-                    "No reusable units (PROCEDURE/FUNCTION/COMPOOL) to "
-                    "template.")
-
-        # Cross-compilation triple implied by the target profile (None = host).
-        cross_triple = RustCodeGenerator.TARGET_TRIPLES.get(target)
-
-        # Phase 4: Cargo project (optional)
-        if emit_cargo:
-            with Progress(
-                SpinnerColumn(),
-                TextColumn("[progress.description]{task.description}"),
-                console=console,
-            ) as progress:
-                task = progress.add_task(
-                    "[cyan]Phase 4: Cargo Project", total=None
-                )
-
-                try:
-                    cargo_result = generator.emit_cargo_project(
-                        rust_code,
-                        str(emit_cargo),
-                        opt_level=opt_level,
-                        build=build,
-                        target=cross_triple,
-                    )
-                except RuntimeError as exc:
-                    progress.update(task, completed=True)
-                    print_error(str(exc))
-                    sys.exit(1)
-
-                progress.update(task, completed=True)
-
-            print_success(f"Scaffolded Cargo project: {cargo_result.project_dir}")
-            print_info(f"Cargo.toml:  {cargo_result.cargo_toml}")
-            print_info(f"src/main.rs: {cargo_result.main_rs}")
-            if cargo_result.built:
-                if cargo_result.success:
-                    print_success(f"Built executable: {cargo_result.executable}")
-                else:
-                    print_error("cargo build failed")
-                    if cargo_result.stderr:
-                        console.print(cargo_result.stderr)
-                    sys.exit(1)
-
-        # Phase 4: Native compilation (optional)
-        if emit_exe:
-            if target != "host":
-                print_info(
-                    "--emit-exe builds a single file with rustc; for a "
-                    "bare-metal target prefer --emit-cargo (it scaffolds the "
-                    "runtime, linker script, and target config).")
-            with Progress(
-                SpinnerColumn(),
-                TextColumn("[progress.description]{task.description}"),
-                console=console,
-            ) as progress:
-                task = progress.add_task(
-                    "[cyan]Phase 4: Native Compilation", total=None
-                )
-
-                try:
-                    result = generator.compile_to_executable(
-                        rust_code,
-                        str(rust_path.with_suffix("")),
-                        opt_level=opt_level,
-                        target=cross_triple,
-                        link_search=[str(d) for d in link_search],
-                        link_libs=list(link_lib),
-                        link_objs=[str(o) for o in link_obj],
-                    )
-                except RuntimeError as exc:
-                    progress.update(task, completed=True)
-                    print_error(str(exc))
-                    sys.exit(1)
-
-                progress.update(task, completed=True)
-
-            if result.success:
-                if result.library:
-                    print_success(
-                        "No PROGRAM entry point (TEMPLATE/prototype unit); "
-                        "generated Rust validated as a library — no executable "
-                        "produced.")
-                else:
-                    print_success(f"Built executable: {result.executable}")
-            else:
-                print_error("rustc failed to compile the generated code")
-                if result.stderr:
-                    console.print(result.stderr)
-                sys.exit(1)
-
         console.print("\n[bold green]✓ Compilation completed successfully![/bold green]")
 
     except ResnikError as e:
@@ -483,6 +326,50 @@ def compile(
 
         traceback.print_exc()
         sys.exit(1)
+
+
+class RichReporter(Reporter):
+    """Render driver progress with Rich: spinners per phase, ✓/ℹ/✗ lines."""
+
+    def phase(self, title: str):
+        return _PhaseSpinner(title)
+
+    def success(self, message: str) -> None:
+        print_success(message)
+
+    def info(self, message: str) -> None:
+        print_info(message)
+
+    def error(self, message: str) -> None:
+        print_error(message)
+
+    def diagnostic(self, diag: Diagnostic) -> None:
+        console.print(f"  {diag}")
+
+    def raw(self, text: str) -> None:
+        console.print(text)
+
+
+class _PhaseSpinner:
+    """Context manager: a Rich spinner labelled with the phase title."""
+
+    def __init__(self, title: str) -> None:
+        self._title = title
+        self._progress = Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            console=console,
+        )
+
+    def __enter__(self) -> "_PhaseSpinner":
+        self._progress.__enter__()
+        self._task = self._progress.add_task(f"[cyan]{self._title}", total=None)
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        if exc_type is None:
+            self._progress.update(self._task, completed=True)
+        self._progress.__exit__(exc_type, exc, tb)
 
 
 @main.command()
