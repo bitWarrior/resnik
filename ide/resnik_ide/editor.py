@@ -131,6 +131,8 @@ class Editor(ttk.Frame):
         self._bold_font.configure(weight="bold")
         self._italic_font = self.font.copy()
         self._italic_font.configure(slant="italic")
+        self.highlighter = compute_spans  # HAL/S by default; the Rust viewer swaps it
+        self.viewer_mode = False          # read-only generated-code look
         self._palette = theme.palette()
         self.apply_palette(self._palette)
         # error/current-line backgrounds must win over syntax colours
@@ -250,7 +252,7 @@ class Editor(ttk.Frame):
     def apply_palette(self, p: dict) -> None:
         """Recolour text, gutter, marks and syntax tags for palette ``p``."""
         self._palette = p
-        theme.style_text(self.text, p, kind="editor")
+        theme.style_text(self.text, p, kind="viewer" if self.viewer_mode else "editor")
         self.gutter.configure(background=p["gutter_bg"])
         self.text.tag_configure("error_line", background=p["error_line"])
         self.text.tag_configure("current_line", background=p["current_line"])
@@ -279,8 +281,17 @@ class Editor(ttk.Frame):
             self.text.tag_remove(tag, "1.0", "end")
         if not self.highlighting:
             return
-        for tag, start, end in compute_spans(self.get_text()):
+        for tag, start, end in self.highlighter(self.get_text()):
             self.text.tag_add(tag, start, end)
+
+    def set_viewer_mode(self, on: bool = True, highlighter=None) -> None:
+        """Read-only generated-code look: tinted background, optional other
+        highlighter (e.g. Rust).  Call before ``set_text``."""
+        self.viewer_mode = bool(on)
+        if highlighter is not None:
+            self.highlighter = highlighter
+        self.apply_palette(self._palette)
+        self.highlight_now()
 
     def set_highlighting(self, on: bool) -> None:
         self.highlighting = bool(on)

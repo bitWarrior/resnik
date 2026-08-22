@@ -51,6 +51,7 @@ import time
 from resnik_ide import desktop, devices, fonts, pass_commands, shuttle, theme, toolchain
 from resnik_ide.font_dialog import FontDialog
 from resnik_ide.options_dialog import OptionsDialog
+from resnik_ide import rust_highlight
 from resnik_ide.reporter import LogReporter
 from resnik_ide.runner import ProcessResult, ProcessRunner
 from resnik_ide.settings import load_settings, save_settings, settings_path
@@ -139,7 +140,7 @@ class ResnikIDE(tk.Tk):
         self._sash_restore_active = True
         self._paned.bind("<Configure>", lambda e: self._restore_sash_if_active())
         self._outer.bind("<Configure>", lambda e: self._restore_sash_if_active())
-        self.after(2000, self._end_sash_restore)
+        self._sash_restore_after: Optional[str] = self.after(2000, self._end_sash_restore)
         if self.settings.log_height > 0 or self.settings.sash_target_panel > 0:
             self.after(50, self._restore_sash)
         self._rebuild_recent_menu()
@@ -555,6 +556,7 @@ class ResnikIDE(tk.Tk):
 
     def _end_sash_restore(self) -> None:
         self._sash_restore_active = False
+        self._sash_restore_after = None
 
     def _restore_sash_if_active(self) -> None:
         if getattr(self, "_sash_restore_active", False):
@@ -1359,19 +1361,41 @@ class ResnikIDE(tk.Tk):
         win.title(f"Generated Rust — {self.last_rust_path.name}")
         win.geometry("900x650")
         win.configure(background=theme.palette()["bg"])
-        # Reuse the editor widget for its line-number gutter and theme; the
-        # HAL/S highlighter is switched off (this is Rust) and the buffer is
-        # read-only (selection/copy still work).
+        path = self.last_rust_path
+        # Header strip: what this is, where it lives, and the two things you
+        # can do with read-only output.
+        head = ttk.Frame(win, padding=(8, 4))
+        head.pack(side="top", fill="x")
+        ttk.Label(head, text="Generated Rust", style="Title.TLabel").pack(side="left")
+        ttk.Label(head, text=f" · read-only · {path}", style="Muted.TLabel").pack(
+            side="left", fill="x", expand=True)
+        ttk.Button(head, text="Open folder",
+                   command=lambda: self._open_dir(path.parent, "Rust output folder")).pack(
+            side="right")
+        ttk.Button(head, text="Copy all", command=lambda: self._copy_viewer()).pack(
+            side="right", padx=(0, 6))
+        ttk.Separator(win, orient="horizontal").pack(side="top", fill="x")
+        # Reuse the editor widget: line-number gutter, theme, fonts — in viewer
+        # mode (tinted background) with the Rust highlighter; read-only, but
+        # selection/copy still work.
         viewer = Editor(win)
         viewer.pack(fill="both", expand=True)
-        viewer.set_highlighting(False)
+        viewer.set_viewer_mode(True, highlighter=rust_highlight.compute_spans)
         viewer.set_font_size(self.editor.font_size)
         viewer.set_font_family(self.editor.font_family)
-        viewer.set_text(self.last_rust_path.read_text(encoding="utf-8"))
+        viewer.set_text(path.read_text(encoding="utf-8"))
         viewer.text.configure(state="disabled")
         win.bind("<Escape>", lambda _e: win.destroy())
         self._rust_viewer = viewer
         self._rust_window = win
+
+    def _copy_viewer(self) -> None:
+        viewer = getattr(self, "_rust_viewer", None)
+        if viewer is None:
+            return
+        self.clipboard_clear()
+        self.clipboard_append(viewer.get_text())
+        self.log.log("Generated Rust copied to the clipboard.", "info")
 
     IMAGES_DIR = Path(__file__).resolve().parent.parent / "images"
 
@@ -1488,7 +1512,8 @@ class ResnikIDE(tk.Tk):
         except tk.TclError:  # pragma: no cover
             pass
         self.dispatcher.stop()
-        for aid in (self._met_after, getattr(self, "_remember_after", None)):
+        for aid in (self._met_after, getattr(self, "_remember_after", None),
+                    getattr(self, "_sash_restore_after", None)):
             if aid is not None:
                 try:
                     self.after_cancel(aid)

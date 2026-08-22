@@ -26,6 +26,7 @@ LIGHT: Palette = {
     "ok": "#1a7f37", "warn": "#9a6700", "error": "#c42b1c", "info": "#1f4e79", "cmd": "#5a32a3",
     "raw": "#444444", "ts": "#888888", "link": "#c42b1c",
     "editor_bg": "#ffffff", "editor_fg": "#000000", "caret": "#000000",
+    "viewer_bg": "#f7f7f2",  # read-only generated-code viewer: a shade off the editor
     "gutter_bg": "#f0f0f0", "gutter_fg": "#777777", "gutter_err": "#c42b1c",
     "current_line": "#f5f7ff", "error_line": "#ffd6d6",
     "log_bg": "#ffffff", "log_fg": "#000000",
@@ -41,6 +42,7 @@ DARK: Palette = {
     "ok": "#4ec9b0", "warn": "#dcdcaa", "error": "#f48771", "info": "#9cdcfe", "cmd": "#c586c0",
     "raw": "#bdbdbd", "ts": "#7a7a7a", "link": "#f48771",
     "editor_bg": "#1e1e1e", "editor_fg": "#d4d4d4", "caret": "#ffffff",
+    "viewer_bg": "#232327",
     "gutter_bg": "#252526", "gutter_fg": "#858585", "gutter_err": "#f48771",
     "current_line": "#2a2d2e", "error_line": "#5a1d1d",
     "log_bg": "#181818", "log_fg": "#d4d4d4",
@@ -163,8 +165,8 @@ def style_menu(menu: tk.Menu, p: Optional[Palette] = None) -> None:
 def style_text(widget: tk.Text, p: Optional[Palette] = None, *, kind: str = "editor") -> None:
     """Colour a plain tk.Text (editor / log / viewer / list field)."""
     p = p or _current
-    bg = p["editor_bg"] if kind == "editor" else p["log_bg"] if kind == "log" else p["field_bg"]
-    fg = p["editor_fg"] if kind == "editor" else p["log_fg"] if kind == "log" else p["field_fg"]
+    bg = {"editor": p["editor_bg"], "viewer": p["viewer_bg"], "log": p["log_bg"]}.get(kind, p["field_bg"])
+    fg = {"editor": p["editor_fg"], "viewer": p["editor_fg"], "log": p["log_fg"]}.get(kind, p["field_fg"])
     widget.configure(background=bg, foreground=fg, insertbackground=p["caret"],
                      selectbackground=p["select_bg"], selectforeground=p["select_fg"],
                      highlightbackground=p["border"], highlightcolor=p["select_bg"])

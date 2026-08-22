@@ -9,7 +9,7 @@ class TestPalettes:
     def test_light_and_dark_have_identical_keys(self):
         assert set(theme.LIGHT) == set(theme.DARK)
         assert theme.LIGHT["name"] == "light" and theme.DARK["name"] == "dark"
-        for key in ("bg", "fg", "editor_bg", "log_bg", "hl_keyword", "gutter_err", "select_bg"):
+        for key in ("bg", "fg", "editor_bg", "viewer_bg", "log_bg", "hl_keyword", "gutter_err", "select_bg"):
             assert key in theme.LIGHT
 
     def test_palette_lookup_defaults_to_light(self):
@@ -39,6 +39,8 @@ class TestApply:
         assert t.cget("background") == theme.DARK["log_bg"]
         theme.style_text(t, theme.LIGHT, kind="field")
         assert t.cget("background") == theme.LIGHT["field_bg"]
+        theme.style_text(t, theme.DARK, kind="viewer")
+        assert t.cget("background") == theme.DARK["viewer_bg"]
         m = tk.Menu(tk_root, tearoff=False)
         sub = tk.Menu(m, tearoff=False)
         m.add_cascade(label="Sub", menu=sub)

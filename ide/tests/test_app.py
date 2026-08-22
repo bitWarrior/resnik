@@ -1152,6 +1152,21 @@ class TestRustViewer:
         assert numbers[:3] == ["1", "2", "3"]
         assert "fn main" in viewer.get_text()
         assert str(viewer.text.cget("state")) == "disabled"
-        assert viewer.highlighting is False
         assert viewer.font_family == app.editor.font_family
+        # viewer look: tinted background, Rust highlighting, header strip
+        assert viewer.viewer_mode is True
+        assert viewer.text.cget("background") == theme.LIGHT["viewer_bg"]
+        assert viewer.highlighting is True and viewer.highlighted("hl_keyword")  # fn / let …
+        from tkinter import ttk as _ttk
+        texts = []
+        def walk(w):
+            for c in w.winfo_children():
+                if isinstance(c, (_ttk.Label, _ttk.Button)):
+                    texts.append(str(c.cget("text")))
+                walk(c)
+        walk(win)
+        assert "Generated Rust" in texts and "Copy all" in texts and "Open folder" in texts
+        assert any("read-only" in t for t in texts)
+        app._copy_viewer()
+        assert "copied to the clipboard" in app.log.get_text()
         win.destroy()
