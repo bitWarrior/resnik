@@ -185,6 +185,39 @@ HAL/S code:
 
 This project is licensed under the GNU General Public License v3.0 or later — see the [LICENSE.md](LICENSE.md) file for details.
 
+## Requirements
+
+**To install and run the compiler** (`resnik lex`, `resnik parse`, and
+`resnik compile` emitting Rust source):
+
+| Requirement | Notes |
+| ----------- | ----- |
+| OS | **Linux** — this is the supported, tested deployment |
+| Python | 3.9 or newer, with `venv` and `pip` (`requires-python` in `pyproject.toml`) |
+| Git | To clone the repository |
+
+Native Windows and macOS are untested. On Windows, the realistic option is
+[WSL](https://learn.microsoft.com/windows/wsl/) (Windows Subsystem for Linux):
+it is a Linux environment, so the install, Bash regression script, and
+`/dev/tty*` serial paths below are the ones that would apply. WSL has not been
+verified on this project.
+
+Python dependencies (`rply`, `click`, `rich`) are installed by
+`pip install -e .` in the next section. You do not need Rust to emit `.rs`
+files.
+
+**Also needed for some commands:**
+
+| You want to… | Also install |
+| ------------ | ------------ |
+| `resnik compile … --emit-exe`, or `./tests/regression/run_regression.sh` | `rustc` (and `cc` for the `HW_INTERFACE` example) |
+| `--target cortex-m` / `--target esp32-c3` and flash | See [Cross-Compilation](#cross-compilation-embedded-targets) |
+
+The regression script is Bash and expects a git checkout. It resets `PATH` to
+a short system list (`/usr/bin`, `/usr/local/bin`, …), so a rustup-only
+`rustc` under `~/.cargo/bin` is not visible. Install a system `rustc` or place
+the binary in one of those directories.
+
 ## Installation
 
 ```bash
@@ -363,8 +396,7 @@ the board to print again.
 
 If `espflash` cannot open the port: unplug USB, hold **BOOT**, plug back in,
 release **BOOT**. Some boards also need a tap on **RESET** while **BOOT** is
-held. Pass `--port /dev/ttyACM0` (or the COM port on Windows) if several
-serial devices are present.
+held. Pass `--port /dev/ttyACM0` if several serial devices are present.
 
 Host check of the same source (no board required):
 
@@ -585,12 +617,12 @@ tokens, ASTs, and the **text** of generated Rust. It never shells out to
 
 ```bash
 python3 -m venv resnik-venv
-. resnik-venv/bin/activate          # Windows: resnik-venv\Scripts\activate
+. resnik-venv/bin/activate
 pip install -e ".[dev]"             # pytest, coverage, xdist, linters
 # pip install -e ".[test]"          # pytest + coverage only
 ```
 
-Python 3.9 or newer is required (`requires-python` in `pyproject.toml`).
+Python 3.9 or newer is required; see [Requirements](#requirements).
 Use `python -m pytest` so the tests run from the venv even if another
 `pytest` is on `PATH`.
 
@@ -655,16 +687,10 @@ compiles each program under `docs/HAL-S-Source-Code-Examples/` with
 library (`--gen-tpl` / `--templib`) and `EXTERNAL` C-object (`--link-obj`)
 pipelines. Unlike the pytest unit tests, this **does** need `rustc`.
 
-**Prerequisites**
-
-- A git checkout (the script finds the repo root with `git rev-parse`)
-- The venv from [Installation](#installation), so `resnik-venv/bin/resnik` exists
-- `rustc` on the system path (`--emit-exe` shells out to it)
-- `cc` (the `HW_INTERFACE` case compiles `i2c.c`)
-
-The script resets `PATH` to a short system list (`/usr/bin`, `/usr/local/bin`,
-…), so a rustup-only `rustc` under `~/.cargo/bin` is not visible. Install a
-system `rustc` (or place it on one of those directories) before running.
+**Prerequisites.** See [Requirements](#requirements) for `rustc` / `cc` and the
+script’s sanitized `PATH`. You also need a git checkout (`git rev-parse` finds
+the repo root) and the venv from [Installation](#installation) so
+`resnik-venv/bin/resnik` exists.
 
 **Run**
 
