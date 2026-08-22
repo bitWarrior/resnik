@@ -952,3 +952,124 @@ class TestDoForUntil:
         assert p.errors == [], p.errors
         assert self._for(ast).until is None
 
+
+class TestCatAndDec:
+    """CAT is || ; DEC 'digits' is a decimal bit literal."""
+
+    def _parse(self, src: str):
+        p = Parser()
+        ast = p.parse(Lexer().tokenize(src, "<t>"))
+        return p, ast
+
+    def test_cat_normalizes_to_concat(self) -> None:
+        from resnik.parser.ast_nodes import AssignmentNode
+
+        p, ast = self._parse(
+            "T: PROGRAM; DECLARE A BIT(8); DECLARE B BIT(8); DECLARE W BIT(16); "
+            "W = A CAT B; CLOSE T;"
+        )
+        assert p.errors == [], p.errors
+        assigns = [s for s in ast.statements if isinstance(s, AssignmentNode)]
+        assert assigns[0].value.operator == "||"
+
+    def test_cat_is_not_juxtaposition_multiply(self) -> None:
+        from resnik.parser.ast_nodes import AssignmentNode
+
+        p, ast = self._parse(
+            "T: PROGRAM; DECLARE A INTEGER INITIAL(2); "
+            "DECLARE B INTEGER INITIAL(3); DECLARE C INTEGER; "
+            "C = A CAT B; CLOSE T;"
+        )
+        assert p.errors == [], p.errors
+        assigns = [s for s in ast.statements if isinstance(s, AssignmentNode)]
+        assert assigns[0].value.operator == "||"
+        assert assigns[0].value.operator != "*"
+
+    def test_dec_literal_value_and_width(self) -> None:
+        from resnik.parser.ast_nodes import DeclareNode, LiteralNode
+
+        p, ast = self._parse(
+            "T: PROGRAM; DECLARE X BIT(8) INITIAL(DEC '255'); CLOSE T;"
+        )
+        assert p.errors == [], p.errors
+        decls = [s for s in ast.statements if isinstance(s, DeclareNode)]
+        if not decls:
+            decls = [s for s in ast.declarations if isinstance(s, DeclareNode)]
+        lit = decls[0].initial_value
+        assert isinstance(lit, LiteralNode)
+        assert lit.value == 255
+        assert lit.literal_type == "DEC"
+        assert lit.bit_width == 8
+
+    def test_dec_zero_width_is_one(self) -> None:
+        from resnik.parser.ast_nodes import DeclareNode, LiteralNode
+
+        p, ast = self._parse(
+            "T: PROGRAM; DECLARE X BIT(1) INITIAL(DEC '0'); CLOSE T;"
+        )
+        assert p.errors == [], p.errors
+        decls = list(ast.declarations) + [
+            s for s in ast.statements if isinstance(s, DeclareNode)]
+        lit = decls[0].initial_value
+        assert isinstance(lit, LiteralNode)
+        assert lit.value == 0
+        assert lit.bit_width == 1
+
+
+class TestNameNull:
+    """NULL / NAME() are pointer values, not pointees."""
+
+    def _parse(self, src: str):
+        p = Parser()
+        ast = p.parse(Lexer().tokenize(src, "<t>"))
+        return p, ast
+
+    def test_null_and_name_null_parse(self) -> None:
+        from resnik.parser.ast_nodes import AssignmentNode, NullNode, NameRefNode
+
+        p, ast = self._parse(
+            "T: PROGRAM; DECLARE P NAME SCALAR; NAME(P) = NULL; "
+            "NAME(P) = NAME(NULL); CLOSE T;"
+        )
+        assert p.errors == [], p.errors
+        assigns = [s for s in ast.statements if isinstance(s, AssignmentNode)]
+        assert isinstance(assigns[0].target, NameRefNode)
+        assert isinstance(assigns[0].value, NullNode)
+        assert isinstance(assigns[1].value, NullNode)
+
+    def test_assign_to_null_parses(self) -> None:
+        from resnik.parser.ast_nodes import NameAssignNode
+
+        p, ast = self._parse(
+            "T: PROGRAM; DECLARE P NAME SCALAR; ASSIGN P TO NULL; CLOSE T;"
+        )
+        assert p.errors == [], p.errors
+        binds = [s for s in ast.statements if isinstance(s, NameAssignNode)]
+        assert binds[0].target is None
+
+    def test_bare_assign_null_is_error(self) -> None:
+        p, ast = self._parse(
+            "T: PROGRAM; DECLARE P NAME SCALAR; P = NULL; CLOSE T;"
+        )
+        assert any("NAME value" in e.message for e in p.errors)
+
+    def test_name_assign_non_name_lhs_is_error(self) -> None:
+        p, ast = self._parse(
+            "T: PROGRAM; DECLARE G SCALAR; NAME(G) = NULL; CLOSE T;"
+        )
+        assert any("NAME variable" in e.message for e in p.errors)
+
+    def test_if_name_equals_null_parses(self) -> None:
+        from resnik.parser.ast_nodes import IfNode, BinaryOpNode, NullNode, NameRefNode
+
+        p, ast = self._parse(
+            "T: PROGRAM; DECLARE P NAME SCALAR; "
+            "IF NAME(P) = NULL THEN P = P; CLOSE T;"
+        )
+        assert p.errors == [], p.errors
+        ifs = [s for s in ast.statements if isinstance(s, IfNode)]
+        cond = ifs[0].condition
+        assert isinstance(cond, BinaryOpNode)
+        assert isinstance(cond.left, NameRefNode)
+        assert isinstance(cond.right, NullNode)
+

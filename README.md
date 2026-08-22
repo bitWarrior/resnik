@@ -86,16 +86,14 @@ implemented and are not listed here.
 | | `LOCK` | `DECLARE X INTEGER LOCK;` and lock groups |
 | | `ACCESS`, `REMOTE`, `TEMPORARY` | Compool access control, remote data, temporary declarations |
 | | `RIGID` | Structure layout (no field reordering); `ALIGNED` / `DENSE` already parse |
-| | `NULL` | Null `NAME` value (`NAME(P) = NULL`) |
 | | `SEND` | Process / event send |
 | I/O | `READALL`, `FILE` | `READALL(channel) ...`, file/channel binding |
 | | `SKIP`, `TAB`, `COLUMN`, `LINE`, `PAGE` | `WRITE` format controls (`WRITE(6) SKIP(2), TAB(10), X`) |
 | Error handling | `OFF`, `IGNORE` | `OFF ERROR`, `ON ERROR IGNORE` |
 | Bit / character | `SUBBIT` | Bit-view pseudo-variable (`SUBBIT(X)`, `SUBBIT 5 TO 8 (K)`) |
-| | `CAT` | Linear-form catenation (same meaning as `\|\|`, which already parses) |
 | | `CHAR` | Repeated character literal (`CHAR 5 'AB'`) |
 | Literals | `TRUE`, `FALSE` | Reserved boolean literals. Resnik currently special-cases identifiers named `TRUE` / `FALSE` but does not reserve them, so `DECLARE TRUE INTEGER;` is accepted |
-| | `DEC` | Decimal radix literal (`DEC '...'`), analogous to `HEX` / `BIN` / `OCT` |
+| | `DEC` | Radix conversions `CHARACTER @DEC(...)` / `BIT @DEC(...)` (`DEC 'digits'` bit literals and infix `CAT` already parse) |
 | Other | `SYSTEM` | System / process attribute |
 
 ## Why Python or the Lexer / Parser?

@@ -17,6 +17,8 @@ from resnik.exceptions import ParserError, SemanticError
 from resnik.lexer import Lexer, Token
 from resnik.parser.ast_nodes import (
     NameAssignNode,
+    NullNode,
+    NameRefNode,
     GotoNode,
     LabelNode,
     ASTNode,
@@ -119,6 +121,7 @@ class Parser:
                 "KEYWORD_GO",
                 "KEYWORD_GOTO",
                 "KEYWORD_NAME",
+                "KEYWORD_NULL",
                 "KEYWORD_NONHAL",
                 "KEYWORD_EXTERNAL",
                 "KEYWORD_DOUBLE",
@@ -162,6 +165,7 @@ class Parser:
                 "DIVIDE",
                 "POWER",
                 "CONCAT",
+                "KEYWORD_CAT",
                 "VBAR",
                 "AMPERSAND",
                 "LT",
@@ -178,6 +182,7 @@ class Parser:
                 "HEXSTRING",
                 "BITSTRING",
                 "OCTSTRING",
+                "DECSTRING",
                 "BITLITERAL",
             ],
             precedence=[
@@ -195,7 +200,7 @@ class Parser:
                 # match C's convention -- `A = (B < C)` -- but is wrong for
                 # HAL/S.
                 ("left", ["ASSIGN", "LT", "GT", "LE", "GE", "NE"]),
-                ("left", ["PLUS", "MINUS", "CONCAT"]),
+                ("left", ["PLUS", "MINUS", "CONCAT", "KEYWORD_CAT"]),
                 ("left", ["MULTIPLY", "DIVIDE", "KEYWORD_MOD"]),
                 ("right", ["POWER"]),
                 ("right", ["KEYWORD_NOT"]),     # unary NOT binds tightly
@@ -950,6 +955,19 @@ class Parser:
                 column=getattr(p[0], "column", 0),
             )
 
+        # ASSIGN P TO NULL; -- unbind (official: NAME(P) = NULL).
+        @self.pg.production(
+            "statement : KEYWORD_ASSIGN IDENTIFIER KEYWORD_TO KEYWORD_NULL "
+            "SEMICOLON"
+        )
+        def name_assign_null_statement(p: List[Any]) -> NameAssignNode:
+            return NameAssignNode(
+                pointer=p[1].value,
+                target=None,
+                line=getattr(p[0], "line", 0),
+                column=getattr(p[0], "column", 0),
+            )
+
         # GO TO <label>;  -- HAL/S unconditional branch.
         @self.pg.production(
             "statement : KEYWORD_GO KEYWORD_TO IDENTIFIER SEMICOLON"
@@ -1450,6 +1468,24 @@ class Parser:
             return AssignmentNode(
                 target=target,
                 value=p[2],
+                line=getattr(p[0], "line", 0),
+                column=getattr(p[0], "column", 0),
+            )
+
+        # NAME(P) = <name-reference>; -- assign a pointer value, not a pointee.
+        @self.pg.production(
+            "assignment_statement : KEYWORD_NAME LPAREN IDENTIFIER RPAREN "
+            "ASSIGN expression SEMICOLON"
+        )
+        def name_ref_assignment(p: List[Any]) -> AssignmentNode:
+            target = NameRefNode(
+                name=p[2].value,
+                line=getattr(p[0], "line", 0),
+                column=getattr(p[0], "column", 0),
+            )
+            return AssignmentNode(
+                target=target,
+                value=p[5],
                 line=getattr(p[0], "line", 0),
                 column=getattr(p[0], "column", 0),
             )
@@ -2175,6 +2211,18 @@ class Parser:
                 column=getattr(p[1], "column", 0),
             )
 
+        # CAT is the linear-form spelling of || (USA003088 <CAT> ::= || | CAT).
+        # Normalize to || so bit/character concat lowering is unchanged.
+        @self.pg.production("expression : expression KEYWORD_CAT expression")
+        def expr_cat(p: List[Any]) -> BinaryOpNode:
+            return BinaryOpNode(
+                operator="||",
+                left=p[0],
+                right=p[2],
+                line=getattr(p[1], "line", 0),
+                column=getattr(p[1], "column", 0),
+            )
+
         @self.pg.production("expression : KEYWORD_NOT expression")
         def expr_not(p: List[Any]) -> UnaryOpNode:
             return UnaryOpNode(
@@ -2251,9 +2299,36 @@ class Parser:
                 column=getattr(p[0], "column", 0),
             )
 
+        @self.pg.production("expression : KEYWORD_NULL")
+        def expr_null(p: List[Any]) -> NullNode:
+            return NullNode(
+                line=getattr(p[0], "line", 0),
+                column=getattr(p[0], "column", 0),
+            )
+
+        @self.pg.production(
+            "expression : KEYWORD_NAME LPAREN KEYWORD_NULL RPAREN"
+        )
+        def expr_name_null(p: List[Any]) -> NullNode:
+            return NullNode(
+                line=getattr(p[0], "line", 0),
+                column=getattr(p[0], "column", 0),
+            )
+
+        @self.pg.production(
+            "expression : KEYWORD_NAME LPAREN IDENTIFIER RPAREN"
+        )
+        def expr_name_ref(p: List[Any]) -> NameRefNode:
+            return NameRefNode(
+                name=p[2].value,
+                line=getattr(p[0], "line", 0),
+                column=getattr(p[0], "column", 0),
+            )
+
         @self.pg.production("expression : HEXSTRING")
         @self.pg.production("expression : BITSTRING")
         @self.pg.production("expression : OCTSTRING")
+        @self.pg.production("expression : DECSTRING")
         @self.pg.production("expression : BITLITERAL")
         def expr_based_literal(p: List[Any]) -> LiteralNode:
             return self._make_based_literal(p[0])
@@ -2879,6 +2954,10 @@ class Parser:
             base, lit, bits_per_digit = 2, "BIT", 1
         elif ttype == "OCTSTRING":
             base, lit, bits_per_digit = 8, "OCT", 3
+        elif ttype == "DECSTRING":
+            # Decimal bit literal: width is the bits needed for the value,
+            # not digits × k (BIN/OCT/HEX).
+            base, lit, bits_per_digit = 10, "DEC", None
         else:  # BITLITERAL, suffix form '....'[BHO]
             suffix = raw[-1].upper()
             base, lit, bits_per_digit = {
@@ -2893,7 +2972,10 @@ class Parser:
                 getattr(tok, "column", 0),
             ))
             value = 0
-        bit_width = len(digits) * bits_per_digit if digits else None
+        if ttype == "DECSTRING":
+            bit_width = max(1, int(value).bit_length()) if digits else None
+        else:
+            bit_width = len(digits) * bits_per_digit if digits else None
         return LiteralNode(
             value=value,
             literal_type=lit,
@@ -3009,6 +3091,74 @@ class Parser:
                 if isinstance(item, ASTNode):
                     self._check_exit_context(item, child_in_loop, labels)
 
+    def _collect_name_vars(self, node, acc=None):
+        """Lowercased identifiers declared with the NAME attribute."""
+        if acc is None:
+            acc = set()
+        if node is None or not isinstance(node, ASTNode):
+            return acc
+        if isinstance(node, DeclareNode) and getattr(
+                node.type_spec, "is_name", False):
+            for ident in node.identifiers:
+                acc.add(ident.lower())
+        for v in vars(node).values():
+            for x in (v if isinstance(v, list) else [v]):
+                if isinstance(x, ASTNode):
+                    self._collect_name_vars(x, acc)
+        return acc
+
+    @staticmethod
+    def _is_name_value_node(node) -> bool:
+        return isinstance(node, (NullNode, NameRefNode))
+
+    def _check_name_null(self, node, name_vars) -> None:
+        """NULL / NAME() are pointer values, never pointees."""
+        if node is None or not isinstance(node, ASTNode):
+            return
+        if isinstance(node, NameAssignNode):
+            if node.pointer.lower() not in name_vars:
+                self.errors.append(SemanticError(
+                    f"ASSIGN {node.pointer} TO ...: '{node.pointer}' is not "
+                    "a NAME variable",
+                    node.line, node.column,
+                ))
+            return
+        if isinstance(node, AssignmentNode):
+            tgt, val = node.target, node.value
+            if (self._is_name_value_node(val)
+                    and isinstance(tgt, IdentifierNode)):
+                self.errors.append(SemanticError(
+                    "NULL is a NAME value, not a pointee; use NAME(P) = NULL "
+                    "or ASSIGN P TO NULL",
+                    node.line, node.column,
+                ))
+            if isinstance(tgt, NameRefNode):
+                if tgt.name.lower() not in name_vars:
+                    self.errors.append(SemanticError(
+                        f"NAME({tgt.name}) on the left of assignment must "
+                        "name a NAME variable",
+                        node.line, node.column,
+                    ))
+                if not self._is_name_value_node(val):
+                    self.errors.append(SemanticError(
+                        "NAME(P) = requires a NAME reference or NULL",
+                        node.line, node.column,
+                    ))
+        if isinstance(node, BinaryOpNode) and node.operator in (
+                "=", "¬=", "~="):
+            lv = self._is_name_value_node(node.left)
+            rv = self._is_name_value_node(node.right)
+            if lv ^ rv:
+                self.errors.append(SemanticError(
+                    "NULL / NAME(...) can only be compared with another "
+                    "NAME value",
+                    node.line, node.column,
+                ))
+        for v in vars(node).values():
+            for x in (v if isinstance(v, list) else [v]):
+                if isinstance(x, ASTNode):
+                    self._check_name_null(x, name_vars)
+
     def parse(self, tokens: List[Token]) -> Optional[ASTNode]:
         """
         Parse token stream and generate AST.
@@ -3059,6 +3209,8 @@ class Parser:
             if self.ast is not None:
                 self._collect_symbols(self.ast)
                 self._check_exit_context(self.ast, in_loop=False)
+                self._check_name_null(
+                    self.ast, self._collect_name_vars(self.ast))
             return self.ast
 
         except RplyParsingError as e:

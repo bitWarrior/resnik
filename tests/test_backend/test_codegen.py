@@ -2712,6 +2712,55 @@ class TestNamePointers:
         assert "a = b;" in code
         assert "addr_of_mut!(b)" not in code
 
+    def test_assign_to_null_unbinds(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE G SCALAR; DECLARE P NAME SCALAR; "
+            "ASSIGN P TO G; ASSIGN P TO NULL; CLOSE T;")
+        assert not errs
+        assert "p = std::ptr::null_mut();" in code
+        assert "*p = std::ptr::null_mut()" not in code
+
+    def test_name_p_equals_null_assigns_pointer(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE P NAME SCALAR; NAME(P) = NULL; CLOSE T;")
+        assert not errs
+        assert "p = std::ptr::null_mut();" in code
+        assert "*p =" not in code
+
+    def test_name_p_equals_name_g_binds(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE G SCALAR; DECLARE P NAME SCALAR; "
+            "NAME(P) = NAME(G); CLOSE T;")
+        assert not errs
+        assert "p = std::ptr::addr_of_mut!(g);" in code
+
+    def test_if_name_p_equals_null_is_pointer_compare(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE P NAME SCALAR; "
+            "IF NAME(P) = NULL THEN P = P; CLOSE T;")
+        assert not errs
+        assert "p == std::ptr::null_mut()" in code
+        assert "(*p) == std::ptr::null_mut()" not in code
+
+    def test_name_null_same_as_null(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE P NAME SCALAR; "
+            "NAME(P) = NAME(NULL); CLOSE T;")
+        assert not errs
+        assert "p = std::ptr::null_mut();" in code
+
+    def test_bare_p_equals_null_is_semantic_error(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE P NAME SCALAR; P = NULL; CLOSE T;")
+        assert any("NAME value" in e.message for e in errs)
+
+    def test_pointee_assign_unchanged_after_bind(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE G SCALAR; DECLARE P NAME SCALAR; "
+            "ASSIGN P TO G; P = P + 0.5; CLOSE T;")
+        assert not errs
+        assert "unsafe { *p = (*p) + 0.5; }" in code
+
 
 class TestRepetitionIdentityTrace:
     """Repetition literal (count#value), context-sensitive IDENTITY, TRACE."""
@@ -3273,6 +3322,34 @@ class TestBitConcatenation:
             "DECLARE S CHARACTER(8); S = A || B; CLOSE T;")
         assert not errs
         assert "format!" in code
+
+    def test_cat_keyword_lowers_like_concat(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE H BIT(8); DECLARE L BIT(8); DECLARE W BIT(16); "
+            "W = H CAT L; CLOSE T;")
+        assert not errs
+        assert "(((h) as u16) << 8) | ((l) as u16)" in code
+
+    def test_char_cat_uses_format(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE A CHARACTER(4); DECLARE B CHARACTER(4); "
+            "DECLARE S CHARACTER(8); S = A CAT B; CLOSE T;")
+        assert not errs
+        assert "format!" in code
+
+    def test_dec_literal_emits_decimal(self) -> None:
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE X BIT(8) INITIAL(DEC '255'); CLOSE T;")
+        assert not errs
+        assert "255" in code
+        assert "0xFF" not in code
+
+    def test_dec_concat_uses_bit_length_width(self) -> None:
+        # DEC '10' is value 10 (4 bits); BIN '1' is 1 bit -> << 1
+        errs, code = self._run(
+            "T: PROGRAM; DECLARE W BIT(8); W = DEC '10' CAT BIN '1'; CLOSE T;")
+        assert not errs
+        assert "<< 1" in code
 
     def test_nested_bit_concat_width(self) -> None:
         errs, code = self._run(

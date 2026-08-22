@@ -11,6 +11,8 @@ from pathlib import Path
 
 from resnik.parser.ast_nodes import (
     NameAssignNode,
+    NullNode,
+    NameRefNode,
     GotoNode,
     LabelNode,
     ASTNode,
@@ -413,6 +415,11 @@ class RustCodeGenerator:
         for node in self._walk(ast):
             if isinstance(node, StructureDefNode):
                 self._structs[node.name.upper()] = node
+            if (isinstance(node, DeclareNode) and node.type_spec is not None
+                    and getattr(node.type_spec, "is_name", False)):
+                rust_type = self.type_mapper.map_type(node.type_spec)
+                for ident in node.identifiers:
+                    self._name_vars[ident.lower()] = rust_type
 
         # Pre-pass: ON ERROR scope analysis (which procedures propagate faults,
         # and which handlers are active in each scope). Drives the Result-based
@@ -1961,11 +1968,29 @@ use hal_rt::*;
     
     def _generate_name_assign(self, node: NameAssignNode) -> None:
         """ASSIGN <pointer> TO <target> -> bind the raw pointer to the target's
-        address (addr_of_mut! avoids forming an intermediate &mut borrow)."""
+        address (addr_of_mut! avoids forming an intermediate &mut borrow).
+        ASSIGN P TO NULL unbinds (`null_mut()`)."""
         ptr = self._rust_ident(node.pointer)
+        if not node.target:
+            self.emitter.emit_line(f"{ptr} = std::ptr::null_mut();")
+            return
         tgt = self._rust_ident(node.target)
         self.emitter.emit_line(
             f"{ptr} = std::ptr::addr_of_mut!({tgt});")
+
+    def _is_name_value(self, node) -> bool:
+        return isinstance(node, (NullNode, NameRefNode))
+
+    def _name_ptr_rust(self, node) -> str:
+        """Emit a NAME value (the pointer), never a pointee deref."""
+        if isinstance(node, NullNode):
+            return "std::ptr::null_mut()"
+        if isinstance(node, NameRefNode):
+            nm = self._rust_ident(node.name)
+            if node.name.lower() in getattr(self, "_name_vars", {}):
+                return nm
+            return f"std::ptr::addr_of_mut!({nm})"
+        return self._generate_expression(node)
 
     def _expr_uses_name(self, node) -> bool:
         """True if the expression reads any NAME (pointer) variable."""
@@ -2109,6 +2134,12 @@ use hal_rt::*;
             node: AssignmentNode to generate
         """
         if node.target and node.value:
+            # NAME(P) = NULL / NAME(G) — assign the pointer cell, not *P.
+            if isinstance(node.target, NameRefNode):
+                ptr = self._rust_ident(node.target.name)
+                rhs = self._name_ptr_rust(node.value)
+                self.emitter.emit_line(f"{ptr} = {rhs};")
+                return
             # One MutexGuard per COMPOOL name for the whole statement so
             # `G$I = G$I + 1` cannot deadlock on a non-reentrant Mutex.
             if not getattr(self, "_compool_locked", False):
@@ -2399,6 +2430,10 @@ use hal_rt::*;
         """
         if isinstance(node, LiteralNode):
             return self._generate_literal(node)
+        elif isinstance(node, NullNode):
+            return "std::ptr::null_mut()"
+        elif isinstance(node, NameRefNode):
+            return self._name_ptr_rust(node)
         elif isinstance(node, IdentifierNode):
             return self._generate_identifier(node)
         elif isinstance(node, BinaryOpNode):
@@ -2466,6 +2501,8 @@ use hal_rt::*;
             return f"0x{int(value):X}"
         elif node.literal_type == "OCT":
             return f"0o{int(value):o}"
+        elif node.literal_type == "DEC":
+            return str(value)
         else:
             return str(value)
     
@@ -2575,7 +2612,7 @@ use hal_rt::*;
                 return ts.dimensions[0]
             return None
         if isinstance(node, LiteralNode) and node.literal_type in (
-                "HEX", "OCT", "BIT") and node.bit_width is not None:
+                "HEX", "OCT", "BIT", "DEC") and node.bit_width is not None:
             return node.bit_width
         if isinstance(node, BinaryOpNode) and node.operator == "||":
             lw = self._bit_width_expr(node.left)
@@ -2665,6 +2702,14 @@ use hal_rt::*;
         # to the upper-cased spelling so mixed-case source still maps. (MOD is
         # handled by its own branch above.)
         rust_op = op_map.get(op) or op_map.get(op.upper(), op)
+
+        # NAME-value compare: NAME(P) = NULL is pointer equality, not *p.
+        if rust_op in ("==", "!=") and (
+                self._is_name_value(node.left)
+                or self._is_name_value(node.right)):
+            return (
+                f"{self._name_ptr_rust(node.left)} {rust_op} "
+                f"{self._name_ptr_rust(node.right)}")
 
         # AND/OR are bitwise on BIT/INTEGER. On BOOLEAN they stay `&`/`|`
         # (eager: HAL/S evaluates both operands, so ON ERROR still sees

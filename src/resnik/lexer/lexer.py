@@ -96,6 +96,7 @@ class Lexer:
         self.lg.add("BITSTRING", r"(?i)BIN\s*'[^']*'")
         self.lg.add("HEXSTRING", r"(?i)HEX\s*'[^']*'")
         self.lg.add("OCTSTRING", r"(?i)OCT\s*'[^']*'")
+        self.lg.add("DECSTRING", r"(?i)DEC\s*'[^']*'")
 
         # Suffix form bit/hex/oct literals: '1010'B, 'FF'H, '777'O.
         # Must precede STRING so '1'B does not split into STRING + 'B'.
@@ -321,6 +322,26 @@ class Lexer:
                 return False
         return True
 
+    def _validate_decstring(
+        self, token_value: str, line: int, column: int
+    ) -> bool:
+        """Validate decimal bit-literal DEC 'digits'."""
+        match = re.search(r"DEC\s*'([^']*)'", token_value, re.IGNORECASE)
+        if match:
+            content = match.group(1)
+            if not content or not all(c in "0123456789" for c in content):
+                self.errors.append(
+                    LexerError(
+                        message=f"Invalid decimal string: {token_value}. "
+                        "Only 0-9 are allowed in DEC strings.",
+                        line=line,
+                        column=column,
+                        filename=self.source_file,
+                    )
+                )
+                return False
+        return True
+
     def _validate_bitliteral(
         self, token_value: str, line: int, column: int
     ) -> bool:
@@ -426,6 +447,8 @@ class Lexer:
                     self._validate_hexstring(token.value, line, column)
                 elif token_type == "OCTSTRING":
                     self._validate_octstring(token.value, line, column)
+                elif token_type == "DECSTRING":
+                    self._validate_decstring(token.value, line, column)
                 elif token_type == "BITLITERAL":
                     self._validate_bitliteral(token.value, line, column)
                 elif token_type == "IDENTIFIER" and len(token.value) > 32:

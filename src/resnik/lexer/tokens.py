@@ -137,8 +137,10 @@ KEYWORDS = {
     "OR",
     "NOT",
     "XOR",
+    "CAT",
     # Name operations
     "NAME",
+    "NULL",
     # Number formats
     "BIN",
     "HEX",

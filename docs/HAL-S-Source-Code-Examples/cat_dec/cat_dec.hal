@@ -1,0 +1,46 @@
+CAT_DEC: PROGRAM;
+
+/* ****************************************************************
+   CAT is the linear-form spelling of || (bit and character
+   catenation). DEC 'digits' is a decimal bit literal, parallel
+   to HEX / BIN / OCT prefixes.
+**************************************************************** */
+
+  DECLARE HIGH_BYTE BIT(8) INITIAL(HEX 'AA');
+  DECLARE LOW_BYTE BIT(8) INITIAL(HEX '55');
+  DECLARE WORD_VAL BIT(16);
+  DECLARE DEC_BYTE BIT(8) INITIAL(DEC '255');
+  DECLARE MIXED BIT(5);
+  DECLARE LEFT CHARACTER(4) INITIAL('HAL/');
+  DECLARE RIGHT CHARACTER(1) INITIAL('S');
+  DECLARE TAG CHARACTER(5);
+  DECLARE ZERO INTEGER INITIAL(1);
+  DECLARE TRAP INTEGER;
+  DECLARE FAIL_FLAG BOOLEAN INITIAL(FALSE);
+
+  WORD_VAL = HIGH_BYTE CAT LOW_BYTE;
+  WRITE(6) 'BIT CAT:', INTEGER(WORD_VAL);
+  IF WORD_VAL NOT = HEX 'AA55' THEN FAIL_FLAG = TRUE;
+
+  WRITE(6) 'DEC 255:', INTEGER(DEC_BYTE);
+  IF INTEGER(DEC_BYTE) NOT = 255 THEN FAIL_FLAG = TRUE;
+
+  /* DEC '10' is 4 bits (1010B); CAT BIN '1' -> 10101B = 21. */
+  MIXED = DEC '10' CAT BIN '1';
+  WRITE(6) 'DEC CAT BIN:', INTEGER(MIXED);
+  IF INTEGER(MIXED) NOT = 21 THEN FAIL_FLAG = TRUE;
+
+  TAG = LEFT CAT RIGHT;
+  WRITE(6) 'CHAR CAT:', TAG;
+  IF TAG NOT = 'HAL/S' THEN FAIL_FLAG = TRUE;
+
+  IF FAIL_FLAG THEN
+  DO;
+    WRITE(6) 'CAT/DEC CHECK FAILED';
+    ZERO = ZERO - 1;
+    TRAP = 1 / ZERO;
+  END;
+  ELSE
+    WRITE(6) 'CAT/DEC PASSED';
+
+CLOSE CAT_DEC;

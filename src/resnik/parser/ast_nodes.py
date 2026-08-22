@@ -884,10 +884,37 @@ class LabelNode(ASTNode):
 class NameAssignNode(ASTNode):
     """ASSIGN <pointer> TO <target>; -- HAL/S NAME (pointer) binding. Binds the
     NAME variable `pointer` to the address of `target`, distinct from a value
-    assignment (=)."""
+    assignment (=). `target` is None for ASSIGN P TO NULL (unbind)."""
 
     pointer: str = ""
-    target: str = ""
+    target: Optional[str] = None
 
     def __post_init__(self) -> None:
         self.node_type = NodeType.ASSIGNMENT
+
+
+@dataclass
+class NullNode(ASTNode):
+    """NULL / NAME(NULL) — a null NAME value (null pointer), not a pointee."""
+
+    def __post_init__(self) -> None:
+        self.node_type = NodeType.NULL
+
+
+@dataclass
+class NameRefNode(ASTNode):
+    """NAME(<id>) as a pointer value, not a pointee.
+
+    If <id> is a NAME variable this is the stored pointer; if <id> is an
+    ordinary variable this is its address.
+    """
+
+    name: str = ""
+
+    def __post_init__(self) -> None:
+        self.node_type = NodeType.NAME_REF
+
+    def to_dict(self) -> Dict[str, Any]:
+        result = super().to_dict()
+        result.update({"name": self.name})
+        return result

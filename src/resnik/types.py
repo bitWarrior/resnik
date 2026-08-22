@@ -76,6 +76,8 @@ class NodeType(Enum):
     UNARY_OP = "UnaryOp"
     LITERAL = "Literal"
     IDENTIFIER = "Identifier"
+    NULL = "Null"
+    NAME_REF = "NameRef"
     SUBSCRIPT = "Subscript"
     MATRIX_LITERAL = "MatrixLiteral"
     MATRIX_SUBSCRIPT = "MatrixSubscript"

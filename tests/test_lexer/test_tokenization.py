@@ -157,3 +157,26 @@ class TestErrorDetection:
         tokens = lexer.tokenize(code, "<test>")
         assert len(lexer.errors) > 0
         assert "octal string" in lexer.errors[0].message.lower()
+
+    def test_valid_dec_string(self, lexer) -> None:
+        code = "DEC '255'"
+        tokens = lexer.tokenize(code, "<test>")
+        assert len(lexer.errors) == 0
+        assert len(tokens) == 1
+        assert tokens[0].type == "DECSTRING"
+
+    def test_case_insensitive_dec_string(self, lexer) -> None:
+        tokens = lexer.tokenize("dec '10'", "<test>")
+        assert len(lexer.errors) == 0
+        assert tokens[0].type == "DECSTRING"
+
+    def test_invalid_dec_string(self, lexer) -> None:
+        tokens = lexer.tokenize("DEC '2A'", "<test>")
+        assert len(lexer.errors) > 0
+        assert "decimal string" in lexer.errors[0].message.lower()
+
+    def test_cat_is_a_keyword(self, lexer) -> None:
+        tokens = lexer.tokenize("A CAT B", "<test>")
+        types = [t.type for t in tokens]
+        assert "KEYWORD_CAT" in types
+        assert types == ["IDENTIFIER", "KEYWORD_CAT", "IDENTIFIER"]

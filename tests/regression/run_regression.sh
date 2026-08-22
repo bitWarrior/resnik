@@ -600,6 +600,14 @@ run_regression_case "Until Loops" \
     "Verify DO UNTIL (first cycle unguarded, stop when TRUE) and DO FOR ... UNTIL (guard after bound check, empty range never enters)." \
     "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/until_loops/until_loops.hal --emit-exe
 
+run_regression_case "Cat and Dec" \
+    "Verify CAT as the linear-form spelling of || (bit and character catenation) and DEC 'digits' decimal bit literals." \
+    "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/cat_dec/cat_dec.hal --emit-exe
+
+run_regression_case "Name Null" \
+    "Verify NULL / NAME(NULL) as a NAME value, ASSIGN P TO NULL and NAME(P) = NULL unbind, and IF NAME(P) = NULL pointer compare (not pointee deref)." \
+    "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/name_null/name_null.hal --emit-exe
+
 run_template_pipeline_case "HAL/S Template Processing" \
     "Verify Resnik template workflow including supporting the OG 'D INCLUDE TEMPLATE' pre-processor directive (Link multiple templates into main)."
 
