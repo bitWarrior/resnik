@@ -294,21 +294,11 @@ def compile(
         )
     )
 
-    options = CompileOptions(
-        input_file=input_file,
-        tokens=tokens,
-        ast=ast,
-        rust=rust,
-        emit_exe=emit_exe,
-        opt_level=opt_level,
-        link_search=list(link_search),
-        link_lib=list(link_lib),
-        link_obj=list(link_obj),
-        emit_cargo=emit_cargo,
-        build=build,
-        target=target,
-        gen_tpl=gen_tpl,
-        templib=list(templib),
+    options = _options_from_params(
+        input_file=input_file, tokens=tokens, ast=ast, rust=rust,
+        emit_exe=emit_exe, opt_level=opt_level, link_search=link_search,
+        link_lib=link_lib, link_obj=link_obj, emit_cargo=emit_cargo,
+        build=build, target=target, gen_tpl=gen_tpl, templib=templib,
     )
 
     try:
@@ -326,6 +316,39 @@ def compile(
 
         traceback.print_exc()
         sys.exit(1)
+
+
+def _options_from_params(**params) -> CompileOptions:
+    """Build :class:`CompileOptions` from Click's parsed ``compile`` params."""
+    return CompileOptions(
+        input_file=params["input_file"],
+        tokens=params.get("tokens"),
+        ast=params.get("ast"),
+        rust=params.get("rust"),
+        emit_exe=bool(params.get("emit_exe")),
+        opt_level=params.get("opt_level", "2"),
+        link_search=list(params.get("link_search") or ()),
+        link_lib=list(params.get("link_lib") or ()),
+        link_obj=list(params.get("link_obj") or ()),
+        emit_cargo=params.get("emit_cargo"),
+        build=bool(params.get("build")),
+        target=params.get("target") or "host",
+        gen_tpl=params.get("gen_tpl"),
+        templib=list(params.get("templib") or ()),
+    )
+
+
+def parse_compile_args(args) -> CompileOptions:
+    """Parse ``resnik compile`` arguments (without the ``compile`` word) into
+    :class:`CompileOptions` using the real Click definition.
+
+    This is what the IDE uses, so anything typed into its "extra arguments"
+    field is validated exactly as the shell CLI would.  Raises
+    ``click.UsageError`` (``NoSuchOption``, ``BadParameter``, …) on invalid
+    input; ``--help`` raises ``click.exceptions.Exit`` after printing.
+    """
+    ctx = compile.make_context("resnik compile", list(args))
+    return _options_from_params(**ctx.params)
 
 
 class RichReporter(Reporter):

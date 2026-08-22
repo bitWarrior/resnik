@@ -9,6 +9,8 @@ import pytest
 
 from ide.tests.conftest import LEX_ERROR, SEMANTIC_DUP, VALID, pump
 from resnik.driver import Diagnostic
+from resnik_ide.options import IdeCompileSettings
+from resnik_ide.settings import load_settings
 
 
 def _write(tmp_path: Path, name: str, text: str) -> Path:
@@ -173,12 +175,16 @@ class TestCompile:
         assert not (tmp_path / "dup.rs").exists()
         assert app.last_rust_path is None
 
-    def test_current_options_reflect_toolbar(self, app, tmp_path):
+    def test_current_options_reflect_settings_and_toolbar_target(self, app, tmp_path):
         src = _write(tmp_path, "hello.hal", VALID)
-        app.var_emit_exe.set(True)
+        app.apply_compile_settings(IdeCompileSettings(emit_exe=True))
+        app.var_target.set("cortex-m")
+        app.update()
         opts = app.current_options(src)
-        assert opts.emit_exe is True and opts.target == "host"
-        assert app._describe(opts) == f"$ resnik compile {src} --emit-exe"
+        assert opts.emit_exe is True and opts.target == "cortex-m"
+        assert opts.command_line() == f"resnik compile {src} --emit-exe --target cortex-m"
+        assert not hasattr(app, "var_emit_exe")  # checkbox replaced by Build and Run
+        assert app.btn_build_run.cget("text") == "Build and Run"
 
     def test_view_rust_without_compile_warns(self, app):
         app.view_rust()
@@ -189,10 +195,350 @@ class TestCompile:
     def test_compile_with_emit_exe_builds_binary(self, app, tmp_path):
         src = _write(tmp_path, "hello.hal", VALID)
         app.open_file(str(src))
-        app.var_emit_exe.set(True)
+        app.apply_compile_settings(IdeCompileSettings(emit_exe=True))
         app.compile()
         pump(app, lambda: not app.busy and app.dispatcher.pending == 0, timeout=180)
         log = app.log.get_text()
         assert "Built executable" in log, log
         assert (tmp_path / "hello").exists()
         assert app.status_msg.cget("text") == "Compile: OK"
+
+
+class TestOptionsIntegration:
+    def test_settings_loaded_from_private_file(self, app, settings_file):
+        assert str(settings_file) in app.log.get_text()
+        assert app.settings.compile == IdeCompileSettings()
+
+    def test_toolbar_changes_are_persisted(self, app, settings_file):
+        app.var_target.set("cortex-m")
+        app.update()
+        assert app.settings.compile.target == "cortex-m"
+        loaded, _ = load_settings(settings_file)
+        assert loaded.compile.target == "cortex-m"
+        assert "--target cortex-m" in app.log.get_text()
+
+    def test_apply_compile_settings_syncs_toolbar_and_saves(self, app, settings_file):
+        new = IdeCompileSettings(target="esp32-c3", emit_exe=True, opt_level="z")
+        app.apply_compile_settings(new)
+        assert app.var_target.get() == "esp32-c3"
+        assert load_settings(settings_file)[0].compile == new
+
+    def test_settings_restored_on_next_start(self, app, settings_file):
+        from resnik_ide.app import ResnikIDE
+
+        app.apply_compile_settings(IdeCompileSettings(target="cortex-m", gen_tpl="TPL"))
+        second = ResnikIDE()
+        try:
+            second.withdraw()
+            second.update()
+            assert second.settings.compile.target == "cortex-m"
+            assert second.settings.compile.gen_tpl == "TPL"
+            assert second.var_target.get() == "cortex-m"
+        finally:
+            second.shutdown()
+
+    def test_compile_uses_options_relative_to_source(self, app, tmp_path):
+        src = _write(tmp_path, "hello.hal", VALID)
+        app.open_file(str(src))
+        app.apply_compile_settings(IdeCompileSettings(rust="gen/out.rs", emit_cargo="fw"))
+        app.compile()
+        _wait(app)
+        log = app.log.get_text()
+        assert "Compile succeeded" in log, log
+        assert (tmp_path / "gen" / "out.rs").exists() or (tmp_path / "gen").exists() is False
+        assert (tmp_path / "fw" / "Cargo.toml").exists()
+        assert f"$ resnik compile {src}" in log
+        assert "--emit-cargo" in log and "--rust" in log
+
+    def test_invalid_extra_args_block_compile(self, app, tmp_path):
+        src = _write(tmp_path, "hello.hal", VALID)
+        app.open_file(str(src))
+        app.apply_compile_settings(IdeCompileSettings(extra_args="--bogus"))
+        app.compile()
+        _wait(app)
+        log = app.log.get_text()
+        assert "Invalid compiler options" in log and "No such option" in log
+        assert app.status_msg.cget("text") == "Compile: invalid options"
+        assert not (tmp_path / "hello.rs").exists()
+
+    def test_current_options_reflect_settings(self, app, tmp_path):
+        src = _write(tmp_path, "hello.hal", VALID)
+        app.apply_compile_settings(IdeCompileSettings(emit_exe=True, opt_level="s"))
+        opts = app.current_options(src)
+        assert opts.emit_exe is True and opts.opt_level == "s" and opts.target == "host"
+
+    def test_open_options_dialog_applies_result(self, app, settings_file, monkeypatch):
+        import resnik_ide.app as appmod
+
+        class FakeDialog:
+            def __init__(self, master, settings, source=None):
+                self.settings = settings
+
+            def show(self):
+                return IdeCompileSettings(target="esp32-c3", emit_cargo="fw")
+
+        monkeypatch.setattr(appmod, "OptionsDialog", FakeDialog)
+        app.open_options()
+        assert app.settings.compile.emit_cargo == "fw"
+        assert app.var_target.get() == "esp32-c3"
+        assert load_settings(settings_file)[0].compile.emit_cargo == "fw"
+
+    def test_geometry_saved_on_shutdown(self, app, settings_file):
+        app.deiconify()
+        app.geometry("800x600+5+5")
+        app.update()
+        app.shutdown()
+        geo = load_settings(settings_file)[0].geometry
+        assert geo.startswith("800x600")
+
+
+import sys as _sys
+
+from resnik_ide.toolchain import Tool
+
+
+class TestTargetPanel:
+    def test_startup_probe_fills_checklist_for_host(self, app):
+        keys = [r.key for r in app.target_panel.requirements]
+        assert keys == ["rustc", "cargo"]
+        assert all(r.satisfied for r in app.target_panel.requirements)
+        log = app.log.get_text()
+        assert "toolchain: rustc: rustc 1.96.1" in log
+        assert "devices: no serial ports" in log
+        assert app.status_msg.cget("text") == "Toolchain: OK for host"
+
+    def test_changing_target_rerenders_requirements(self, app):
+        app.var_target.set("esp32-c3")
+        app.update()
+        keys = [r.key for r in app.target_panel.requirements]
+        assert "target:riscv32imc-unknown-none-elf" in keys and "tool:espflash" in keys
+        missing = [r for r in app.target_panel.requirements if not r.satisfied]
+        assert len(missing) == 3
+        assert app.status_msg.cget("text") == "Toolchain: 3 missing"
+        # Install buttons exist for the installable rows
+        from tkinter import ttk
+        buttons = [w for w in app.target_panel._req_rows if isinstance(w, ttk.Button)]
+        assert len(buttons) == 3
+
+    def test_cortex_m_target_satisfied_except_probe_rs(self, app):
+        app.var_target.set("cortex-m")
+        app.update()
+        by = {r.key: r for r in app.target_panel.requirements}
+        assert by["target:thumbv7em-none-eabihf"].satisfied
+        assert not by["tool:probe-rs"].satisfied
+
+    def test_refresh_toolchain_picks_up_new_status(self, app, fake_toolchain):
+        fake_toolchain.status.espflash = Tool("espflash", "/x/espflash", "espflash 3.1.0")
+        fake_toolchain.status.installed_targets.append("riscv32imc-unknown-none-elf")
+        fake_toolchain.status.installed_components.append("rust-src")
+        app.var_target.set("esp32-c3")
+        app.refresh_toolchain()
+        pump(app, lambda: not app.probing and app.dispatcher.pending == 0)
+        assert all(r.satisfied for r in app.target_panel.requirements)
+        assert str(app.target_panel.btn_refresh_tc.cget("state")) == "normal"
+
+    def test_ports_fill_combobox_and_default_selection(self, app, fake_toolchain):
+        from resnik_ide.devices import SerialPort
+        fake_toolchain.ports = [SerialPort("/dev/ttyACM0"), SerialPort("/dev/ttyUSB0")]
+        app.refresh_devices()
+        assert list(app.target_panel.cb_port["values"]) == ["/dev/ttyACM0", "/dev/ttyUSB0"]
+        assert app.var_port.get() == "/dev/ttyACM0"
+
+    def test_port_and_chip_persist(self, app, settings_file):
+        app.var_port.set("/dev/ttyACM3")
+        app.var_chip.set("STM32F411CEUx")
+        app.update()
+        loaded, _ = load_settings(settings_file)
+        assert loaded.port == "/dev/ttyACM3" and loaded.chip == "STM32F411CEUx"
+
+
+class TestProcessActions:
+    def test_run_process_streams_and_reports(self, app):
+        ok = app.run_process([_sys.executable, "-u", "-c", "print('alpha'); print('beta')"],
+                             what="Demo")
+        assert ok is True
+        assert app.busy
+        assert str(app.target_panel.btn_stop.cget("state")) == "normal"
+        _wait(app)
+        log = app.log.get_text()
+        assert "── Demo ──" in log and "$ " in log
+        assert "alpha" in log and "beta" in log
+        assert "✓ Demo finished (exit 0" in log
+        assert app.status_msg.cget("text") == "Demo: OK"
+        assert str(app.target_panel.btn_stop.cget("state")) == "disabled"
+        assert str(app.btn_compile.cget("state")) == "normal"
+
+    def test_failed_process_is_reported(self, app):
+        app.run_process([_sys.executable, "-c", "import sys; sys.exit(4)"], what="Bad")
+        _wait(app)
+        assert "✗ Bad failed (exit 4" in app.log.get_text()
+        assert app.status_msg.cget("text") == "Bad: exit 4"
+
+    def test_stop_cancels_running_process(self, app):
+        app.run_process([_sys.executable, "-c", "import time; time.sleep(30)"], what="Sleepy")
+        app.stop()
+        pump(app, lambda: not app.busy and app.dispatcher.pending == 0, timeout=20)
+        log = app.log.get_text()
+        assert "Stopping" in log and "■ Sleepy stopped" in log
+        assert app.status_msg.cget("text") == "Sleepy: stopped"
+
+    def test_second_process_refused_while_running(self, app):
+        app.run_process([_sys.executable, "-c", "import time; time.sleep(10)"], what="One")
+        assert app.run_process([_sys.executable, "-c", "print(1)"], what="Two") is False
+        assert "Another job is running" in app.log.get_text()
+        app.stop()
+        _wait(app)
+
+    def test_missing_executable(self, app):
+        assert app.run_process(["/no/such/tool"], what="Nope") is False
+        _wait(app)
+        assert "✗ Nope: /no/such/tool" in app.log.get_text()
+        assert app.status_msg.cget("text") == "Nope: failed"
+        assert not app.busy
+        assert str(app.btn_compile.cget("state")) == "normal"
+
+    def test_install_requirement_runs_argv_then_reprobes(self, app, fake_toolchain):
+        from resnik_ide.toolchain import Requirement
+        req = Requirement("tool:x", "fake tool", False,
+                          [_sys.executable, "-c", "print('installing')"], "")
+        fake_toolchain.status.espflash = Tool("espflash", "/x/espflash", "espflash 3")
+        app.install_requirement(req)
+        _wait(app)
+        pump(app, lambda: not app.probing and app.dispatcher.pending == 0)
+        log = app.log.get_text()
+        assert "installing" in log and "Install fake tool finished" in log
+        assert "toolchain: espflash: espflash 3" in log  # re-probed afterwards
+
+    def test_build_without_project_logs_guidance(self, app, tmp_path):
+        app.open_file(str(_write(tmp_path, "hello.hal", VALID)))
+        app.build()
+        assert "No Cargo project" in app.log.get_text()
+        app.apply_compile_settings(IdeCompileSettings(emit_cargo="fw"))
+        app.build()
+        assert "Cargo.toml not found" in app.log.get_text()
+
+    def test_flash_esp32_preflight_blocks_when_tools_missing(self, app, tmp_path):
+        src = _write(tmp_path, "hello.hal", VALID)
+        app.open_file(str(src))
+        app.apply_compile_settings(IdeCompileSettings(emit_cargo="fw", target="esp32-c3"))
+        app.compile()
+        _wait(app)
+        assert (tmp_path / "fw" / "Cargo.toml").exists()
+        app.flash_run()
+        log = app.log.get_text()
+        assert "✗ missing: target\nriscv32imc-unknown-none-elf" in log
+        assert "✗ missing: espflash" in log
+        assert not app.busy
+
+    def test_flash_cortex_m_needs_chip(self, app, tmp_path, fake_toolchain):
+        fake_toolchain.status.probe_rs = Tool("probe-rs", "/x/probe-rs", "probe-rs 0.24")
+        src = _write(tmp_path, "hello.hal", VALID)
+        app.open_file(str(src))
+        app.apply_compile_settings(IdeCompileSettings(emit_cargo="fw", target="cortex-m"))
+        app.compile()
+        _wait(app)
+        app.refresh_toolchain()
+        pump(app, lambda: not app.probing and app.dispatcher.pending == 0)
+        app.var_chip.set("")
+        app.flash_run()
+        assert "Enter the MCU name" in app.log.get_text()
+        assert not app.busy
+
+    def test_monitor_on_host_is_a_no_op(self, app):
+        app.monitor()
+        assert "Monitor applies to embedded targets" in app.log.get_text()
+
+    def test_run_host_without_build(self, app):
+        app.run_host()
+        assert "Nothing to run" in app.log.get_text()
+
+    def test_elf_path_per_target(self, app, tmp_path):
+        proj = tmp_path / "my-fw"
+        app.var_target.set("esp32-c3")
+        assert app._elf_path(proj) == proj / "target" / "riscv32imc-unknown-none-elf" / "release" / "my_fw"
+        app.var_target.set("host")
+        assert app._elf_path(proj) == proj / "target" / "release" / "my_fw"
+
+    @pytest.mark.slow
+    @pytest.mark.skipif(shutil.which("rustc") is None, reason="rustc not on PATH")
+    def test_run_host_streams_program_output(self, app, tmp_path):
+        src = _write(tmp_path, "hello.hal", VALID)
+        app.open_file(str(src))
+        app.apply_compile_settings(IdeCompileSettings(emit_exe=True))
+        app.compile()
+        pump(app, lambda: not app.busy and app.dispatcher.pending == 0, timeout=180)
+        assert "Built executable" in app.log.get_text()
+        app.run_host()
+        _wait(app)
+        log = app.log.get_text()
+        assert "── Run hello ──" in log
+        assert "HELLO, WORLD" in log
+        assert "✓ Run hello finished (exit 0" in log
+
+
+class TestBuildAndRun:
+    def _wait_all(self, app, needle, timeout=180):
+        # two stages: compile job, then the external process
+        pump(app, lambda: (needle in app.log.get_text()) and not app.busy
+             and app.dispatcher.pending == 0, timeout=timeout)
+
+    def test_compile_error_stops_before_running(self, app, tmp_path):
+        app.open_file(str(_write(tmp_path, "dup.hal", SEMANTIC_DUP)))
+        app.build_and_run()
+        _wait(app)
+        log = app.log.get_text()
+        assert "── Build and Run: dup.hal ──" in log
+        assert "--emit-exe" in log  # forced for host
+        assert "Compile failed" in log and "── Run" not in log
+        assert app.status_msg.cget("text") == "Build and Run: compile failed"
+        assert app.editor.error_lines == [3]
+
+    def test_does_not_change_saved_options(self, app, tmp_path, settings_file):
+        app.open_file(str(_write(tmp_path, "dup.hal", SEMANTIC_DUP)))
+        app.build_and_run()
+        _wait(app)
+        assert app.settings.compile.emit_exe is False
+        assert load_settings(settings_file)[0].compile.emit_exe is False
+
+    def test_embedded_target_requires_cargo_project(self, app, tmp_path):
+        app.open_file(str(_write(tmp_path, "hello.hal", VALID)))
+        app.apply_compile_settings(IdeCompileSettings(target="esp32-c3"))
+        app.build_and_run()
+        assert "needs a Cargo project" in app.log.get_text()
+        assert not app.busy
+
+    def test_embedded_target_compiles_then_runs_preflight(self, app, tmp_path):
+        src = _write(tmp_path, "hello.hal", VALID)
+        app.open_file(str(src))
+        app.apply_compile_settings(IdeCompileSettings(target="esp32-c3", emit_cargo="fw"))
+        app.build_and_run()
+        self._wait_all(app, "missing: espflash", timeout=60)
+        log = app.log.get_text()
+        assert (tmp_path / "fw" / "Cargo.toml").exists()
+        assert "Compile succeeded" in log
+        assert "✗ missing: target\nriscv32imc-unknown-none-elf" in log  # flash pre-flight ran
+
+    @pytest.mark.slow
+    @pytest.mark.skipif(shutil.which("rustc") is None, reason="rustc not on PATH")
+    def test_host_builds_and_streams_program_output(self, app, tmp_path):
+        src = _write(tmp_path, "hello.hal", VALID)
+        app.open_file(str(src))
+        app.build_and_run()
+        self._wait_all(app, "✓ Run hello finished")
+        log = app.log.get_text()
+        assert "Built executable" in log
+        assert "── Run hello ──" in log
+        assert "HELLO, WORLD" in log
+        assert "✓ Run hello finished (exit 0" in log
+        assert app.status_msg.cget("text") == "Run hello: OK"
+
+    @pytest.mark.slow
+    @pytest.mark.skipif(shutil.which("rustc") is None, reason="rustc not on PATH")
+    def test_template_unit_has_nothing_to_run(self, app, tmp_path):
+        src = _write(tmp_path, "tpl.hal",
+                     "ADD_ONE: PROCEDURE(P) ASSIGN(Q) TEMPLATE;\n"
+                     "  DECLARE P INTEGER;\n  DECLARE Q INTEGER;\nCLOSE ADD_ONE;\n")
+        app.open_file(str(src))
+        app.build_and_run()
+        self._wait_all(app, "nothing to run")
+        assert "── Run" not in app.log.get_text()

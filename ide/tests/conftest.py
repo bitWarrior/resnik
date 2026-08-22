@@ -45,8 +45,42 @@ def tk_root():
 
 
 @pytest.fixture
-def app():
-    """A withdrawn ResnikIDE window, torn down after the test."""
+def settings_file(tmp_path, monkeypatch):
+    """Point the IDE at a private ide.json so tests never touch ~/.config."""
+    p = tmp_path / "cfg" / "ide.json"
+    monkeypatch.setenv("RESNIK_IDE_CONFIG", str(p))
+    return p
+
+
+@pytest.fixture
+def fake_toolchain(monkeypatch):
+    """Hermetic toolchain/device discovery: no rustup/cargo subprocesses.
+
+    Returns a mutable holder; tests set ``holder.status`` before the app
+    probes (or call ``app.refresh_toolchain()`` afterwards)."""
+    import types
+
+    from resnik_ide import devices, toolchain
+    from resnik_ide.toolchain import Tool, ToolchainStatus
+
+    holder = types.SimpleNamespace(status=ToolchainStatus(
+        rustup=Tool("rustup", "/usr/bin/rustup", "rustup 1.27.1"),
+        cargo=Tool("cargo", "/usr/bin/cargo", "cargo 1.96.1"),
+        rustc=Tool("rustc", "/usr/bin/rustc", "rustc 1.96.1"),
+        installed_targets=["x86_64-unknown-linux-gnu", "thumbv7em-none-eabihf"],
+        installed_components=["rust-std-x86_64-unknown-linux-gnu"],
+        default_toolchain="stable-x86_64-unknown-linux-gnu",
+    ), ports=[])
+    monkeypatch.setattr(toolchain, "probe", lambda **kw: holder.status)
+    monkeypatch.setattr(devices, "list_serial_ports", lambda **kw: list(holder.ports))
+    monkeypatch.setattr(devices, "list_probes", lambda **kw: [])
+    return holder
+
+
+@pytest.fixture
+def app(settings_file, fake_toolchain):
+    """A withdrawn ResnikIDE window (private settings, fake toolchain),
+    torn down after the test.  The startup toolchain probe has completed."""
     if not have_tk():
         pytest.skip("Tk display not available")
     from resnik_ide.app import ResnikIDE
@@ -54,6 +88,7 @@ def app():
     ide = ResnikIDE()
     ide.withdraw()
     ide.update()
+    pump(ide, lambda: not ide.probing and ide.dispatcher.pending == 0)
     yield ide
     ide.shutdown()
 

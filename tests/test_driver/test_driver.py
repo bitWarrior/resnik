@@ -343,3 +343,61 @@ class TestCliWrapper:
         res = self._run(["compile", str(src)])
         assert res.exit_code == 1
         assert "Lexer found 1 error(s)" in res.output
+
+
+# ---------------------------------------------------------------------------
+# CLI argument round trip (used by the IDE's options dialog)
+# ---------------------------------------------------------------------------
+
+
+class TestCliArgsRoundTrip:
+    def _full(self, tmp_path):
+        src = _write(tmp_path, "p.hal", VALID)
+        return CompileOptions(
+            input_file=src, tokens=Path("t.json"), ast=Path("a.json"), rust=Path("o.rs"),
+            emit_exe=True, opt_level="s", link_search=[Path("lib")], link_lib=["m"],
+            link_obj=[Path("i2c.o")], emit_cargo=Path("fw"), build=True,
+            target="esp32-c3", gen_tpl=Path("TPL"), templib=[Path("T1"), Path("T2")],
+        )
+
+    def test_defaults_produce_only_the_input(self, tmp_path):
+        src = _write(tmp_path, "p.hal", VALID)
+        o = CompileOptions(input_file=src)
+        assert o.to_cli_args() == [str(src)]
+        assert o.command_line() == f"resnik compile {src}"
+
+    def test_to_cli_args_parses_back_to_equal_options(self, tmp_path):
+        from resnik.cli import parse_compile_args
+
+        o = self._full(tmp_path)
+        assert parse_compile_args(o.to_cli_args()) == o
+
+    def test_command_line_is_shell_quoted(self, tmp_path):
+        src = _write(tmp_path, "p.hal", VALID)
+        o = CompileOptions(input_file=src, templib=[Path("my lib")])
+        assert o.command_line().endswith("--templib 'my lib'")
+
+    def test_parse_compile_args_rejects_bad_input(self, tmp_path):
+        import click
+
+        from resnik.cli import parse_compile_args
+
+        src = _write(tmp_path, "p.hal", VALID)
+        with pytest.raises(click.UsageError):
+            parse_compile_args([str(src), "--bogus"])
+        with pytest.raises(click.UsageError):
+            parse_compile_args([str(src), "--target", "z80"])
+        with pytest.raises(click.UsageError):
+            parse_compile_args([str(tmp_path / "missing.hal")])
+
+    def test_resolved_relative_to_anchors_only_relative_paths(self, tmp_path):
+        o = self._full(tmp_path)
+        o.templib.append(Path("/abs/T3"))
+        r = o.resolved_relative_to(tmp_path / "base")
+        base = tmp_path / "base"
+        assert r.rust == base / "o.rs" and r.tokens == base / "t.json"
+        assert r.emit_cargo == base / "fw" and r.gen_tpl == base / "TPL"
+        assert r.link_search == [base / "lib"] and r.link_obj == [base / "i2c.o"]
+        assert r.templib == [base / "T1", base / "T2", Path("/abs/T3")]
+        assert r.link_lib == ["m"] and r.input_file == o.input_file
+        assert o.rust == Path("o.rs")  # original untouched

@@ -25,24 +25,59 @@ class _ProxiedText(tk.Text):
         self._orig = self._w + "_orig"
         self.tk.call("rename", self._w, self._orig)
         self.tk.createcommand(self._w, self._proxy)
+        # Tk's Text bindings keep a per-widget selection-anchor mark that is
+        # only created by a ButtonPress inside the widget; a <B1-Motion> that
+        # starts elsewhere (dragging a sash / window edge over the editor)
+        # then errors with 'bad text index "tk::anchorN"'.  Create it up
+        # front so such drags behave like an ordinary selection drag.
+        try:
+            anchor = self.tk.call("::tk::TextAnchor", self._w)
+            self.mark_set(anchor, "insert")
+        except tk.TclError:  # pragma: no cover - non-standard Tk build
+            pass
+
+    # Errors Tk's own Text bindings produce in normal use (no selection, no
+    # undo history, drag without a press …).  Plain Tk reports these as
+    # background errors and carries on; so do we, silently.
+    _BENIGN = (
+        "nothing to undo",
+        "nothing to redo",
+        'bad text index "tk::anchor',
+        'bad text index "sel.',
+        'text doesn\'t contain any characters tagged with "sel"',
+    )
 
     def _proxy(self, *args):
         cmd = (self._orig,) + args
         try:
             result = self.tk.call(cmd)
-        except tk.TclError:
-            # "nothing to undo/redo" and friends — harmless.
-            if args[:1] == ("edit",):
-                return ""
-            raise
+        except tk.TclError as exc:
+            # NEVER let an exception escape: when Tcl invoked us (class
+            # bindings such as tk::TextSelectTo), _tkinter turns an escaping
+            # Python exception into a fatal error for mainloop().
+            msg = str(exc)
+            if not any(b in msg for b in self._BENIGN):
+                self._report_tcl_error()
+            return ""
         if (
-            args[0] in ("insert", "delete", "replace")
+            args and args[0] in ("insert", "delete", "replace")
             or args[0:3] == ("mark", "set", "insert")
             or args[0:2] in (("xview", "moveto"), ("xview", "scroll"),
                              ("yview", "moveto"), ("yview", "scroll"))
         ):
             self.event_generate("<<Change>>", when="tail")
         return result
+
+    def _report_tcl_error(self) -> None:
+        """Route an unexpected TclError through Tk's normal callback-error
+        reporting (stderr traceback) instead of raising."""
+        import sys
+
+        root = self._root()
+        try:
+            root.report_callback_exception(*sys.exc_info())
+        except Exception:  # pragma: no cover - reporting must never fail
+            pass
 
 
 class Editor(ttk.Frame):

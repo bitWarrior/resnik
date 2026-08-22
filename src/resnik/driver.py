@@ -173,6 +173,75 @@ class CompileOptions:
         """Target triple implied by the profile (``None`` = host)."""
         return TARGET_TRIPLES.get(self.target)
 
+    # Path-valued fields, in one place so tools can resolve / display them.
+    _PATH_FIELDS = ("tokens", "ast", "rust", "emit_cargo", "gen_tpl")
+    _PATH_LIST_FIELDS = ("link_search", "link_obj", "templib")
+
+    def to_cli_args(self) -> List[str]:
+        """Arguments for ``resnik compile`` that reproduce these options.
+
+        The inverse of :func:`resnik.cli.parse_compile_args`; defaults are
+        omitted so the command stays short.  Does not include the leading
+        ``resnik compile`` words.
+        """
+        args: List[str] = [str(self.input_file)]
+        if self.tokens:
+            args += ["--tokens", str(self.tokens)]
+        if self.ast:
+            args += ["--ast", str(self.ast)]
+        if self.rust:
+            args += ["--rust", str(self.rust)]
+        if self.emit_exe:
+            args.append("--emit-exe")
+        if self.opt_level != "2":
+            args += ["--opt-level", str(self.opt_level)]
+        for d in self.link_search:
+            args += ["--link-search", str(d)]
+        for lib in self.link_lib:
+            args += ["--link-lib", str(lib)]
+        for obj in self.link_obj:
+            args += ["--link-obj", str(obj)]
+        if self.emit_cargo:
+            args += ["--emit-cargo", str(self.emit_cargo)]
+        if self.build:
+            args.append("--build")
+        if self.target != "host":
+            args += ["--target", self.target]
+        if self.gen_tpl:
+            args += ["--gen-tpl", str(self.gen_tpl)]
+        for t in self.templib:
+            args += ["--templib", str(t)]
+        return args
+
+    def command_line(self) -> str:
+        """Shell-quoted ``resnik compile …`` line for display / copy-paste."""
+        import shlex
+
+        return "resnik compile " + " ".join(shlex.quote(a) for a in self.to_cli_args())
+
+    def resolved_relative_to(self, base: Path) -> "CompileOptions":
+        """Copy with every *relative* path field anchored at ``base``.
+
+        The CLI interprets relative paths against the shell's cwd; a GUI has
+        no meaningful cwd, so it anchors them at the source file's directory.
+        """
+        from dataclasses import replace
+
+        base = Path(base)
+
+        def fix(p):
+            p = Path(p)
+            return p if p.is_absolute() else base / p
+
+        kwargs = {}
+        for name in self._PATH_FIELDS:
+            val = getattr(self, name)
+            if val:
+                kwargs[name] = fix(val)
+        for name in self._PATH_LIST_FIELDS:
+            kwargs[name] = [fix(v) for v in getattr(self, name)]
+        return replace(self, **kwargs)
+
 
 @dataclass
 class GenerateResult:

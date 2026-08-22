@@ -296,9 +296,17 @@ python -m resnik_ide [file.hal]
 `start_ide.sh` uses `resnik-venv/bin/python` when present (else `python3` on
 PATH) and tells you what to install if Tk (`python3-tk` on Debian/Ubuntu) or
 the `resnik_ide` package is missing. Keyboard: **F7** Semantic Check, **F5**
-Compile, Ctrl+O/S/N open/save/new. Click a diagnostic in the log to jump to
-its line. See `ide/README.md` for details and `docs/Resnik IDE/` for the
-roadmap (compiler-argument dialog, rustup/cargo hardware flashing).
+Compile, **F9** Build and Run (compile with `--emit-exe`, then run the program
+with its output in the log), **Ctrl+,** Compiler Options, Ctrl+O/S/N
+open/save/new. Click a
+diagnostic in the log to jump to its line. *Options…* exposes every
+`resnik compile` flag with a live equivalent-command line; settings persist
+in `~/.config/resnik/ide.json`. The **Target** panel checks the Rust
+toolchain for the selected profile (`rustup target add`, `rust-src`,
+`espflash` / `probe-rs` — one-click Install), lists serial ports, and runs
+**Build / Flash & Run / Monitor / Run on host / Stop** through a streamed,
+cancellable process runner. See `ide/README.md` for details and
+`docs/Resnik IDE/` for the roadmap.
 
 ### Cross-Compilation (Embedded Targets)
 

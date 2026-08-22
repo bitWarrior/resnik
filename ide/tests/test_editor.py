@@ -83,3 +83,46 @@ class TestEditor:
         tk_root.update()
         numbers = [e.gutter.itemcget(i, "text") for i in e.gutter.find_all()]
         assert numbers[:5] == ["1", "2", "3", "4", "5"]
+
+
+class TestProxyRobustness:
+    """Tk's own Text class bindings call the widget command from Tcl; an
+    exception escaping the gutter proxy there kills the whole mainloop."""
+
+    def test_drag_without_press_does_not_kill_mainloop(self, tk_root, monkeypatch):
+        # <B1-Motion> without a prior ButtonPress → tk::TextSelectTo uses the
+        # per-widget tk::anchorN mark, which plain Tk only creates on press →
+        # 'bad text index "tk::anchor1"'.  Happens in real life when dragging
+        # a sash / window edge over the editor.  Must neither raise nor report.
+        reported = []
+        monkeypatch.setattr(tk_root, "report_callback_exception",
+                            lambda *a: reported.append(a))
+        e = Editor(tk_root)
+        e.pack(fill="both", expand=True)
+        tk_root.deiconify()
+        tk_root.update()
+        e.set_text("one\ntwo\n")
+        e.text.event_generate("<B1-Motion>", x=30, y=10)
+        tk_root.after(50, tk_root.quit)
+        tk_root.mainloop()  # must return normally, not raise TclError
+        assert e.get_text() == "one\ntwo\n"
+        assert reported == []
+
+    def test_unexpected_tcl_error_is_reported_not_raised(self, tk_root, monkeypatch):
+        reported = []
+        monkeypatch.setattr(tk_root, "report_callback_exception",
+                            lambda *a: reported.append(a))
+        e = Editor(tk_root)
+        result = e.text.index("no such index")
+        assert result == ""
+        assert len(reported) == 1
+        assert "no such index" in str(reported[0][1])
+
+    def test_benign_errors_are_silent(self, tk_root, monkeypatch):
+        reported = []
+        monkeypatch.setattr(tk_root, "report_callback_exception",
+                            lambda *a: reported.append(a))
+        e = Editor(tk_root)
+        e.text.edit_undo()          # nothing to undo
+        e.text.index("tk::anchor1")  # missing selection anchor
+        assert reported == []
