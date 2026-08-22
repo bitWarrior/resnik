@@ -1135,3 +1135,23 @@ class TestStartupBannerAndRemembrance:
         app.refresh_remembrance(dt.date(2026, 4, 12))
         app.refresh_remembrance(dt.date(2026, 4, 12))
         assert app.log.get_text().count("HAIL Columbia!") == 2
+
+
+class TestRustViewer:
+    def test_viewer_has_line_numbers_and_is_read_only(self, app, tmp_path):
+        src = _write(tmp_path, "hello.hal", VALID)
+        app.open_file(str(src))
+        app.compile()
+        _wait(app)
+        app.view_rust()
+        win, viewer = app._rust_window, app._rust_viewer
+        win.deiconify()
+        win.geometry("800x500+10+10")
+        pump(app, lambda: viewer.gutter.find_all(), timeout=10)
+        numbers = [viewer.gutter.itemcget(i, "text") for i in viewer.gutter.find_all()]
+        assert numbers[:3] == ["1", "2", "3"]
+        assert "fn main" in viewer.get_text()
+        assert str(viewer.text.cget("state")) == "disabled"
+        assert viewer.highlighting is False
+        assert viewer.font_family == app.editor.font_family
+        win.destroy()

@@ -1358,13 +1358,20 @@ class ResnikIDE(tk.Tk):
         win = tk.Toplevel(self)
         win.title(f"Generated Rust — {self.last_rust_path.name}")
         win.geometry("900x650")
-        from tkinter.scrolledtext import ScrolledText
-        txt = ScrolledText(win, wrap="none", font=self.editor.font)
-        theme.style_text(txt, kind="editor")
         win.configure(background=theme.palette()["bg"])
-        txt.pack(fill="both", expand=True)
-        txt.insert("1.0", self.last_rust_path.read_text(encoding="utf-8"))
-        txt.configure(state="disabled")
+        # Reuse the editor widget for its line-number gutter and theme; the
+        # HAL/S highlighter is switched off (this is Rust) and the buffer is
+        # read-only (selection/copy still work).
+        viewer = Editor(win)
+        viewer.pack(fill="both", expand=True)
+        viewer.set_highlighting(False)
+        viewer.set_font_size(self.editor.font_size)
+        viewer.set_font_family(self.editor.font_family)
+        viewer.set_text(self.last_rust_path.read_text(encoding="utf-8"))
+        viewer.text.configure(state="disabled")
+        win.bind("<Escape>", lambda _e: win.destroy())
+        self._rust_viewer = viewer
+        self._rust_window = win
 
     IMAGES_DIR = Path(__file__).resolve().parent.parent / "images"
 
