@@ -79,7 +79,7 @@ class TestSemanticCheck:
         assert "Parser found 1 error(s)" in log
         assert "already declared" in log
         assert "Semantic Check failed" in log
-        assert app.status_msg.cget("text") == "Semantic Check: 1 error(s)"
+        assert app.status_msg.cget("text") == "FAULT — 1 ERROR · Semantic Check"
         assert app.editor.error_lines == [3]
 
     def test_lexer_error_is_marked(self, app, tmp_path):
@@ -272,9 +272,10 @@ class TestOptionsIntegration:
         import resnik_ide.app as appmod
 
         class FakeDialog:
-            def __init__(self, master, settings, source=None, on_apply=None):
+            def __init__(self, master, settings, source=None, on_apply=None, **kw):
                 self.settings = settings
                 self.on_apply = on_apply
+                assert callable(kw.get("desktop_install")) and callable(kw.get("desktop_remove"))
 
             def show(self):
                 # Apply pressed mid-way, then OK with a further change
@@ -511,7 +512,7 @@ class TestBuildAndRun:
         assert "── Build and Run: dup.hal ──" in log
         assert "--emit-exe" in log  # forced for host
         assert "Compile failed" in log and "── Run" not in log
-        assert app.status_msg.cget("text") == "Build and Run: compile failed"
+        assert app.status_msg.cget("text") == "FAULT — 1 ERROR · Build and Run"
         assert app.editor.error_lines == [3]
 
     def test_does_not_change_saved_options(self, app, tmp_path, settings_file):
@@ -998,13 +999,32 @@ class TestDesktopIntegration:
         assert app.winfo_class() == desktop.STARTUP_WM_CLASS == "Resnik-ide"
         assert "StartupWMClass=" + app.winfo_class() in desktop.desktop_entry_text()
 
-    def test_install_and_remove_from_help_menu(self, app, tmp_path, monkeypatch):
+    def test_install_and_remove_via_options_desktop_tab(self, app, tmp_path, monkeypatch):
+        from resnik_ide.options_dialog import OptionsDialog
         monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
-        path = app.install_desktop_entry()
-        assert path == tmp_path / "applications" / "resnik-ide.desktop" and path.exists()
+        dlg = OptionsDialog(app, app.settings.compile, on_apply=app.apply_compile_settings,
+                            desktop_install=app.install_desktop_entry,
+                            desktop_remove=app.uninstall_desktop_entry)
+        assert "Not installed" in dlg.lbl_desktop_status.cget("text")
+        dlg.btn_desktop_install.invoke()
+        path = tmp_path / "applications" / "resnik-ide.desktop"
+        assert path.exists()
         assert "Desktop entry installed" in app.log.get_text()
-        assert app.uninstall_desktop_entry() is True and not path.exists()
-        assert app.uninstall_desktop_entry() is False
+        assert dlg.lbl_desktop_status.cget("text") == f"Installed: {path}"
+        dlg.btn_desktop_remove.invoke()
+        assert not path.exists()
+        assert "Desktop entry removed" in app.log.get_text()
+        assert "Not installed" in dlg.lbl_desktop_status.cget("text")
+        dlg.destroy()
+
+    def test_help_menu_has_only_about(self, app):
+        m = app._menubar
+        for i in range(m.index("end") + 1):
+            if m.type(i) == "cascade" and m.entrycget(i, "label") == "Help":
+                sub = m.nametowidget(m.entrycget(i, "menu"))
+                labels = [sub.entrycget(j, "label") for j in range(sub.index("end") + 1)
+                          if sub.type(j) == "command"]
+                assert labels == ["About"]
 
     def test_cli_flags(self, tmp_path, monkeypatch, capsys):
         from resnik_ide.app import main
@@ -1014,3 +1034,104 @@ class TestDesktopIntegration:
         assert "Installed" in capsys.readouterr().out
         assert main(["--uninstall-desktop"]) == 0
         assert not (tmp_path / "applications" / "resnik-ide.desktop").exists()
+
+
+class TestShuttleFlavour:
+    def test_met_clock_toggle_and_format(self, app, settings_file):
+        import re
+        assert app.met_visible is False
+        assert re.fullmatch(r"MET \d{3}:\d{2}:\d{2}:\d{2}", app.met())
+        app.set_met_visible(True)
+        app.update()
+        assert app.met_visible and app.status_met.cget("text").startswith("MET 000:00:")
+        assert load_settings(settings_file)[0].show_met is True
+        app.set_met_visible(False)
+        assert not app.met_visible and app._met_after is None
+        assert load_settings(settings_file)[0].show_met is False
+
+    def test_met_restored_on_next_start(self, app, settings_file):
+        from resnik_ide.app import ResnikIDE
+        app.set_met_visible(True)
+        second = ResnikIDE()
+        try:
+            second.withdraw()
+            second.update()
+            assert second.met_visible and second.var_show_met.get() is True
+        finally:
+            second.shutdown()
+
+    def test_fault_status_and_clear(self, app, tmp_path):
+        bad = _write(tmp_path, "dup.hal", SEMANTIC_DUP)
+        good = _write(tmp_path, "ok.hal", VALID)
+        app.open_file(str(bad))
+        app.compile()
+        _wait(app)
+        assert app.status_msg.cget("text") == "FAULT — 1 ERROR · Compile"
+        assert "GPC FAULT CLEARED" not in app.log.get_text()
+        app.open_file(str(good))
+        app.semantic_check()
+        _wait(app)
+        assert "GPC FAULT CLEARED" in app.log.get_text()
+        assert app.status_msg.cget("text") == "Semantic Check: OK"
+        # a second clean run does not repeat the message
+        app.semantic_check()
+        _wait(app)
+        assert app.log.get_text().count("GPC FAULT CLEARED") == 1
+
+    def test_pass_commands(self, app, tmp_path, monkeypatch):
+        from resnik_ide import pass_commands
+        app.open_file(str(_write(tmp_path, "ok.hal", VALID)))
+        assert app.run_pass_command("SPEC 1 PRO") == "toolchain"
+        assert "SPEC 1  rustc: rustc 1.96.1" in app.log.get_text()
+        assert app.run_pass_command("spec 2") == "options"
+        assert "SPEC 2  resnik compile ok.hal" in app.log.get_text()
+        assert app.run_pass_command("SPEC 67 PRO") == "sts1"
+        assert "bug heard 'round the world" in app.log.get_text()
+        assert app.run_pass_command("ITEM 1 EXEC") == "semantic_check"
+        _wait(app)
+        assert "Semantic Check passed" in app.log.get_text()
+        assert app.run_pass_command("item 5") == "clear_log"
+        assert app.log.get_text() == ""
+        assert app.run_pass_command("?") == "help"
+        assert "ITEM 3 EXEC — Build and Run" in app.log.get_text()
+        assert app.run_pass_command("SPEC 99 PRO") == pass_commands.ILLEGAL_ENTRY
+        assert "ILLEGAL ENTRY" in app.log.get_text()
+        assert app.run_pass_command("hello world") == pass_commands.ILLEGAL_ENTRY
+        opened = []
+        monkeypatch.setattr(app, "about", lambda: opened.append(1))
+        assert app.run_pass_command("OPS 9 PRO") == "about" and opened == [1]
+        assert app.run_pass_command("") == ""
+
+    def test_pass_entry_return_and_history(self, app):
+        # What the <Return> binding on the PASS> entry calls: run the entry's text.
+        app.var_pass.set("SPEC 67 PRO")
+        assert app.run_pass_command() == "sts1"
+        assert app.var_pass.get() == "" and "STS-1" in app.log.get_text()
+        app._pass_history(-1)
+        assert app.var_pass.get() == "SPEC 67 PRO"
+        app._pass_history(+1)
+        assert app.var_pass.get() == ""
+
+
+class TestStartupBannerAndRemembrance:
+    def test_banner_logged_at_startup(self, app):
+        log = app.log.get_text()
+        assert "PASS STARTUP ✓" in log and "GPC 1 ONLINE" in log
+
+    def test_remembrance_dates(self, app):
+        import datetime as dt
+        assert app.refresh_remembrance(dt.date(2026, 1, 28)) == "In memory of the crew of STS-51-L"
+        assert app.status_remember.cget("text") == "In memory of the crew of STS-51-L"
+        assert "Challenger" in app.log.get_text()
+        assert app.refresh_remembrance(dt.date(2026, 2, 1)) == "In memory of the crew of STS-107"
+        assert "Columbia, STS-107" in app.log.get_text()
+        assert app.refresh_remembrance(dt.date(2026, 4, 12)) == "HAIL Columbia!"
+        assert app.status_remember.cget("text") == "HAIL Columbia!"
+        assert app.refresh_remembrance(dt.date(2026, 8, 21)) is None
+        assert app.status_remember.cget("text") == ""
+        # logged when the text appears (again, after being cleared) — but the
+        # hourly re-check on the same day does not repeat it
+        app.refresh_remembrance(dt.date(2026, 4, 12))
+        app.refresh_remembrance(dt.date(2026, 4, 12))
+        app.refresh_remembrance(dt.date(2026, 4, 12))
+        assert app.log.get_text().count("HAIL Columbia!") == 2

@@ -258,7 +258,10 @@ the most successful safety-critical languages ever fielded, flying human-rated
 avionics for roughly three decades. Designed decades before "memory safety" was
 a common term, it emphasized strong typing, explicit real-time semantics, and
 verifiability — the same properties that make Rust a fitting modern compilation
-target.
+target. Beyond the Shuttle, HAL/S flew on NASA's Galileo spacecraft, whose
+Attitude and Articulation Control Subsystem software was written in it: the
+Galileo spacecraft launched on October 18, 1989, while the first satellites for
+the European Galileo Navigation System lifted off on December 28, 2005.
 
 The compiler is named after **Judith Resnik** (1949–1986), electrical engineer,
 pilot and NASA astronaut. More on the language, its Shuttle deployments, the

@@ -40,7 +40,7 @@ properties that make Rust a fitting modern compilation target.
 
 - Space Shuttle: Flight Software (FSW) for the Space Shuttle's onboard computers, including the Primary Avionics Software System (PASS) and the Backup Flight Software (BFS).
 
-- Galileo: Deployed Flight Software (FSW) for the Attitude and Articulation Control Subsystem (AACS),
+- Galileo: Deployed Flight Software (FSW) for the Attitude and Articulation Control Subsystem (AACS). The Galileo spacecraft launched on October 18, 1989, while the first satellites for the European Galileo Navigation System lifted off on December 28, 2005.
 
 ## Programming-language trivia
 The "HAL" name was chosen to honor Hal Laning, a pioneer in aerospace computing at MIT. The "S" was added to stand for "Shuttle"

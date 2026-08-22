@@ -907,6 +907,20 @@ resnik-ide [program.hal]            # with the venv active
 | Target panel | Toolchain checklist with one-click **Install**, serial port / chip, **Build / Flash & Run / Monitor / Run on host / Stop** |
 | Status bar | File (`*` = unsaved), caret position, last result |
 
+**Shuttle flavour:** View → **Mission Elapsed Time** puts a `MET ddd:hh:mm:ss`
+clock in the status bar; the `PASS>` line under the log (Ctrl+L) accepts the
+crew keyboard vocabulary (`OPS 0 PRO` lists it; `SPEC 1 PRO` toolchain,
+`SPEC 2 PRO` options, `SPEC 67 PRO` the STS-1 story, `ITEM 1 EXEC` Semantic
+Check, `ITEM 2 EXEC` Compile, `ITEM 3 EXEC` Build and Run, `OPS 9 PRO`
+About; anything else answers `ILLEGAL ENTRY`); and a failed check/compile
+shows `FAULT — n ERRORS` in the status bar until the next clean run logs
+`GPC FAULT CLEARED`. The log opens with a PASS-style startup banner, and on
+28 January, 1 February and 12 April the status bar carries a quiet remembrance
+of STS-51-L, STS-107 and STS-1 (`HAIL Columbia!`), and `HAIL <orbiter>!` on each
+orbiter's first-flight anniversary (Challenger 4 April, Endeavour 7 May,
+Discovery 30 August, Atlantis 3 October), and `GO Galileo!` on 18 October (Galileo's
+AACS flight software was written in HAL/S).
+
 **View menu:** Syntax Highlighting on/off, **Dark Mode** (Ctrl+Shift+D),
 **Target Panel** show/hide (Ctrl+Shift+T), **Fonts…** (interface font family/size,
 the editor/log monospace family and the editor/log sizes — shortcuts: Ctrl+`+` /
@@ -968,7 +982,7 @@ The command lines mirror "Hello World on ESP32-C3" in `docs/EMBEDDED_TARGETS.md`
 | `resnik_ide is not installed` | `. resnik-venv/bin/activate && pip install -e .` |
 | Flash/Build refuses to start | A toolchain row is ✗ — the log names it; click Install |
 | Nothing happens on Run on host | Compile with `--emit-exe` (or use Build and Run) first |
-| Generic window icon on GNOME | `resnik-ide --install-desktop` once (Help → Install Desktop Entry); GNOME takes the icon from the `.desktop` entry, not from the window |
+| Generic window icon on GNOME | `resnik-ide --install-desktop` once (or Options… → Desktop tab → Install); GNOME takes the icon from the `.desktop` entry, not from the window |
 
 ---
 

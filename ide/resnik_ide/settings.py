@@ -59,6 +59,7 @@ class IdeSettings:
     highlighting: bool = True
     theme: str = "light"
     show_target_panel: bool = True
+    show_met: bool = False  # Mission Elapsed Time clock in the status bar
     log_height: int = 0  # log pane height in pixels; 0 = default split
     sash_target_panel: int = 0  # pixels from the left edge; 0 = default width
     version: int = SETTINGS_VERSION
@@ -78,6 +79,7 @@ class IdeSettings:
             "highlighting": self.highlighting,
             "theme": self.theme,
             "show_target_panel": self.show_target_panel,
+            "show_met": self.show_met,
             "log_height": self.log_height,
             "sash_target_panel": self.sash_target_panel,
             "compile": self.compile.to_dict(),
@@ -108,6 +110,7 @@ class IdeSettings:
             highlighting=bool(data.get("highlighting", True)),
             theme=data.get("theme") if data.get("theme") in ("light", "dark") else "light",
             show_target_panel=bool(data.get("show_target_panel", True)),
+            show_met=bool(data.get("show_met", False)),
             log_height=_int_or(data.get("log_height"), 0, 0, 100000),
             sash_target_panel=_int_or(data.get("sash_target_panel"), 0, 0, 100000),
             version=int(data.get("version", SETTINGS_VERSION) or SETTINGS_VERSION),

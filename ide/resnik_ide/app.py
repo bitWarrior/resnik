@@ -46,7 +46,9 @@ from resnik_ide.dispatch import Dispatcher, Job
 from resnik_ide.editor import Editor
 from resnik_ide.logview import LogSink, LogView
 from resnik_ide.options import IdeCompileSettings, OptionsError
-from resnik_ide import desktop, devices, fonts, theme, toolchain
+import time
+
+from resnik_ide import desktop, devices, fonts, pass_commands, shuttle, theme, toolchain
 from resnik_ide.font_dialog import FontDialog
 from resnik_ide.options_dialog import OptionsDialog
 from resnik_ide.reporter import LogReporter
@@ -106,6 +108,9 @@ class ResnikIDE(tk.Tk):
             f"Python {sys.version.split()[0]}",
             "info",
         )
+        self.log.log(shuttle.startup_banner(), "ok")
+        self._remember_after: Optional[str] = None
+        self.refresh_remembrance()
         if settings_warning:
             self.log.log(settings_warning, "warn")
         self.log.log(f"Settings: {settings_path()}", "info")
@@ -124,6 +129,8 @@ class ResnikIDE(tk.Tk):
         self.editor.set_highlighting(self.settings.highlighting)
         if not self.settings.show_target_panel:
             self.set_target_panel_visible(False, save=False)
+        self._fault = False  # "GPC FAULT" latched until the next clean check/compile
+        self.set_met_visible(self.settings.show_met, save=False)
         self._paned.bind("<ButtonRelease-1>", self._on_sash_release)
         self._outer.bind("<ButtonRelease-1>", self._on_sash_release)
         # Keep re-applying the saved split while the window manager is still
@@ -192,6 +199,9 @@ class ResnikIDE(tk.Tk):
         self.var_show_target = tk.BooleanVar(value=self.settings.show_target_panel)
         m_view.add_checkbutton(label="Target Panel", accelerator="Ctrl+Shift+T",
                                variable=self.var_show_target, command=self._toggle_target_panel)
+        self.var_show_met = tk.BooleanVar(value=self.settings.show_met)
+        m_view.add_checkbutton(label="Mission Elapsed Time", variable=self.var_show_met,
+                               command=lambda: self.set_met_visible(bool(self.var_show_met.get())))
         m_view.add_separator()
         m_view.add_command(label="Fonts…", command=self.open_fonts)
         menubar.add_cascade(label="View", menu=m_view)
@@ -221,10 +231,6 @@ class ResnikIDE(tk.Tk):
         menubar.add_cascade(label="Log", menu=m_log)
 
         m_help = tk.Menu(menubar, tearoff=False)
-        m_help.add_command(label="Install Desktop Entry (launcher + icon)",
-                           command=self.install_desktop_entry)
-        m_help.add_command(label="Remove Desktop Entry", command=self.uninstall_desktop_entry)
-        m_help.add_separator()
         m_help.add_command(label="About", command=self.about)
         menubar.add_cascade(label="Help", menu=m_help)
 
@@ -256,10 +262,24 @@ class ResnikIDE(tk.Tk):
         outer.pack(side="top", fill="both", expand=True)
         paned = ttk.PanedWindow(outer, orient="vertical")
         self.editor = Editor(paned, on_dirty=self._on_dirty, on_cursor=self._on_cursor)
-        self.log = LogView(paned, font_size=self.settings.log_font_size,
+        self.log_frame = ttk.Frame(paned)
+        self.log = LogView(self.log_frame, font_size=self.settings.log_font_size,
                            on_font_size=self._log_font_changed)
+        self.log.pack(side="top", fill="both", expand=True)
+        cmd_row = ttk.Frame(self.log_frame)
+        cmd_row.pack(side="bottom", fill="x")
+        ttk.Label(cmd_row, text="PASS>", style="Muted.TLabel").pack(side="left", padx=(4, 2))
+        self.var_pass = tk.StringVar()
+        self.pass_entry = ttk.Entry(cmd_row, textvariable=self.var_pass, font="TkFixedFont")
+        self.pass_entry.pack(side="left", fill="x", expand=True, padx=(0, 4), pady=2)
+        self.pass_entry.bind("<Return>", lambda e: self.run_pass_command())
+        self.pass_entry.bind("<Escape>", lambda e: (self.var_pass.set(""), self.editor.text.focus_set()))
+        self.pass_entry.bind("<Up>", lambda e: self._pass_history(-1))
+        self.pass_entry.bind("<Down>", lambda e: self._pass_history(+1))
+        self._pass_hist: list = []
+        self._pass_hist_pos = 0
         paned.add(self.editor, weight=3)
-        paned.add(self.log, weight=1)
+        paned.add(self.log_frame, weight=1)
         self.target_panel = TargetPanel(
             outer, var_target=self.var_target, var_port=self.var_port, var_chip=self.var_chip,
             actions={
@@ -284,6 +304,12 @@ class ResnikIDE(tk.Tk):
         self.status_file.pack(side="left", fill="x", expand=True)
         self.status_pos = ttk.Label(bar, text="Ln 1, Col 1", width=16, anchor="center")
         self.status_pos.pack(side="left")
+        self._t0 = time.monotonic()
+        self._met_after: Optional[str] = None
+        self.status_met = ttk.Label(bar, text="", width=18, anchor="center", style="Muted.TLabel")
+        # packed by set_met_visible()
+        self.status_remember = ttk.Label(bar, text="", anchor="center", style="Muted.TLabel")
+        self.status_remember.pack(side="left", fill="x", expand=True)
         self.status_msg = ttk.Label(bar, text="", width=36, anchor="e")
         self.status_msg.pack(side="right")
 
@@ -307,6 +333,7 @@ class ResnikIDE(tk.Tk):
         self.bind_all("<Control-0>", lambda e: self.zoom(0))
         self.bind_all("<Control-D>", lambda e: self.toggle_dark())
         self.bind_all("<Control-T>", lambda e: self.toggle_target_panel())
+        self.bind_all("<Control-l>", lambda e: self.pass_entry.focus_set())
 
     # -------------------------------------------------------------- state --
 
@@ -567,6 +594,122 @@ class ResnikIDE(tk.Tk):
             except tk.TclError:
                 pass
 
+    # -- Shuttle flavour: MET clock, GPC fault, PASS keyboard ----------------------
+
+    def met(self) -> str:
+        """Mission Elapsed Time since the IDE started, ``ddd:hh:mm:ss``."""
+        s = int(time.monotonic() - self._t0)
+        d, s = divmod(s, 86400)
+        h, s = divmod(s, 3600)
+        m, s = divmod(s, 60)
+        return f"MET {d:03d}:{h:02d}:{m:02d}:{s:02d}"
+
+    @property
+    def met_visible(self) -> bool:
+        return bool(self.status_met.winfo_manager())
+
+    def set_met_visible(self, visible: bool, *, save: bool = True) -> None:
+        visible = bool(visible)
+        if visible and not self.met_visible:
+            self.status_met.pack(side="left", after=self.status_pos)
+            self._tick_met()
+        elif not visible and self.met_visible:
+            self.status_met.pack_forget()
+            if self._met_after is not None:
+                self.after_cancel(self._met_after)
+                self._met_after = None
+        self.var_show_met.set(visible)
+        if save and self.settings.show_met != visible:
+            self.settings.show_met = visible
+            self._save_settings()
+
+    def _tick_met(self) -> None:
+        if not self.met_visible:
+            self._met_after = None
+            return
+        self.status_met.configure(text=self.met())
+        self._met_after = self.after(1000, self._tick_met)
+
+    def refresh_remembrance(self, today=None) -> Optional[str]:
+        """Date-gated quiet remembrance in the status bar (re-checked hourly
+        so a long-running IDE notices midnight).  Returns the text shown."""
+        entry = shuttle.remembrance_for(today)
+        text = entry[0] if entry else ""
+        if text and self.status_remember.cget("text") != text:
+            self.log.log(entry[1], "info")
+        self.status_remember.configure(text=text)
+        if self._remember_after is not None:
+            try:
+                self.after_cancel(self._remember_after)
+            except tk.TclError:  # pragma: no cover
+                pass
+        self._remember_after = self.after(3600 * 1000, self.refresh_remembrance)
+        return text or None
+
+    def _fault_status(self, what: str, n: int) -> None:
+        """Failure wording in the GPC idiom; diagnostics themselves are untouched."""
+        self._fault = True
+        self.set_status(f"FAULT — {n} ERROR{'S' if n != 1 else ''} · {what}")
+
+    def _fault_cleared(self) -> None:
+        if self._fault:
+            self._fault = False
+            self.log.log("GPC FAULT CLEARED", "ok")
+
+    def run_pass_command(self, text: Optional[str] = None) -> str:
+        """Execute a PASS-style keyboard entry; returns the action key or
+        ``ILLEGAL ENTRY``."""
+        raw = (self.var_pass.get() if text is None else text).strip()
+        if not raw:
+            return ""
+        cmd = pass_commands.parse(raw)
+        self.var_pass.set("")
+        if raw and (not self._pass_hist or self._pass_hist[-1] != raw):
+            self._pass_hist.append(raw)
+        self._pass_hist_pos = len(self._pass_hist)
+        self.log.log(f"PASS> {raw}", "cmd")
+        if cmd.kind == "illegal":
+            self.log.log(pass_commands.ILLEGAL_ENTRY, "error")
+            return pass_commands.ILLEGAL_ENTRY
+        action = cmd.action or ""
+        if action == "help":
+            for ln in pass_commands.help_lines():
+                self.log.log(ln, "info", timestamp=False)
+        elif action == "toolchain":
+            st = self.toolchain_status
+            lines = st.summary_lines() if st else ["toolchain not probed yet"]
+            for ln in lines:
+                self.log.log("SPEC 1  " + ln, "info")
+        elif action == "options":
+            self.log.log("SPEC 2  " + self.settings.compile.command_line(
+                self.current_path.name if self.current_path else None), "info")
+        elif action == "devices":
+            self.refresh_devices()
+        elif action == "sts1":
+            self.log.log("SPEC 67 " + pass_commands.STS1_TEXT, "info")
+        elif action == "semantic_check":
+            self.semantic_check()
+        elif action == "compile":
+            self.compile()
+        elif action == "build_and_run":
+            self.build_and_run()
+        elif action == "stop":
+            self.stop()
+        elif action == "clear_log":
+            self.log.clear()
+        elif action == "about":
+            self.about()
+        return action
+
+    def _pass_history(self, step: int) -> str:
+        if not self._pass_hist:
+            return "break"
+        self._pass_hist_pos = max(0, min(len(self._pass_hist), self._pass_hist_pos + step))
+        self.var_pass.set(self._pass_hist[self._pass_hist_pos]
+                          if self._pass_hist_pos < len(self._pass_hist) else "")
+        self.pass_entry.icursor("end")
+        return "break"
+
     # -- target panel visibility ---------------------------------------------------
 
     @property
@@ -754,7 +897,9 @@ class ResnikIDE(tk.Tk):
         # the source's directory, so that is the exact shell equivalent from there.
         dlg = OptionsDialog(self, self.settings.compile,
                             source=self.current_path.name if self.current_path else None,
-                            on_apply=self.apply_compile_settings)
+                            on_apply=self.apply_compile_settings,
+                            desktop_install=self.install_desktop_entry,
+                            desktop_remove=self.uninstall_desktop_entry)
         new = dlg.show()
         # Apply / OK already went through on_apply; this only catches a
         # dialog implementation that returns a result without calling it.
@@ -847,7 +992,7 @@ class ResnikIDE(tk.Tk):
     def _build_and_run_done(self, res: GenerateResult, reporter: LogReporter) -> None:
         self._compile_done(res, reporter)
         if not res.ok:
-            self.set_status("Build and Run: compile failed")
+            self._fault_status("Build and Run", len(res.diagnostics))
             return
         if (res.check and res.check.ast is not None and
                 self.var_target.get() in ("", "host")):
@@ -935,7 +1080,9 @@ class ResnikIDE(tk.Tk):
         else:
             self.log.log(f"✗ Semantic Check failed — {n} error(s). "
                          "Click a diagnostic to jump to it.", "error")
-            self.set_status(f"Semantic Check: {n} error(s)")
+            self._fault_status("Semantic Check", n)
+        if res.ok:
+            self._fault_cleared()
 
     def _compile_done(self, res: GenerateResult, reporter: LogReporter) -> None:
         self.last_result = res
@@ -948,10 +1095,11 @@ class ResnikIDE(tk.Tk):
             extra = f" → {res.executable}" if res.executable else ""
             self.log.log(f"✓ Compile succeeded{extra}", "ok")
             self.set_status("Compile: OK")
+            self._fault_cleared()
         else:
             n = len(res.diagnostics)
             self.log.log(f"✗ Compile failed — {n} error(s).", "error")
-            self.set_status(f"Compile: {n} error(s)")
+            self._fault_status("Compile", n)
 
     # ------------------------------------------------------ toolchain/devices --
 
@@ -1240,7 +1388,8 @@ class ResnikIDE(tk.Tk):
 
     def install_desktop_entry(self) -> Optional[Path]:
         """Write ~/.local/share/applications/resnik-ide.desktop so the desktop
-        shows the Resnik logo for this window and offers a launcher."""
+        shows the Resnik logo for this window and offers a launcher
+        (Options… → Desktop tab, or ``resnik-ide --install-desktop``)."""
         try:
             path = desktop.install_desktop_entry()
         except OSError as exc:
@@ -1332,6 +1481,12 @@ class ResnikIDE(tk.Tk):
         except tk.TclError:  # pragma: no cover
             pass
         self.dispatcher.stop()
+        for aid in (self._met_after, getattr(self, "_remember_after", None)):
+            if aid is not None:
+                try:
+                    self.after_cancel(aid)
+                except tk.TclError:  # pragma: no cover
+                    pass
         if self.runner.running:
             self.runner.cancel()
         if self._tmpdir:

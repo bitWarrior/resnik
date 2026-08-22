@@ -96,3 +96,19 @@ class TestApplyButton:
         dlg.v_build.set(True)
         assert dlg.apply() == IdeCompileSettings(build=True)
         dlg.destroy()
+
+
+class TestDesktopTab:
+    def test_tab_exists_with_injected_callbacks(self, tk_root, tmp_path, monkeypatch):
+        monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+        calls = []
+        dlg = OptionsDialog(tk_root, IdeCompileSettings(),
+                            desktop_install=lambda: calls.append("install"),
+                            desktop_remove=lambda: calls.append("remove"))
+        tabs = [dlg.nametowidget(t).winfo_name() for t in dlg.winfo_children()[0].tabs()]
+        assert len(tabs) == 6  # five option tabs + Desktop
+        dlg.btn_desktop_install.invoke()
+        dlg.btn_desktop_remove.invoke()
+        assert calls == ["install", "remove"]
+        assert "resnik-ide.desktop" in dlg.lbl_desktop_status.cget("text")
+        dlg.destroy()

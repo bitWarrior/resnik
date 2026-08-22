@@ -23,7 +23,7 @@ from typing import Callable, List, Optional, Union
 
 from resnik.backend.target_spec import TARGET_NAMES
 
-from resnik_ide import theme
+from resnik_ide import desktop, theme
 from resnik_ide.options import OPT_LEVELS, IdeCompileSettings
 
 _PAD = {"padx": 6, "pady": 3}
@@ -90,7 +90,9 @@ class OptionsDialog(tk.Toplevel):
 
     def __init__(self, master: tk.Misc, settings: IdeCompileSettings,
                  source: Union[str, Path, None] = None,
-                 on_apply: Optional[Callable[[IdeCompileSettings], None]] = None) -> None:
+                 on_apply: Optional[Callable[[IdeCompileSettings], None]] = None,
+                 desktop_install: Optional[Callable[[], object]] = None,
+                 desktop_remove: Optional[Callable[[], object]] = None) -> None:
         super().__init__(master)
         self.title("Compiler Options")
         self.resizable(True, True)
@@ -100,6 +102,8 @@ class OptionsDialog(tk.Toplevel):
         self._initial = settings.copy()
         self._on_apply = on_apply
         self._applied = settings.copy()  # what the app currently has
+        self._desktop_install = desktop_install or desktop.install_desktop_entry
+        self._desktop_remove = desktop_remove or desktop.uninstall_desktop_entry
 
         # -- variables -----------------------------------------------------------
         self.v_target = tk.StringVar(value=settings.target)
@@ -121,6 +125,7 @@ class OptionsDialog(tk.Toplevel):
         self._build_tab_linking(nb)
         self._build_tab_templates(nb)
         self._build_tab_extra(nb)
+        self._build_tab_desktop(nb)
         self._build_preview_and_buttons()
 
         for var in (self.v_target, self.v_emit_exe, self.v_opt_level, self.v_emit_cargo,
@@ -217,6 +222,44 @@ class OptionsDialog(tk.Toplevel):
         self._entry_row(f, 0, "Extra arguments", self.v_extra,
                         hint="Appended verbatim (shell-split) and validated by the real "
                              "'resnik compile' parser when you run.")
+
+    def _build_tab_desktop(self, nb: ttk.Notebook) -> None:
+        f = ttk.Frame(nb, padding=8)
+        nb.add(f, text="Desktop")
+        ttk.Label(f, text="Desktop integration", style="Title.TLabel").grid(
+            row=0, column=0, columnspan=2, sticky="w")
+        ttk.Label(f, text=(
+            "Installs a freedesktop launcher entry (resnik-ide.desktop) so the desktop "
+            "shows the Resnik logo as this window's icon and lists 'Resnik IDE' in the "
+            "applications menu. GNOME/Wayland needs this — it ignores the icon the window "
+            "itself sets. Equivalent: resnik-ide --install-desktop / --uninstall-desktop."),
+            style="Muted.TLabel", wraplength=520, justify="left").grid(
+            row=1, column=0, columnspan=2, sticky="w", pady=(4, 8))
+        self.lbl_desktop_status = ttk.Label(f, text="")
+        self.lbl_desktop_status.grid(row=2, column=0, columnspan=2, sticky="w", pady=(0, 6))
+        self.btn_desktop_install = ttk.Button(f, text="Install desktop entry",
+                                              command=self._desktop_do_install)
+        self.btn_desktop_install.grid(row=3, column=0, sticky="w")
+        self.btn_desktop_remove = ttk.Button(f, text="Remove desktop entry",
+                                             command=self._desktop_do_remove)
+        self.btn_desktop_remove.grid(row=3, column=1, sticky="w", padx=(8, 0))
+        self._refresh_desktop_status()
+
+    def _refresh_desktop_status(self) -> None:
+        path = desktop.entry_path()
+        if desktop.is_installed():
+            self.lbl_desktop_status.configure(text=f"Installed: {path}", style="Ok.TLabel")
+        else:
+            self.lbl_desktop_status.configure(text=f"Not installed (would write {path})",
+                                              style="Muted.TLabel")
+
+    def _desktop_do_install(self) -> None:
+        self._desktop_install()
+        self._refresh_desktop_status()
+
+    def _desktop_do_remove(self) -> None:
+        self._desktop_remove()
+        self._refresh_desktop_status()
 
     def _build_preview_and_buttons(self) -> None:
         pf = ttk.LabelFrame(self, text="Equivalent command", padding=6)
