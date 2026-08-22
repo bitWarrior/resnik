@@ -18,9 +18,10 @@ Last Updated: February 2026
 7. [Complete Workflow](#complete-workflow)
 8. [Compiling Rust to Executable](#compiling-rust-to-executable)
 9. [Command-Line Interface](#command-line-interface)
-10. [Examples](#examples)
-11. [Troubleshooting](#troubleshooting)
-12. [API Reference](#api-reference)
+10. [Desktop IDE](#desktop-ide)
+11. [Examples](#examples)
+12. [Troubleshooting](#troubleshooting)
+13. [API Reference](#api-reference)
 
 ---
 
@@ -880,6 +881,94 @@ chmod +x resnik-compile.py
 # Export intermediate results
 ./resnik-compile.py program.hal --tokens tokens.json --ast ast.json
 ```
+
+---
+
+## 🖥️ Desktop IDE
+
+Resnik ships a small desktop IDE (Tk, no extra Python dependencies) for the
+edit → check → compile → run loop. It lives in `ide/` and is installed with
+the compiler.
+
+```bash
+./start_ide.sh [program.hal]        # from the repository root
+resnik-ide [program.hal]            # with the venv active
+```
+
+![Resnik IDE main window](../../ide/images/ide-main.png)
+
+### Layout
+
+| Area | What it does |
+| ---- | ------------ |
+| Toolbar | **Semantic Check** (F7), **Compile** (F5), **Build and Run** (F9), target profile, **Options…** (Ctrl+,) |
+| Editor | Syntax highlighting from the compiler's lexer, line numbers, error-line marks, Tab → 2 spaces, Ctrl+`+`/`-`/`0` font size |
+| Log | Timestamped transcript of everything: compiler phases, diagnostics (click one to jump to the line), external tool output, exit codes. Right-click: Clear / Copy / Save |
+| Target panel | Toolchain checklist with one-click **Install**, serial port / chip, **Build / Flash & Run / Monitor / Run on host / Stop** |
+| Status bar | File (`*` = unsaved), caret position, last result |
+
+**View menu:** Syntax Highlighting on/off, **Dark Mode** (Ctrl+Shift+D),
+**Target Panel** show/hide (Ctrl+Shift+T), **Fonts…** (interface font family/size,
+the editor/log monospace family and the editor/log sizes — shortcuts: Ctrl+`+` /
+Ctrl+`-` / Ctrl+0 for the editor, Ctrl+wheel over the log). All of these, plus recent files and
+window geometry, are remembered between sessions.
+
+![Resnik IDE in dark mode](../../ide/images/ide-dark.png)
+
+### Semantic Check vs. Compile vs. Build and Run
+
+- **Semantic Check** runs the lexer and parser only. HAL/S semantic analysis
+  (declarations, scopes, dimension/arity checks, `EXIT` placement, template
+  signatures …) lives in the parser, so a clean check means a semantically
+  valid unit. With an embedded target selected it also warns about features
+  that are not yet supported on `no_std` (VECTOR/MATRIX, SCHEDULE/TASK,
+  COMPOOL).
+- **Compile** runs the full `resnik compile` pipeline with the options from
+  **Options…** and writes `<file>.rs` next to the source (plus `--emit-cargo`
+  scaffold, `--gen-tpl` templates, `--emit-exe` executable if set).
+- **Build and Run** compiles with `--emit-exe` and runs the executable; its
+  output streams into the log. On an embedded target it compiles and hands
+  off to **Flash & Run**.
+
+### Compiler options
+
+![Compiler Options dialog](../../ide/images/ide-options.png)
+
+**Options…** exposes every `resnik compile` flag (target, `--emit-exe`,
+`--opt-level`, `--emit-cargo`, `--build`, `--rust`/`--tokens`/`--ast`,
+linker flags, template library) plus a free-form *Extra arguments* field.
+The **Equivalent command** line is the exact shell command; relative paths are
+resolved against the source file's directory. Extra arguments are validated
+by the real CLI parser when you run, so the IDE can never accept something
+`resnik compile` would reject. Settings persist in
+`~/.config/resnik/ide.json` (`%APPDATA%\resnik\ide.json` on Windows, or
+`$RESNIK_IDE_CONFIG`).
+
+### Targets and hardware
+
+![Target panel](../../ide/images/ide-target-panel.png)
+
+1. Pick the profile (`host`, `cortex-m`, `esp32-c3`) in the toolbar or panel.
+2. The **Toolchain** list shows what the profile needs (`rustup target add …`,
+   `rust-src`, `espflash` / `probe-rs`); click **Install** on any ✗ row — the
+   command streams into the log.
+3. Set the Cargo project directory under **Options… → Target & Build →
+   --emit-cargo** and **Compile** once to scaffold it.
+4. Select the serial port (ESP32-C3) or enter the chip name (probe-rs), then
+   **Flash & Run**. **Monitor** opens the serial console; **Stop** ends it.
+
+The command lines mirror "Hello World on ESP32-C3" in `docs/EMBEDDED_TARGETS.md`
+(`cargo run --release` → `espflash flash --monitor`; `probe-rs run --chip …`).
+
+### Troubleshooting the IDE
+
+| Symptom | Fix |
+| ------- | --- |
+| `No module named _tkinter` / `start_ide.sh` says Tk is missing | `sudo apt install python3-tk` (Debian/Ubuntu); python.org builds include Tk |
+| `resnik_ide is not installed` | `. resnik-venv/bin/activate && pip install -e .` |
+| Flash/Build refuses to start | A toolchain row is ✗ — the log names it; click Install |
+| Nothing happens on Run on host | Compile with `--emit-exe` (or use Build and Run) first |
+| Generic window icon on GNOME | `resnik-ide --install-desktop` once (Help → Install Desktop Entry); GNOME takes the icon from the `.desktop` entry, not from the window |
 
 ---
 

@@ -55,7 +55,8 @@ logic, pre-flight, and the panel are covered by tests against fake
 processes/tool output, and the host Run path is exercised end-to-end with
 `rustc`. The `espflash` / `probe-rs` invocations themselves have **not** been
 run against real hardware in this tree (no board / tools on the development
-machine) — the commands mirror README §"Hello World on ESP32-C3". One known
+machine) — the commands mirror "Hello World on ESP32-C3" in
+`docs/EMBEDDED_TARGETS.md`. One known
 open question: the IDE runs tools without a TTY (stdin is `/dev/null`); if
 your `espflash` version refuses to open its interactive monitor in that
 situation, it needs `--non-interactive` appended to the Monitor / runner
