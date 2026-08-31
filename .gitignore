@@ -72,10 +72,10 @@ Thumbs.db
 # Backend package init (kept local; not part of the published tree)
 src/resnik/backend/__init__.py
 
-# IDE / driver package markers (kept local, same policy as the backend init)
+# IDE / driver package markers (kept local, same policy as the backend init).
+# resnik_ide/__init__.py and __main__.py are tracked: the IDE needs
+# __version__ and python -m resnik_ide.
 ide/__init__.py
-ide/resnik_ide/__init__.py
-ide/resnik_ide/__main__.py
 ide/tests/__init__.py
 tests/test_driver/__init__.py
 

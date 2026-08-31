@@ -67,6 +67,14 @@ class ToolchainStatus:
         return out
 
 
+def rustc_missing_warning() -> str:
+    """Log line when rustc is absent: parse/compile still work, build does not."""
+    return (
+        "rustc not found — Semantic Check and Compile still work; "
+        f"Build and Run needs the Rust compiler ({RUSTUP_URL})."
+    )
+
+
 @dataclass
 class Requirement:
     key: str

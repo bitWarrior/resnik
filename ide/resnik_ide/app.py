@@ -1127,6 +1127,8 @@ class ResnikIDE(tk.Tk):
             self._show_requirements()
             for ln in status.summary_lines():
                 self.log.log("toolchain: " + ln, "info")
+            if not status.rustc.present:
+                self.log.log(toolchain.rustc_missing_warning(), "warn")
 
         def failed(exc: BaseException) -> None:
             finish()

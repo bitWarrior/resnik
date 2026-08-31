@@ -8,6 +8,11 @@ default theme) and records the current palette so widgets created later
 (dialogs, viewers) can ask for it with ``palette()``.  Plain-Tk widgets that
 already exist (editor text, gutter, log, menus) are restyled by their owners
 via ``apply_palette`` methods.
+
+The Tk file dialog (Open / Save As) draws its file list as a canvas whose
+background and item colour come from the ``Treeview`` ttk style; clam's
+defaults are a white window with (after we restyle ``.``) light text, so
+dark mode must restyle Treeview too.
 """
 
 from __future__ import annotations
@@ -131,6 +136,26 @@ def apply(root: tk.Misc, name: str) -> Palette:
         style.configure("TPanedwindow", background=p["bg"])
         style.configure("Sash", sashthickness=6, background=p["border"], gripcount=0)
         style.configure("TSeparator", background=p["border"])
+        # Directory menubutton in the Tk file dialog.
+        style.configure("TMenubutton", background=p["button_bg"], foreground=p["fg"],
+                        arrowcolor=p["fg"], bordercolor=p["border"],
+                        lightcolor=p["button_bg"], darkcolor=p["button_bg"],
+                        padding=(6, 1))
+        style.map("TMenubutton",
+                  background=[("disabled", p["panel_bg"]), ("pressed", p["select_bg"]),
+                              ("active", p["button_hover"])],
+                  foreground=[("disabled", p["muted"])])
+        # File-list canvas in tk::IconList looks up Treeview colours.
+        style.configure("Treeview", background=p["field_bg"], foreground=p["field_fg"],
+                        fieldbackground=p["field_bg"], bordercolor=p["border"],
+                        lightcolor=p["field_bg"], darkcolor=p["field_bg"])
+        style.map("Treeview",
+                  background=[("selected", p["select_bg"]), ("disabled", p["panel_bg"])],
+                  foreground=[("selected", p["select_fg"]), ("disabled", p["muted"])])
+        style.configure("Heading", background=p["button_bg"], foreground=p["fg"],
+                        bordercolor=p["border"], relief="raised")
+        style.configure("Treeview.Heading", background=p["button_bg"],
+                        foreground=p["fg"], bordercolor=p["border"])
     else:
         style.theme_use(_original_ttk_theme)
     # Named label styles used throughout (work in both themes).

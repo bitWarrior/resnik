@@ -328,6 +328,16 @@ class TestTargetPanel:
         assert "toolchain: rustc: rustc 1.96.1" in log
         assert "devices: no serial ports" in log
         assert app.status_msg.cget("text") == "Toolchain: OK for host"
+        assert "rustc not found" not in log
+
+    def test_missing_rustc_warns_that_build_is_unavailable(self, app, fake_toolchain):
+        fake_toolchain.status.rustc = Tool("rustc")
+        app.refresh_toolchain()
+        pump(app, lambda: not app.probing and app.dispatcher.pending == 0)
+        log = app.log.get_text()
+        assert "toolchain: rustc: not found" in log
+        assert "rustc not found — Semantic Check and Compile still work" in log
+        assert "Build and Run needs the Rust compiler" in log
 
     def test_changing_target_rerenders_requirements(self, app):
         app.var_target.set("esp32-c3")

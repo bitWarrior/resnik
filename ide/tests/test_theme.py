@@ -27,6 +27,10 @@ class TestApply:
         assert style.lookup("TButton", "background") == theme.DARK["button_bg"]
         assert style.lookup("Muted.TLabel", "foreground") == theme.DARK["muted"]
         assert tk_root.cget("background") == theme.DARK["bg"]
+        # Tk file dialog IconList uses these for the file-list canvas/text.
+        assert style.lookup("Treeview", "background") == theme.DARK["field_bg"]
+        assert style.lookup("Treeview", "foreground") == theme.DARK["field_fg"]
+        assert style.lookup("TMenubutton", "background") == theme.DARK["button_bg"]
         p = theme.apply(tk_root, "light")
         assert p is theme.LIGHT and not theme.is_dark()
         assert style.theme_use() == original

@@ -3,6 +3,7 @@
 import subprocess
 
 from resnik_ide.toolchain import (
+    RUSTUP_URL,
     Requirement,
     ToolchainStatus,
     Tool,
@@ -12,6 +13,7 @@ from resnik_ide.toolchain import (
     parse_installed_targets,
     probe,
     requirements,
+    rustc_missing_warning,
 )
 
 
@@ -72,6 +74,10 @@ class TestProbe:
         assert not st.rustup.present and not st.cargo.present
         assert st.installed_targets == [] and st.default_toolchain == ""
         assert str(st.rustc) == "rustc: not found"
+        msg = rustc_missing_warning()
+        assert "Semantic Check and Compile still work" in msg
+        assert "Build and Run" in msg
+        assert RUSTUP_URL in msg
 
     def test_run_failure_is_tolerated(self):
         def which(name):
