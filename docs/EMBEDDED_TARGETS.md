@@ -81,8 +81,15 @@ You need a recent stable toolchain (esp-hal 1.1 wants **1.88+**), stock
 rustup update stable
 rustup target add riscv32imc-unknown-none-elf
 rustup component add rust-src
-cargo install espflash
+cargo install espflash --locked     # compiles for a few minutes; lands in ~/.cargo/bin
+. "$HOME/.cargo/env"                # make sure ~/.cargo/bin is on PATH (distro rustup does not do this)
+sudo usermod -aG dialout $USER      # serial-port permission; log out/in once
 ```
+
+You do not install the ESP32 support crates yourself — the scaffold's
+`Cargo.toml` pins `esp-hal`, `esp-println`, `esp-backtrace` and
+`esp-bootloader-esp-idf`, and the first `cargo build` fetches and compiles
+them (network required; a minute or two, cached afterwards).
 
 Plug an **ESP32-C3-DevKit** (or any C3 board with USB-Serial/JTAG) into USB.
 It usually appears as `/dev/ttyACM0` on Linux.
@@ -150,3 +157,49 @@ Host check of the same source (no board required):
 resnik compile hello_world.hal --emit-exe
 ./hello_world
 ```
+
+## Troubleshooting
+
+Field notes from bringing up a real ESP32-C3 DevKit (2026-09-12); each of
+these was hit in practice.
+
+**`error[E0432]: unresolved import esp_hal` (also `esp_backtrace`,
+`esp_println`, `esp_bootloader_esp_idf`, and a missing `#[panic_handler]`).**
+You compiled with `--emit-exe` while `--target esp32-c3` (or `cortex-m`) was
+selected. `--emit-exe` hands the single generated `.rs` file to plain
+`rustc`, which has no way to supply the embedded runtime crates — only a
+Cargo project does. Drop `--emit-exe` for embedded targets and use
+`--emit-cargo <dir>`; then `cargo build` / `cargo run` inside that project.
+(In the IDE: Options… → Target & Build — untick *Build a native executable*,
+set *Cargo project dir*.)
+
+**Flashing needs a Cargo project.** `Build and Run on an embedded target
+needs a Cargo project` (IDE) or nothing to flash (CLI): set
+`--emit-cargo <dir>` and compile once — the scaffold's
+`.cargo/config.toml` carries the flash runner (`espflash flash --monitor`
+for ESP32-C3, `probe-rs run` commented in for Cortex-M).
+
+**`espflash: command not found` although `cargo install espflash`
+succeeded.** `cargo install` places binaries in `~/.cargo/bin`. When
+`rustup`/`cargo` come from the distribution (`/usr/bin`), nothing puts
+`~/.cargo/bin` on PATH. Fix for shells: `. "$HOME/.cargo/env"` (or add
+`~/.cargo/bin` to PATH in your profile). The Resnik IDE probes
+`~/.cargo/bin` directly and also appends it to the PATH of every tool it
+launches, so `cargo run`'s espflash runner resolves without shell setup.
+
+**`Error: × Failed to initialize input reader` right after
+`Flashing has completed!`.** The flash succeeded and the program is
+running; what failed is espflash's *interactive* serial monitor, which
+needs a real terminal on stdin (it installs CTRL+R/CTRL+C key handling).
+Anywhere stdin is not a TTY — an IDE, a script, a pipe — pass
+`--non-interactive` (espflash ≥ 3): serial output still streams, only the
+key reader is skipped. The Resnik IDE appends the flag automatically and
+its Stop button ends the monitor.
+
+**Port busy / boot mode confusion.** Only one program can usefully own
+`/dev/ttyACM0` at a time; a second opener toggling the modem-control lines
+can drop the chip into the ROM bootloader (`boot:0x4 (DOWNLOAD…)` in the
+boot log instead of `boot:0x8 (SPI_FAST_FLASH_BOOT)`). Close other monitors
+before flashing; `espflash reset --port /dev/ttyACM0` (with nothing else
+attached) gets you back to the application. The BOOT/RESET button dance in
+the hello-world section above also applies.

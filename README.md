@@ -149,8 +149,25 @@ Resnik can emit either hosted Rust or bare-metal firmware, selected with the
 | `cortex-m`         | `no_std` **stub** for ARM Cortex-M (semihosting `WRITE`; not a finished MCU port). |
 | `esp32-c3`         | `no_std` firmware for **ESP32-C3** (RISC-V) via `esp-hal`. USB-serial `WRITE`. |
 
+Once per machine (ESP32-C3; needs stable Rust ≥ 1.88 — stock rustc, not espup):
+
 ```bash
-rustup target add riscv32imc-unknown-none-elf && rustup component add rust-src && cargo install espflash
+rustup target add riscv32imc-unknown-none-elf   # RISC-V code generation
+rustup component add rust-src                   # esp-hal builds core from source
+cargo install espflash --locked                 # flasher + serial monitor (compiles for a few
+                                                # minutes; installs to ~/.cargo/bin — put that on
+                                                # PATH: . "$HOME/.cargo/env")
+sudo usermod -aG dialout $USER                  # serial-port permission (log out/in once)
+```
+
+The ESP32 libraries themselves (`esp-hal`, `esp-println`, `esp-backtrace`,
+`esp-bootloader-esp-idf`) are **not** installed by hand: the scaffold's
+`Cargo.toml` pins them, and the first `cargo build` downloads and compiles
+them (~130 crates, network required, a minute or two; instant afterwards).
+
+Then, per program:
+
+```bash
 resnik compile hello_world.hal --target esp32-c3 --emit-cargo ./firmware
 cd firmware && cargo run --release      # builds, flashes, opens the serial monitor
 ```
@@ -159,6 +176,15 @@ cd firmware && cargo run --release      # builds, flashes, opens the serial moni
 with the flash runner, `memory.x` for Cortex-M). The full walkthrough —
 Cortex-M stub layout, the ESP32-C3 hello world step by step, what works on
 `no_std` — is in [docs/EMBEDDED_TARGETS.md](docs/EMBEDDED_TARGETS.md).
+
+Common trip-ups (details and fixes in
+[docs/EMBEDDED_TARGETS.md → Troubleshooting](docs/EMBEDDED_TARGETS.md#troubleshooting)):
+
+| Symptom | Cause |
+| ------- | ----- |
+| `unresolved import esp_hal` (E0432) and friends from rustc | `--emit-exe` was combined with an embedded `--target`. `--emit-exe` builds a single file with plain rustc, which cannot supply the embedded runtime crates — use `--emit-cargo` and build/flash with cargo. |
+| `espflash: command not found` right after `cargo install espflash` | `cargo install` puts binaries in `~/.cargo/bin`, which is not on PATH when rustup/cargo come from the distro. Add it to PATH (`. "$HOME/.cargo/env"`). The IDE finds it there automatically. |
+| `espflash` fails with `Failed to initialize input reader` after flashing | Its interactive serial monitor needs a real terminal on stdin. From a script or IDE, pass `--non-interactive` (espflash ≥ 3); the Resnik IDE does this for you. |
 
 ### Templates & separate compilation
 

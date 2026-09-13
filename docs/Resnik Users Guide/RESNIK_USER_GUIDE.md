@@ -907,11 +907,13 @@ resnik-ide [program.hal]            # with the venv active
 | Target panel | Toolchain checklist with one-click **Install**, serial port / chip, **Build / Flash & Run / Monitor / Run on host / Stop** |
 | Status bar | File (`*` = unsaved), caret position, last result |
 
-**Shuttle flavour:** View → **Mission Elapsed Time** puts a `MET ddd:hh:mm:ss`
-clock in the status bar; the `PASS>` line under the log (Ctrl+L) accepts the
+**Shuttle flavour:** View → **Mission Elapsed Time** logs the current
+`MET ddd:hh:mm:ss` — T-0 is when Flash & Run last started firmware on the
+board (`LIFTOFF` in the log; zero pre-launch); the `PASS>` line under the log (Ctrl+L) accepts the
 crew keyboard vocabulary (`OPS 0 PRO` lists it; `SPEC 1 PRO` toolchain,
 `SPEC 2 PRO` options, `SPEC 67 PRO` the STS-1 story, `ITEM 1 EXEC` Semantic
-Check, `ITEM 2 EXEC` Compile, `ITEM 3 EXEC` Build and Run, `OPS 9 PRO`
+Check, `ITEM 2 EXEC` Compile, `ITEM 3 EXEC` Build and Run, `ITEM 6 EXEC`
+Mission Elapsed Time, `OPS 9 PRO`
 About; anything else answers `ILLEGAL ENTRY`); and a failed check/compile
 shows `FAULT — n ERRORS` in the status bar until the next clean run logs
 `GPC FAULT CLEARED`. The log opens with a PASS-style startup banner, and on
@@ -983,6 +985,8 @@ The command lines mirror "Hello World on ESP32-C3" in `docs/EMBEDDED_TARGETS.md`
 | Flash/Build refuses to start | A toolchain row is ✗ — the log names it; click Install |
 | Nothing happens on Run on host | Compile with `--emit-exe` (or use Build and Run) first |
 | Generic window icon on GNOME | `resnik-ide --install-desktop` once (or Options… → Desktop tab → Install); GNOME takes the icon from the `.desktop` entry, not from the window |
+| `unresolved import esp_hal` on Compile | `--emit-exe` is set while targeting `esp32-c3`/`cortex-m` — untick it in Options… and set `--emit-cargo` instead |
+| Flash & Run ends with `Failed to initialize input reader` | Old IDE build: espflash's monitor needs `--non-interactive` without a TTY — current IDE appends it automatically |
 
 ---
 
