@@ -47,9 +47,9 @@ the [desktop IDE](#ide). The same source flashes to an ESP32-C3 with
   `LOCK`/`LATCHED`, `READALL`/`FILE`, `WRITE` format controls, `SUBBIT`, and
   others — the full keyword-by-keyword table is in
   [docs/LANGUAGE_SUPPORT.md](docs/LANGUAGE_SUPPORT.md). On `no_std` targets,
-  `VECTOR`/`MATRIX`, the math built-ins (via `libm`) and `COMPOOL` (via
-  `critical-section`) work; `SCHEDULE`/`TASK`, `READ` and `CHARACTER`
-  variables still need
+  `VECTOR`/`MATRIX`, the math built-ins (via `libm`), `COMPOOL` (via
+  `critical-section`) and `SCHEDULE`/`TASK` (via a generated cyclic
+  executive) work; `WAIT`, `READ` and `CHARACTER` variables still need
   `std` and emit a `compile_error!`.
 
 ## Installation
@@ -265,6 +265,7 @@ docs/         specifications, guides, examples
 python -m pytest                            # unit tests (no rustc needed)
 ./tests/regression/run_regression.sh        # compile + run every example (needs rustc)
 ./tests/regression/run_embedded_build.sh    # cargo-build examples for esp32-c3 (no board)
+./tests/regression/run_exec_semantics.sh    # cyclic-executive semantics (fake clock, needs rustc)
 ```
 
 The full project layout, test-suite details, coverage and regression notes

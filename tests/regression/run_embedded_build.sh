@@ -47,12 +47,14 @@ export CARGO_TERM_COLOR=never
 
 EXAMPLES_DIR="$GIT_ROOT/docs/HAL-S-Source-Code-Examples"
 
-# Curated: inside today's no_std subset (no SCHEDULE/TASK, READ,
-# or CHARACTER variables — roadmap item 2b and the CHARACTER/alloc gap).
+# Curated: inside today's no_std subset (no READ or CHARACTER
+# variables — the CHARACTER/alloc gap).
 # COMPOOL builds via the critical-section CsMutex (item 2a).
 # VECTOR/MATRIX + math intrinsics build via the libm prelude (item 1).
+# SCHEDULE/TASK builds via the hal_exec cyclic executive (item 2b).
 ESP32_CASES=(
     hello_word/hello_world
+    exec_two_rates/exec_two_rates
     kalman_filter/kalman_filter
     linear_algebra_test/linear_algebra_test
     tensor_math/tensor_math

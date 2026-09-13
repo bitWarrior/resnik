@@ -3,7 +3,8 @@
 Plan for resolving the four constraints that limit HAL/S programs on
 embedded targets (ESP32-C3 / Cortex-M), found while building the XIAO
 INS-over-Bluetooth project. Status (2026-09-12): **items 0 and 4 implemented** (embedded build tier +
-scaffold-once with `src/shim.rs`); items 1, 2a and 3 implemented; item 2b (cyclic executive — design doc first) open.
+scaffold-once with `src/shim.rs`); items 1, 2a and 3 implemented; item 2b (cyclic executive)
+implemented per `docs/CYCLIC_EXECUTIVE_DESIGN.md` — **all roadmap items done**.
 
 Ordering is by leverage: item 4 unblocks project work immediately and is
 small; 3 is small; 1 is medium; 2 is the big one and is split.

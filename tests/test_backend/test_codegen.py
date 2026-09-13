@@ -2157,13 +2157,13 @@ class TestEventSignalWaitHostStub:
     def test_event_declaration_parses_to_bool_flag(self) -> None:
         errs, code = self._gen("T: PROGRAM; DECLARE E EVENT; CLOSE T;")
         assert not errs
-        assert "static E: std::sync::atomic::AtomicBool" in code
+        assert "static E: core::sync::atomic::AtomicBool" in code
 
     def test_signal_sets_flag_and_emits_advisory(self) -> None:
         errs, code = self._gen(
             "T: PROGRAM; DECLARE E EVENT; SIGNAL E; CLOSE T;")
         assert not errs
-        assert "E.store(true, std::sync::atomic::Ordering::SeqCst);" in code
+        assert "E.store(true, core::sync::atomic::Ordering::SeqCst);" in code
         assert "advisory host stub" in code and "SIGNAL E" in code
 
     def test_wait_event_is_nonblocking_advisory(self) -> None:
@@ -2815,13 +2815,13 @@ class TestWaitForEventExpression:
         errs, code = self._run(
             "T: PROGRAM; DECLARE E EVENT; CLOSE T;")
         assert not errs
-        assert "static E: std::sync::atomic::AtomicBool" in code
+        assert "static E: core::sync::atomic::AtomicBool" in code
 
     def test_signal_stores_true(self) -> None:
         errs, code = self._run(
             "T: PROGRAM; DECLARE E EVENT; SIGNAL E; CLOSE T;")
         assert not errs
-        assert "E.store(true, std::sync::atomic::Ordering::SeqCst);" in code
+        assert "E.store(true, core::sync::atomic::Ordering::SeqCst);" in code
 
     def test_wait_for_builds_boolean_tree(self) -> None:
         errs, code = self._run(
@@ -2829,15 +2829,15 @@ class TestWaitForEventExpression:
             "WAIT FOR (A AND B) OR C; CLOSE T;")
         assert not errs
         # AND/OR over EVENT leaves are eager & / | with atomic loads
-        assert "A.load(std::sync::atomic::Ordering::SeqCst) &" in code
-        assert "| C.load(std::sync::atomic::Ordering::SeqCst)" in code
+        assert "A.load(core::sync::atomic::Ordering::SeqCst) &" in code
+        assert "| C.load(core::sync::atomic::Ordering::SeqCst)" in code
         assert "while !(" in code
 
     def test_event_condition_in_if(self) -> None:
         errs, code = self._run(
             "T: PROGRAM; DECLARE E EVENT; IF E THEN WRITE(6) 'x'; CLOSE T;")
         assert not errs
-        assert "if E.load(std::sync::atomic::Ordering::SeqCst)" in code
+        assert "if E.load(core::sync::atomic::Ordering::SeqCst)" in code
 
     def test_set_stores_true_and_labels_op(self) -> None:
         """`SET <event>;` is HAL/S's state-based verb for raising an event
@@ -2848,7 +2848,7 @@ class TestWaitForEventExpression:
         errs, code = self._run(
             "T: PROGRAM; DECLARE E EVENT; SET E; CLOSE T;")
         assert not errs
-        assert "E.store(true, std::sync::atomic::Ordering::SeqCst);" in code
+        assert "E.store(true, core::sync::atomic::Ordering::SeqCst);" in code
         assert "SET E" in code
         # Advisory eprintln! names the source verb, not "SIGNAL".
         assert "[hal_rt] SET E" in code
@@ -2859,7 +2859,7 @@ class TestWaitForEventExpression:
         errs, code = self._run(
             "T: PROGRAM; DECLARE E EVENT; RESET E; CLOSE T;")
         assert not errs
-        assert "E.store(false, std::sync::atomic::Ordering::SeqCst);" in code
+        assert "E.store(false, core::sync::atomic::Ordering::SeqCst);" in code
         assert "RESET E" in code
         assert "flag cleared" in code
 
@@ -2871,9 +2871,9 @@ class TestWaitForEventExpression:
         assert not errs
         # Two `store(true, ...)` and one `store(false, ...)` in source order.
         assert code.count(
-            "E.store(true, std::sync::atomic::Ordering::SeqCst);") == 2
+            "E.store(true, core::sync::atomic::Ordering::SeqCst);") == 2
         assert code.count(
-            "E.store(false, std::sync::atomic::Ordering::SeqCst);") == 1
+            "E.store(false, core::sync::atomic::Ordering::SeqCst);") == 1
 
     def test_set_reset_produce_signal_node_with_op(self) -> None:
         """AST-level guard: SET and RESET reuse SignalNode with a

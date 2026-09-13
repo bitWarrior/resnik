@@ -192,14 +192,16 @@ class TestEmbeddedCompileError:
         assert "compile_error!" not in host and "FloatExt" not in host
 
     @pytest.mark.parametrize("target", ["cortex-m", "esp32-c3"])
-    def test_task_emits_compile_error(self, target: str) -> None:
+    def test_task_no_longer_guarded(self, target: str) -> None:
+        # no_std roadmap item 2b: SCHEDULE/TASK lower to the hal_exec cyclic
+        # executive on embedded targets instead of tripping compile_error!.
         ast = ProgramNode(
             name="P",
             tasks=[TaskNode(name="T", statements=[])],
         )
         code = RustCodeGenerator(target=target).generate(ast)
-        assert "compile_error!" in code
-        assert "SCHEDULE/TASK" in code
+        assert "compile_error!" not in code
+        assert "mod hal_exec" in code
 
     @pytest.mark.parametrize("target", ["cortex-m", "esp32-c3"])
     def test_compool_no_longer_guarded(self, target: str) -> None:
@@ -391,10 +393,15 @@ class TestEmbeddedFloatMath:
             # and the same source is unguarded on the host
             assert "compile_error" not in self._code(src, "host")
 
-    def test_schedule_still_guarded_on_embedded(self):
-        src = ("T: PROGRAM;\n  A: TASK;\n  CLOSE A;\n"
-               "  SCHEDULE A PRIORITY(1);\nCLOSE T;\n")
-        assert "SCHEDULE/TASK" in self._code(src, "esp32-c3")
+    def test_wait_still_guarded_on_embedded(self):
+        # WAIT stalls only the issuing process (HAL/S spec 8.6) — a blocking
+        # delay inside the cooperative superloop would stall every task, so
+        # it stays a compile_error on embedded (and only there).
+        src = ("T: PROGRAM;\n  DECLARE X INTEGER INITIAL(0);\n"
+               "  WAIT UNTIL X > 1;\nCLOSE T;\n")
+        emb = self._code(src, "esp32-c3")
+        assert "compile_error" in emb and "8.6" in emb
+        assert "compile_error" not in self._code(src, "host")
 
     def test_embedded_scaffolds_carry_libm(self, tmp_path):
         from resnik.backend.codegen import RustCodeGenerator
@@ -467,3 +474,109 @@ class TestEmbeddedCompool:
             assert 'critical-section = "1.2"' in toml
             if target == "cortex-m":
                 assert 'features = ["critical-section-single-core"]' in toml
+
+class TestCyclicExecutive:
+    """no_std roadmap item 2b: SCHEDULE/TASK lower to a cooperative cyclic
+    executive (mod hal_exec) on embedded targets — priority-picked superloop,
+    microsecond ticks, no-drift periods. Hosted output keeps the thread
+    runtime unchanged. Design: docs/CYCLIC_EXECUTIVE_DESIGN.md."""
+
+    TWO_RATE_SRC = (
+        "T: PROGRAM;\n"
+        "  FAST: TASK;\n"
+        "    WRITE(6) 'F';\n"
+        "  CLOSE FAST;\n"
+        "  SLOW: TASK;\n"
+        "    WRITE(6) 'S';\n"
+        "  CLOSE SLOW;\n"
+        "  SCHEDULE FAST PRIORITY(2) REPEAT EVERY 0.5;\n"
+        "  SCHEDULE SLOW IN 1.0 REPEAT EVERY 2.0;\n"
+        "CLOSE T;\n"
+    )
+
+    def _code(self, src: str, target: str) -> str:
+        from resnik import Lexer, Parser
+        from resnik.backend.codegen import RustCodeGenerator
+        p = Parser()
+        ast = p.parse(Lexer().tokenize(src, "<t>"))
+        assert not p.errors, p.errors
+        return RustCodeGenerator(target=target).generate(ast)
+
+    def test_slots_table_and_run_emitted(self):
+        code = self._code(self.TWO_RATE_SRC, "esp32-c3")
+        assert "compile_error" not in code
+        assert "mod hal_exec" in code
+        assert 'static __SLOT_FAST: hal_exec::Slot = hal_exec::Slot::new("FAST"' in code
+        assert 'static __SLOT_SLOW: hal_exec::Slot = hal_exec::Slot::new("SLOW"' in code
+        assert "static __EXEC_TABLE: [&hal_exec::Slot; 2]" in code
+        assert "hal_exec::run(&__EXEC_TABLE, __exec_now_us, __exec_overrun)" in code
+        assert "std::" not in code  # whole file stays core-clean
+
+    def test_schedule_arms_in_microseconds(self):
+        # HAL/S times are seconds; the executive ticks in u64 microseconds
+        # (design decision 1) — conversion happens at the arming site.
+        code = self._code(self.TWO_RATE_SRC, "esp32-c3")
+        assert ("hal_exec::arm(&__SLOT_FAST, __exec_now_us(), 0u64, "
+                "(((0.5) as f64 * 1_000_000.0) as u64), ((2) as i32));") in code
+        # SCHEDULE ... IN 1.0 converts the initial delay the same way.
+        assert ("hal_exec::arm(&__SLOT_SLOW, __exec_now_us(), "
+                "(((1.0) as f64 * 1_000_000.0) as u64), "
+                "(((2.0) as f64 * 1_000_000.0) as u64), 0i32);") in code
+
+    def test_one_shot_schedule_has_zero_period(self):
+        src = ("T: PROGRAM;\n  A: TASK;\n  CLOSE A;\n"
+               "  SCHEDULE A PRIORITY(1);\nCLOSE T;\n")
+        code = self._code(src, "esp32-c3")
+        assert "hal_exec::arm(&__SLOT_A, __exec_now_us(), 0u64, 0u64, ((1) as i32));" in code
+
+    def test_terminate_lowerings(self):
+        # Named TERMINATE idles that slot; bare TERMINATE inside a task is
+        # self-termination (idle self + return); bare TERMINATE at program
+        # level idles every slot (HAL/S spec 8.5 dependent-process cascade).
+        src = ("T: PROGRAM;\n"
+               "  A: TASK;\n    TERMINATE;\n  CLOSE A;\n"
+               "  B: TASK;\n  CLOSE B;\n"
+               "  SCHEDULE A PRIORITY(1);\n"
+               "  TERMINATE B;\n"
+               "  TERMINATE;\n"
+               "CLOSE T;\n")
+        code = self._code(src, "esp32-c3")
+        assert "hal_exec::idle(&__SLOT_B);" in code
+        assert "hal_exec::idle(&__SLOT_A);" in code and "return;" in code
+        assert "for __s in __EXEC_TABLE.iter() { hal_exec::idle(__s); }" in code
+
+    def test_time_base_per_target(self):
+        esp = self._code(self.TWO_RATE_SRC, "esp32-c3")
+        assert "Instant" in esp and "hal_exec_now_us" not in esp
+        cm = self._code(self.TWO_RATE_SRC, "cortex-m")
+        assert 'extern "C" { fn hal_exec_now_us() -> u64; }' in cm
+
+    def test_host_runtime_unchanged(self):
+        code = self._code(self.TWO_RATE_SRC, "host")
+        assert "hal_exec" not in code
+        assert "__tasks" in code and "schedule(" in code
+
+    def test_no_thread_bookkeeping_on_embedded(self):
+        code = self._code(self.TWO_RATE_SRC, "esp32-c3")
+        assert "__tasks" not in code and "Vec<" not in code
+        assert "JoinHandle" not in code
+
+    def test_event_statics_are_core_atomics_on_embedded(self):
+        src = ("T: PROGRAM;\n  DECLARE DONE EVENT;\n"
+               "  SIGNAL DONE;\nCLOSE T;\n")
+        code = self._code(src, "esp32-c3")
+        assert "core::sync::atomic::AtomicBool" in code
+        assert "std::" not in code
+
+    def test_schedule_of_unknown_task_prints_debug(self):
+        src = "T: PROGRAM;\n  SCHEDULE GHOST PRIORITY(1);\nCLOSE T;\n"
+        code = self._code(src, "esp32-c3")
+        assert "[hal_exec] SCHEDULE GHOST (task undefined here)" in code
+        assert "compile_error" not in code
+
+    def test_shim_stub_documents_now_us_hook(self, tmp_path):
+        from resnik.backend.codegen import RustCodeGenerator
+        d = tmp_path / "fw"
+        RustCodeGenerator(target="cortex-m").emit_cargo_project(
+            "#![no_std]\n#![no_main]\nfn b() {}\n", d, name="fw")
+        assert "hal_exec_now_us" in (d / "src" / "shim.rs").read_text()

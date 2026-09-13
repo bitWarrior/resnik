@@ -460,6 +460,8 @@ class RustCodeGenerator:
         if self._uses_runtime(ast) or (
                 self.spec.embedded and self._uses_float_math(ast)):
             self._emit_prelude()
+        if self.spec.embedded and self._uses_exec(ast):
+            self._emit_hal_exec()
 
         # COMPOOL shared data lowers to module-level statics so every generated
         # function (program + scheduled tasks) can reach it. Emit each COMPOOL
@@ -484,10 +486,12 @@ class RustCodeGenerator:
                     and node.type_spec.data_type == DataType.EVENT):
                 for ident in node.identifiers:
                     self._event_vars.add(ident.lower())
+                    # core:: paths so events work on no_std too (riscv32imc
+                    # has atomic load/store, which is all an EVENT needs).
                     self.emitter.emit_line(
                         f"static {ident.upper()}: "
-                        "std::sync::atomic::AtomicBool = "
-                        "std::sync::atomic::AtomicBool::new(false);")
+                        "core::sync::atomic::AtomicBool = "
+                        "core::sync::atomic::AtomicBool::new(false);")
         if self._event_vars:
             self.emitter.emit_line()
 
@@ -911,6 +915,112 @@ class RustCodeGenerator:
         "TRUNCATE": "trunc",
     }
 
+
+    # Cyclic executive for SCHEDULE/TASK on bare metal
+    # (docs/CYCLIC_EXECUTIVE_DESIGN.md): a static table of task slots run by
+    # a cooperative superloop -- highest-priority due slot runs to
+    # completion; declaration order breaks ties; periods accumulate from the
+    # due time (no drift); overruns print a debug line. Single execution
+    # context: Cells are sound because ISRs never touch slots.
+    _HAL_EXEC = """mod hal_exec {
+    //! Cooperative cyclic executive for HAL/S SCHEDULE/TASK (no_std).
+    #![allow(dead_code)]
+    use core::cell::Cell;
+
+    #[derive(Clone, Copy, PartialEq)]
+    pub enum State { Idle, Armed }
+
+    pub struct Slot {
+        pub name: &'static str,
+        pub body: fn(),
+        pub priority: Cell<i32>,
+        pub period_us: Cell<u64>,   // 0 = one-shot
+        pub next_due_us: Cell<u64>,
+        pub state: Cell<State>,
+    }
+    // Single-context executive: slots are only ever touched from main.
+    unsafe impl Sync for Slot {}
+
+    impl Slot {
+        pub const fn new(name: &'static str, body: fn()) -> Self {
+            Slot { name, body, priority: Cell::new(0), period_us: Cell::new(0),
+                   next_due_us: Cell::new(0), state: Cell::new(State::Idle) }
+        }
+    }
+
+    pub fn arm(s: &Slot, now_us: u64, delay_us: u64, period_us: u64, priority: i32) {
+        s.priority.set(priority);
+        s.period_us.set(period_us);
+        s.next_due_us.set(now_us + delay_us);
+        s.state.set(State::Armed);
+    }
+
+    pub fn idle(s: &Slot) { s.state.set(State::Idle); }
+
+    pub fn run(table: &[&Slot], now_us: fn() -> u64,
+               overrun: fn(&'static str)) -> ! {
+        loop {
+            let now = now_us();
+            let mut best: Option<&Slot> = None;
+            for s in table {
+                if s.state.get() == State::Armed && s.next_due_us.get() <= now {
+                    // strict > keeps the earliest table index on ties
+                    if best.map_or(true, |b| s.priority.get() > b.priority.get()) {
+                        best = Some(s);
+                    }
+                }
+            }
+            if let Some(s) = best {
+                (s.body)();
+                if s.state.get() == State::Armed {   // body may self-TERMINATE
+                    let p = s.period_us.get();
+                    if p == 0 {
+                        s.state.set(State::Idle);
+                    } else {
+                        let due = s.next_due_us.get() + p;  // no drift
+                        if now_us() > due { overrun(s.name); }
+                        s.next_due_us.set(due);
+                    }
+                }
+            }
+        }
+    }
+}
+"""
+
+    def _uses_exec(self, node: ASTNode) -> bool:
+        """True if the tree needs the cyclic executive on an embedded target."""
+        for n in self._walk(node):
+            if isinstance(n, (ScheduleNode, TaskNode, TerminateNode)):
+                return True
+        return False
+
+    def _emit_hal_exec(self) -> None:
+        for line in self._HAL_EXEC.split("\n"):
+            self.emitter.emit_line(line)
+        # Target time base + overrun sink for hal_exec::run.
+        if self.spec.entry == "esp-hal":
+            self.emitter.emit_line("fn __exec_now_us() -> u64 {")
+            self.emitter.emit_line(
+                "    esp_hal::time::Instant::now()"
+                ".duration_since_epoch().as_micros()")
+            self.emitter.emit_line("}")
+            self.emitter.emit_line(
+                'fn __exec_overrun(n: &\'static str) '
+                '{ println!("[hal_exec] OVERRUN {}", n); }')
+        else:
+            self.emitter.emit_line(
+                "// Cortex-M has no portable clock: the shim provides it "
+                "(see src/shim.rs).")
+            self.emitter.emit_line(
+                'extern "C" { fn hal_exec_now_us() -> u64; }')
+            self.emitter.emit_line(
+                "fn __exec_now_us() -> u64 { unsafe { hal_exec_now_us() } }")
+            self.emitter.emit_line(
+                'fn __exec_overrun(n: &\'static str) '
+                '{ hprintln!("[hal_exec] OVERRUN {}", n); }')
+        self.emitter.emit_line()
+
     def _uses_float_math(self, node: ASTNode) -> bool:
         """True if the tree calls a scalar math built-in or uses ** — the
         f32 methods behind them need FloatExt/libm on no_std targets."""
@@ -1017,10 +1127,10 @@ class RustCodeGenerator:
             reasons.append(
                 "character concatenation (CAT / ||) allocates a String -- "
                 "not yet lowered for no_std")
-        if any(isinstance(n, (ScheduleNode, TaskNode)) for n in self._walk(ast)):
+        if any(isinstance(n, WaitNode) for n in self._walk(ast)):
             reasons.append(
-                "SCHEDULE/TASK lower to std::thread -- needs a superloop/RTIC "
-                "executor on bare metal -- backend step 5")
+                "WAIT stalls only the issuing process (HAL/S spec 8.6); a "
+                "cooperative executive cannot honor that yet -- design v2")
         for r in reasons:
             self.emitter.emit_line(f'compile_error!("resnik: {r}");')
         if reasons:
@@ -1329,9 +1439,25 @@ class RustCodeGenerator:
             self._generate_structure_def(st)
             self.emitter.emit_line()
 
-        # Nested TASK blocks -> standalone functions (each runs on its own thread)
+        # Nested TASK blocks -> standalone functions (host: thread bodies;
+        # embedded: cyclic-executive slot bodies).
         for task in node.tasks:
             self._generate_task_function(task)
+            self.emitter.emit_line()
+
+        # Embedded: one static Slot per TASK plus the executive table
+        # (declaration order == priority tiebreak order).
+        self._exec_tasks = [t.name for t in node.tasks]
+        if self.spec.embedded and node.tasks:
+            for t in node.tasks:
+                self.emitter.emit_line(
+                    f'static __SLOT_{t.name.upper()}: hal_exec::Slot = '
+                    f'hal_exec::Slot::new("{t.name.upper()}", '
+                    f'{self._rust_ident(t.name)});')
+            refs = ", ".join(f"&__SLOT_{t.name.upper()}" for t in node.tasks)
+            self.emitter.emit_line(
+                f"static __EXEC_TABLE: [&hal_exec::Slot; {len(node.tasks)}] "
+                f"= [{refs}];")
             self.emitter.emit_line()
 
         # Generate procedures (before main)
@@ -1362,8 +1488,14 @@ class RustCodeGenerator:
         self._generate_unit_body(node.declarations, body)
         self.in_main = False
         if self.spec.embedded:
-            # A no_std entry never returns; park the core when done.
-            self.emitter.emit_line("loop {}")
+            if node.tasks:
+                # Program body done: hand the core to the cyclic executive.
+                self.emitter.emit_line(
+                    "hal_exec::run(&__EXEC_TABLE, __exec_now_us, "
+                    "__exec_overrun)")
+            else:
+                # A no_std entry never returns; park the core when done.
+                self.emitter.emit_line("loop {}")
         self.emitter.emit_block_end()
 
     def _generate_task_function(self, task: TaskNode) -> None:
@@ -1378,7 +1510,10 @@ class RustCodeGenerator:
         self.emitter.emit_function_header(
             self._rust_ident(task.name), [], None, is_public=False
         )
+        prev_task = getattr(self, "_cur_task_name", None)
+        self._cur_task_name = task.name
         self._generate_unit_body(task.declarations, task.statements)
+        self._cur_task_name = prev_task
         self.emitter.emit_block_end()
 
     def _contains_schedule(self, statements: list) -> bool:
@@ -1393,7 +1528,10 @@ class RustCodeGenerator:
     def _generate_unit_body(self, declarations: list, statements: list) -> None:
         """Emit a function body: declarations, statements, and (if any SCHEDULE
         is present) a join handle vector plus a join loop before returning."""
-        threaded = self._contains_schedule(statements)
+        # Embedded targets run tasks on the cyclic executive, not threads:
+        # no join-handle bookkeeping there.
+        threaded = (not self.spec.embedded
+                    and self._contains_schedule(statements))
         if threaded:
             self.emitter.emit_line(
                 "let mut __tasks: Vec<std::thread::JoinHandle<()>> = Vec::new();"
@@ -2685,7 +2823,7 @@ class RustCodeGenerator:
         # EVENT read -> atomic load of its shared flag.
         if node.name.lower() in getattr(self, "_event_vars", set()):
             return (f"{node.name.upper()}"
-                    ".load(std::sync::atomic::Ordering::SeqCst)")
+                    ".load(core::sync::atomic::Ordering::SeqCst)")
         # EXTERNAL variable -> VOLATILE read of the foreign `extern "C"`
         # static: something outside this program writes it (hardware, an ISR,
         # a shim), so the optimizer must not cache or elide the load.
@@ -3581,13 +3719,17 @@ class RustCodeGenerator:
 
     def _generate_schedule(self, node: ScheduleNode) -> None:
         """Generate a SCHEDULE statement.
-
+\n
         Timed/cyclic form (SCHEDULE T IN d [REPEAT EVERY p]) spawns a thread
         that sleeps for the initial delay, then either runs once or repeats on
         the period until a per-task cancel flag is set. Priority form keeps the
         existing fire-and-join model.
         """
         task_fn = node.task_name.lower()
+
+        if self.spec.embedded:
+            self._generate_schedule_embedded(node)
+            return
 
         if node.delay is not None:
             # Timed/cyclic: self-managed thread + cancel flag (for CANCEL).
@@ -3655,6 +3797,36 @@ class RustCodeGenerator:
                 f'schedule_pending("{node.task_name}", {priority});'
             )
 
+    def _generate_schedule_embedded(self, node: ScheduleNode) -> None:
+        """SCHEDULE on bare metal: arm the task's executive slot.
+
+        HAL/S times are seconds; the executive ticks in microseconds
+        (design decision 1), so delay/period convert at the arming site.
+        """
+        known = {n.lower() for n in getattr(self, "_exec_tasks", [])}
+        if node.task_name.lower() not in known:
+            self._emit_debug_print(
+                f"[hal_exec] SCHEDULE {node.task_name} (task undefined here)")
+            return
+        slot = f"__SLOT_{node.task_name.upper()}"
+        us = "1_000_000.0"
+        delay = (f"((({self._generate_expression(node.delay)}) as f64 * {us}) as u64)"
+                 if node.delay is not None else "0u64")
+        period = (f"((({self._generate_expression(node.period)}) as f64 * {us}) as u64)"
+                  if node.period is not None else "0u64")
+        prio = (f"(({self._generate_expression(node.priority)}) as i32)"
+                if node.priority is not None else "0i32")
+        self.emitter.emit_comment(f"SCHEDULE {node.task_name}")
+        self.emitter.emit_line(
+            f"hal_exec::arm(&{slot}, __exec_now_us(), {delay}, {period}, {prio});")
+
+    def _emit_debug_print(self, msg: str) -> None:
+        """One line on the target's console sink."""
+        if self.spec.write_sink == "hprintln":
+            self.emitter.emit_line(f'hprintln!("{msg}");')
+        else:
+            self.emitter.emit_line(f'println!("{msg}");')
+
     def _generate_wait(self, node: WaitNode) -> None:
         """WAIT UNTIL <cond>; -> spin-wait until the condition holds.
         WAIT <event>; -> host stub (advisory; does NOT block, does NOT model
@@ -3674,7 +3846,7 @@ class RustCodeGenerator:
             if ev.lower() in getattr(self, "_event_vars", set()):
                 self.emitter.emit_line(
                     f"let _ = {ev.upper()}"
-                    ".load(std::sync::atomic::Ordering::SeqCst);")
+                    ".load(core::sync::atomic::Ordering::SeqCst);")
             else:
                 self.emitter.emit_line(f"let _ = {ev.lower()};")
             return
@@ -3720,16 +3892,19 @@ class RustCodeGenerator:
         rust_value_word = "cleared" if op == "RESET" else "raised"
         ev = node.name.lower()
         self.emitter.emit_comment(
-            f"{op} {node.name} (host stub: advisory, latched flag)")
+            f"{op} {node.name} (latched flag)")
         if ev in getattr(self, "_event_vars", set()):
             self.emitter.emit_line(
                 f"{node.name.upper()}.store({value_expr}, "
-                "std::sync::atomic::Ordering::SeqCst);")
+                "core::sync::atomic::Ordering::SeqCst);")
         else:
             self.emitter.emit_line(f"{ev} = {value_expr};")
-        self.emitter.emit_line(
-            f'eprintln!("[hal_rt] {op} {node.name} '
-            f'(flag {rust_value_word}; advisory host stub, not real-time)");')
+        # On embedded the latched atomic store IS the semantic; the advisory
+        # notice is host-stub noise only.
+        if not self.spec.embedded:
+            self.emitter.emit_line(
+                f'eprintln!("[hal_rt] {op} {node.name} '
+                f'(flag {rust_value_word}; advisory host stub, not real-time)");')
 
     def _generate_bit_op(self, node: SignalNode, op: str) -> None:
         """SET/RESET on a BIT variable with an explicit position list.
@@ -3795,6 +3970,36 @@ class RustCodeGenerator:
         Bare TERMINATE ends the current thread/process (return). A named
         TERMINATE is a logged stub -- std::thread has no cancellation.
         """
+        if self.spec.embedded:
+            known = {n.lower() for n in getattr(self, "_exec_tasks", [])}
+            if node.task_name:
+                if node.task_name.lower() in known:
+                    self.emitter.emit_comment(f"TERMINATE {node.task_name}")
+                    self.emitter.emit_line(
+                        f"hal_exec::idle(&__SLOT_{node.task_name.upper()});")
+                else:
+                    self._emit_debug_print(
+                        f"[hal_exec] TERMINATE {node.task_name} "
+                        "(task undefined here)")
+                return
+            cur = getattr(self, "_cur_task_name", None)
+            if cur is not None:
+                # spec 8.5 rule 2: bare TERMINATE = self-termination.
+                self.emitter.emit_comment("TERMINATE (self)")
+                self.emitter.emit_line(
+                    f"hal_exec::idle(&__SLOT_{cur.upper()});")
+                self.emitter.emit_line("return;")
+            else:
+                # In the program body: terminate the program AND its
+                # dependents (all tasks) -- idle everything and halt.
+                self.emitter.emit_comment(
+                    "TERMINATE (program + dependents; spec 8.5)")
+                if getattr(self, "_exec_tasks", []):
+                    self.emitter.emit_line(
+                        "for __s in __EXEC_TABLE.iter() "
+                        "{ hal_exec::idle(__s); }")
+                self.emitter.emit_line("loop {}")
+            return
         if node.task_name:
             self.emitter.emit_comment(
                 f"TERMINATE {node.task_name} (std::thread has no cancellation)"
@@ -3965,6 +4170,13 @@ class RustCodeGenerator:
         '//!\n'
         '//!     #[no_mangle]\n'
         '//!     pub extern "C" fn read_sensor(ch: i32) { /* ... */ }\n'
+        '//!\n'
+        '//! On the cortex-m profile, programs that use SCHEDULE/TASK also\n'
+        '//! need a monotonic microsecond clock from this file (the esp32-c3\n'
+        '//! profile reads its own hardware timer instead):\n'
+        '//!\n'
+        '//!     #[no_mangle]\n'
+        '//!     pub extern "C" fn hal_exec_now_us() -> u64 { /* SysTick/DWT */ }\n'
         '#![allow(dead_code, unused_imports)]\n'
     )
 

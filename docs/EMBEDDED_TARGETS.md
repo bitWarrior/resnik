@@ -26,8 +26,17 @@ visible on the serial console). `COMPOOL` shared data works too: on bare
 metal it lowers to a critical-section-backed mutex (interrupt-safe on a
 single core; the scaffold carries the `critical-section` crate, with
 esp-hal providing the implementation on ESP32-C3 and the
-`critical-section-single-core` feature on Cortex-M). Features whose
-lowering still depends on `std` — `SCHEDULE`/`TASK`, `READ`, and
+`critical-section-single-core` feature on Cortex-M). `SCHEDULE`/`TASK`
+run on a generated cooperative cyclic executive: each task becomes a
+static slot (priority, period, next-due tick in µs) and `main` ends in a
+priority-picked superloop instead of `loop {}` — see
+[docs/CYCLIC_EXECUTIVE_DESIGN.md](CYCLIC_EXECUTIVE_DESIGN.md). On
+`esp32-c3` the time base is the esp-hal system timer; on `cortex-m` your
+`src/shim.rs` must export `extern "C" fn hal_exec_now_us() -> u64` (the
+stub's header shows the signature) or the link fails with
+`undefined symbol: hal_exec_now_us`. Features whose
+lowering still depends on `std` — `WAIT` (a blocking wait would stall
+every task in the superloop, violating HAL/S §8.6), `READ`, and
 `CHARACTER` variables / concatenation (heap allocation) — emit a
 `compile_error!` naming the
 feature rather than failing silently. These are on the embedded roadmap
@@ -78,7 +87,8 @@ CLOSE HELLO;
 
 `WRITE(6)` is standard output. On `esp32-c3` it becomes `esp_println::println!`
 on the DevKit USB serial / JTAG console. Stay inside the `no_std` subset
-(no `VECTOR` / `MATRIX`, `SCHEDULE` / `TASK`, or `COMPOOL`).
+(no `READ` or `CHARACTER` variables; `VECTOR`/`MATRIX`, `COMPOOL` and
+`SCHEDULE`/`TASK` all lower).
 
 You can copy that file or save the same text as `hello_world.hal` in the
 current directory.

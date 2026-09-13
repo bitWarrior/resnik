@@ -1,0 +1,23 @@
+C =====================================================================
+C EXEC_TWO_RATES - two tasks at different rates sharing a COMPOOL
+C
+C On an embedded target (--target esp32-c3) the generated cyclic
+C executive runs FAST every 0.5 s (priority 2) and SLOW every 2.0 s
+C (priority 1), forever. On the host, each PRIORITY schedule runs one
+C representative cycle and the program exits (regression-friendly).
+C =====================================================================
+POOL: COMPOOL;
+  DECLARE TICKS INTEGER INITIAL(0);
+CLOSE POOL;
+EXEC_TWO_RATES: PROGRAM;
+  FAST: TASK;
+    TICKS = TICKS + 1;
+    WRITE(6) 'FAST TICK', TICKS;
+  CLOSE FAST;
+  SLOW: TASK;
+    WRITE(6) 'SLOW SEES', TICKS;
+  CLOSE SLOW;
+  WRITE(6) 'EXEC START';
+  SCHEDULE FAST PRIORITY(2) REPEAT EVERY 0.5;
+  SCHEDULE SLOW PRIORITY(1) REPEAT EVERY 2.0;
+CLOSE EXEC_TWO_RATES;

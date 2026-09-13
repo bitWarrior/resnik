@@ -56,6 +56,7 @@ Resnik has two test layers:
 | Unit tests | `python -m pytest` | Lexer, parser, and Python-side Rust codegen | No |
 | Regression | `./tests/regression/run_regression.sh` | Compile example `.hal` files to binaries and run them | Yes |
 | Embedded build | `./tests/regression/run_embedded_build.sh` | `cargo build` a curated example list for `esp32-c3` (+ one `cortex-m` case) — proves generated `no_std` firmware compiles; no hardware. Skips cleanly if cargo/targets are missing; first run needs the network for crates.io | Yes (+ rustup targets) |
+| Executive semantics | `./tests/regression/run_exec_semantics.sh` | Compiles the emitted `hal_exec` cyclic executive against an injected fake clock and asserts priority order, declaration-order ties, one-shot slots, self-`TERMINATE`, no-drift periods and overrun reporting. Skips cleanly if rustc is missing | Yes |
 
 Run the unit tests on every change. Run the regression suite before a release
 or when you touch code generation, the CLI, or an example under
