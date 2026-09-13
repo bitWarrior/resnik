@@ -245,6 +245,15 @@ def parse(
     help="With --emit-cargo, run 'cargo build --release' on the project",
 )
 @click.option(
+    "--force-scaffold",
+    is_flag=True,
+    help="With --emit-cargo: regenerate scaffold files (Cargo.toml, "
+         ".cargo/config.toml, memory.x, build.rs, rust-toolchain.toml) even "
+         "if they exist. By default they are created once and then left "
+         "alone so your edits and added dependencies survive recompiles; "
+         "src/main.rs is always regenerated and src/shim.rs is never touched.",
+)
+@click.option(
     "--target",
     type=click.Choice(list(TARGET_NAMES)),
     default="host",
@@ -282,6 +291,7 @@ def compile(
     link_obj: tuple,
     emit_cargo: Optional[Path],
     build: bool,
+    force_scaffold: bool,
     target: str,
     gen_tpl: Optional[Path],
     templib: tuple,
@@ -298,7 +308,8 @@ def compile(
         input_file=input_file, tokens=tokens, ast=ast, rust=rust,
         emit_exe=emit_exe, opt_level=opt_level, link_search=link_search,
         link_lib=link_lib, link_obj=link_obj, emit_cargo=emit_cargo,
-        build=build, target=target, gen_tpl=gen_tpl, templib=templib,
+        build=build, force_scaffold=force_scaffold, target=target,
+        gen_tpl=gen_tpl, templib=templib,
     )
 
     try:
@@ -332,6 +343,7 @@ def _options_from_params(**params) -> CompileOptions:
         link_obj=list(params.get("link_obj") or ()),
         emit_cargo=params.get("emit_cargo"),
         build=bool(params.get("build")),
+        force_scaffold=bool(params.get("force_scaffold")),
         target=params.get("target") or "host",
         gen_tpl=params.get("gen_tpl"),
         templib=list(params.get("templib") or ()),

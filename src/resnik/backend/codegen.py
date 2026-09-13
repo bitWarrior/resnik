@@ -5,7 +5,7 @@ Rust code generator from HAL/S AST.
 import re
 import shutil
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, List
 from pathlib import Path
 
@@ -87,6 +87,7 @@ class CargoProjectResult:
     project_dir: str
     cargo_toml: str
     main_rs: str
+    kept_files: list = field(default_factory=list)  # existed; not overwritten
     built: bool = False
     success: Optional[bool] = None
     executable: Optional[str] = None
@@ -2347,15 +2348,17 @@ use hal_rt::*;
 
         # Output sink is target-dependent: hosted std and esp-println use
         # println!; the cortex-m stub uses semihosting hprintln!.
+        # cortex-m-semihosting 0.5 hprintln! returns () (0.4 returned a
+        # Result), so no .ok() -- the macro panics internally on error.
         if self.spec.write_sink == "hprintln":
             if not node.items:
-                self.emitter.emit_line('hprintln!("").ok();')
+                self.emitter.emit_line('hprintln!("");')
                 return
             placeholders = " ".join(["{}"] * len(node.items))
             args = [self._generate_expression(item) for item in node.items]
             args_str = ", ".join(args)
             self.emitter.emit_line(
-                f'hprintln!("{placeholders}", {args_str}).ok();')
+                f'hprintln!("{placeholders}", {args_str});')
             return
 
         if not node.items:
@@ -3799,6 +3802,54 @@ use hal_rt::*;
         """Render an opt-level for TOML: bare int for 0-3, quoted for s/z."""
         return opt_level if opt_level.isdigit() else f'"{opt_level}"'
 
+    # The scaffold is *yours once it exists*: only src/main.rs is generated
+    # output. Everything else is created if absent and then left alone, so
+    # hand-added dependencies and edits survive recompiles.
+    @staticmethod
+    def _scaffold_file(path, content: str, force: bool, kept: list) -> None:
+        path = Path(path)
+        if path.exists() and not force:
+            kept.append(str(path))
+            return
+        path.write_text(content, encoding="utf-8")
+
+    # User I/O shims: HAL/S EXTERNAL symbols resolve against extern "C" items
+    # in src/shim.rs. Created once; NEVER overwritten (not even with force).
+    _SHIM_STUB = (
+        '//! User I/O shims for the generated firmware.\n'
+        '//!\n'
+        '//! This file is yours: Resnik creates it once and never overwrites it\n'
+        '//! (src/main.rs is regenerated on every compile; Cargo.toml and the\n'
+        '//! other scaffold files are also left alone once they exist).\n'
+        '//!\n'
+        '//! HAL/S EXTERNAL procedures/variables link against #[no_mangle]\n'
+        '//! extern "C" items defined here. Example — for the HAL/S prototype\n'
+        '//!\n'
+        '//!     READ_SENSOR: PROCEDURE(CH) EXTERNAL;\n'
+        '//!       DECLARE CH INTEGER;\n'
+        '//!     CLOSE READ_SENSOR;\n'
+        '//!\n'
+        '//! provide:\n'
+        '//!\n'
+        '//!     #[no_mangle]\n'
+        '//!     pub extern "C" fn read_sensor(ch: i32) { /* ... */ }\n'
+        '#![allow(dead_code, unused_imports)]\n'
+    )
+
+    @staticmethod
+    def _inject_shim_mod(code: str) -> str:
+        """Add ``mod shim;`` to a generated main.rs (after the inner
+        ``#![...]`` attributes, which must stay first)."""
+        if "\nmod shim;" in code or code.startswith("mod shim;"):
+            return code
+        lines = code.split("\n")
+        insert_at = 0
+        for i, ln in enumerate(lines):
+            if ln.startswith("#!["):
+                insert_at = i + 1
+        lines.insert(insert_at, "mod shim;")
+        return "\n".join(lines)
+
     def emit_cargo_project(
         self,
         code: str,
@@ -3811,6 +3862,7 @@ use hal_rt::*;
         build: bool = False,
         release: bool = True,
         target: Optional[str] = None,
+        force_scaffold: bool = False,
     ) -> "CargoProjectResult":
         """
         Scaffold a Cargo project around generated Rust source.
@@ -3843,25 +3895,32 @@ use hal_rt::*;
         src_dir.mkdir(parents=True, exist_ok=True)
 
         crate_name = self._sanitize_crate_name(name or proj.name)
+        kept: list = []
 
         if self.spec.embedded:
             triple = target or self.spec.triple
             if self.spec.entry == "cortex-m-rt":
                 self._emit_cortex_m_scaffold(
-                    proj, crate_name, version, edition, opt_level, triple)
+                    proj, crate_name, version, edition, opt_level, triple,
+                    force_scaffold, kept)
             elif self.spec.entry == "esp-hal":
                 self._emit_esp32_c3_scaffold(
-                    proj, crate_name, version, edition, opt_level, triple)
+                    proj, crate_name, version, edition, opt_level, triple,
+                    force_scaffold, kept)
             else:
                 raise RuntimeError(
                     f"No cargo scaffold for target '{self.spec.name}' "
                     f"(entry={self.spec.entry!r})")
+            shim_path = src_dir / "shim.rs"
+            if not shim_path.exists():
+                shim_path.write_text(self._SHIM_STUB, encoding="utf-8")
             main_path = src_dir / "main.rs"
-            main_path.write_text(code, encoding="utf-8")
+            main_path.write_text(self._inject_shim_mod(code), encoding="utf-8")
             result = CargoProjectResult(
                 project_dir=str(proj),
                 cargo_toml=str(proj / "Cargo.toml"),
                 main_rs=str(main_path),
+                kept_files=kept,
             )
             if not build:
                 return result
@@ -3879,13 +3938,14 @@ use hal_rt::*;
         )
         toml_path = proj / "Cargo.toml"
         main_path = src_dir / "main.rs"
-        toml_path.write_text(cargo_toml, encoding="utf-8")
+        self._scaffold_file(toml_path, cargo_toml, force_scaffold, kept)
         main_path.write_text(code, encoding="utf-8")
 
         result = CargoProjectResult(
             project_dir=str(proj),
             cargo_toml=str(toml_path),
             main_rs=str(main_path),
+            kept_files=kept,
         )
 
         if not build:
@@ -3895,7 +3955,7 @@ use hal_rt::*;
             proj, crate_name, result, release=release, target=target)
 
     def _emit_cortex_m_scaffold(self, proj, crate_name, version, edition,
-                                opt_level, triple) -> None:
+                                opt_level, triple, force=False, kept=None) -> None:
         """Write a buildable bare-metal Cargo project for ARM Cortex-M:
         Cargo.toml with the embedded deps, .cargo/config.toml (target + linker
         args + probe-rs runner), a generic memory.x, and the cortex-m-rt
@@ -3920,7 +3980,8 @@ use hal_rt::*;
             "codegen-units = 1\n"
             "debug = true\n"
         )
-        (proj / "Cargo.toml").write_text(cargo_toml, encoding="utf-8")
+        kept = [] if kept is None else kept
+        self._scaffold_file(proj / "Cargo.toml", cargo_toml, force, kept)
 
         # cortex-m-rt provides link.x; --nmagic avoids page-aligned sections.
         config_toml = (
@@ -3937,8 +3998,7 @@ use hal_rt::*;
             '  "-C", "link-arg=--nmagic",\n'
             ']\n'
         )
-        (proj / ".cargo" / "config.toml").write_text(
-            config_toml, encoding="utf-8")
+        self._scaffold_file(proj / ".cargo" / "config.toml", config_toml, force, kept)
 
         # Generic layout -- ADJUST ORIGIN/LENGTH to your specific MCU's
         # datasheet (this example fits many STM32F4 parts).
@@ -3950,7 +4010,7 @@ use hal_rt::*;
             "  RAM   : ORIGIN = 0x20000000, LENGTH = 128K\n"
             "}\n"
         )
-        (proj / "memory.x").write_text(memory_x, encoding="utf-8")
+        self._scaffold_file(proj / "memory.x", memory_x, force, kept)
 
         build_rs = (
             "use std::env;\n"
@@ -3968,10 +4028,10 @@ use hal_rt::*;
             "    println!(\"cargo:rerun-if-changed=memory.x\");\n"
             "}\n"
         )
-        (proj / "build.rs").write_text(build_rs, encoding="utf-8")
+        self._scaffold_file(proj / "build.rs", build_rs, force, kept)
 
     def _emit_esp32_c3_scaffold(self, proj, crate_name, version, edition,
-                                opt_level, triple) -> None:
+                                opt_level, triple, force=False, kept=None) -> None:
         """Write a buildable no_std Cargo project for ESP32-C3 (RISC-V).
 
         Pins the 2026 esp-hal 1.x crate family. Flash layout comes from
@@ -4002,7 +4062,8 @@ use hal_rt::*;
             "codegen-units = 1\n"
             "debug = true\n"
         )
-        (proj / "Cargo.toml").write_text(cargo_toml, encoding="utf-8")
+        kept = [] if kept is None else kept
+        self._scaffold_file(proj / "Cargo.toml", cargo_toml, force, kept)
 
         config_toml = (
             f'[build]\ntarget = "{triple}"\n\n'
@@ -4014,8 +4075,7 @@ use hal_rt::*;
             '  "-C", "force-frame-pointers",\n'
             "]\n"
         )
-        (proj / ".cargo" / "config.toml").write_text(
-            config_toml, encoding="utf-8")
+        self._scaffold_file(proj / ".cargo" / "config.toml", config_toml, force, kept)
 
         toolchain = (
             "[toolchain]\n"
@@ -4023,7 +4083,7 @@ use hal_rt::*;
             'components = ["rust-src"]\n'
             f'targets = ["{triple}"]\n'
         )
-        (proj / "rust-toolchain.toml").write_text(toolchain, encoding="utf-8")
+        self._scaffold_file(proj / "rust-toolchain.toml", toolchain, force, kept)
 
     def _cargo_build(self, proj, crate_name, result, *, release, target):
         """Run `cargo build` for a scaffolded project and record the outcome."""

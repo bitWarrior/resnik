@@ -213,3 +213,92 @@ class TestEmbeddedCompileError:
         code = RustCodeGenerator(target=target).generate(ast)
         assert "compile_error!" in code
         assert "COMPOOL" in code
+
+
+class TestScaffoldOnce:
+    """--emit-cargo must not clobber the user's crate: only src/main.rs is
+    generated output; every other scaffold file is create-if-absent
+    (--force-scaffold regenerates), and src/shim.rs is created once and
+    never overwritten (docs/NO_STD_ROADMAP.md item 4)."""
+
+    CODE = "#![no_std]\n#![no_main]\nfn body() {}\n"
+
+    def _gen(self, target="esp32-c3"):
+        from resnik.backend.codegen import RustCodeGenerator
+        return RustCodeGenerator(target=target)
+
+    def test_recompile_preserves_user_edits(self, tmp_path):
+        gen = self._gen()
+        r1 = gen.emit_cargo_project(self.CODE, tmp_path, name="fw")
+        assert r1.kept_files == []
+        toml = tmp_path / "Cargo.toml"
+        toml.write_text(toml.read_text() + '\n# my dep\nlibm = "0.2"\n', encoding="utf-8")
+        (tmp_path / "src" / "shim.rs").write_text("// mine\n", encoding="utf-8")
+        r2 = gen.emit_cargo_project(self.CODE, tmp_path, name="fw")
+        assert "# my dep" in toml.read_text()
+        assert (tmp_path / "src" / "shim.rs").read_text() == "// mine\n"
+        kept = sorted(p.rsplit("/", 1)[-1] for p in r2.kept_files)
+        assert kept == ["Cargo.toml", "config.toml", "rust-toolchain.toml"]
+
+    def test_force_scaffold_regenerates_but_never_shim(self, tmp_path):
+        gen = self._gen()
+        gen.emit_cargo_project(self.CODE, tmp_path, name="fw")
+        (tmp_path / "Cargo.toml").write_text("# clobbered\n", encoding="utf-8")
+        (tmp_path / "src" / "shim.rs").write_text("// mine\n", encoding="utf-8")
+        r = gen.emit_cargo_project(self.CODE, tmp_path, name="fw", force_scaffold=True)
+        assert r.kept_files == []
+        assert "# clobbered" not in (tmp_path / "Cargo.toml").read_text()
+        assert (tmp_path / "src" / "shim.rs").read_text() == "// mine\n"
+
+    def test_main_rs_regenerated_with_mod_shim_after_inner_attrs(self, tmp_path):
+        gen = self._gen()
+        gen.emit_cargo_project(self.CODE, tmp_path, name="fw")
+        lines = (tmp_path / "src" / "main.rs").read_text().splitlines()
+        attrs = [i for i, ln in enumerate(lines) if ln.startswith("#![")]
+        assert lines[max(attrs) + 1] == "mod shim;"
+        assert lines.count("mod shim;") == 1
+        # regenerating does not duplicate the injection
+        gen.emit_cargo_project(self.CODE, tmp_path, name="fw")
+        assert (tmp_path / "src" / "main.rs").read_text().count("mod shim;") == 1
+
+    def test_shim_stub_documents_extern_c(self, tmp_path):
+        gen = self._gen()
+        gen.emit_cargo_project(self.CODE, tmp_path, name="fw")
+        stub = (tmp_path / "src" / "shim.rs").read_text()
+        assert 'extern "C"' in stub and "EXTERNAL" in stub
+        assert "#![allow(dead_code" in stub
+
+    def test_cortex_m_memory_x_preserved(self, tmp_path):
+        gen = self._gen("cortex-m")
+        gen.emit_cargo_project(self.CODE, tmp_path, name="fw")
+        (tmp_path / "memory.x").write_text("/* my MCU map */\n", encoding="utf-8")
+        r = gen.emit_cargo_project(self.CODE, tmp_path, name="fw")
+        assert (tmp_path / "memory.x").read_text() == "/* my MCU map */\n"
+        assert any(k.endswith("memory.x") for k in r.kept_files)
+
+    def test_host_cargo_toml_kept(self, tmp_path):
+        gen = self._gen("host")
+        gen.emit_cargo_project("fn main() {}\n", tmp_path, name="app")
+        (tmp_path / "Cargo.toml").write_text("# host edit\n", encoding="utf-8")
+        r = gen.emit_cargo_project("fn main() {}\n", tmp_path, name="app")
+        assert (tmp_path / "Cargo.toml").read_text() == "# host edit\n"
+        assert any(k.endswith("Cargo.toml") for k in r.kept_files)
+        # host scaffold has no shim machinery
+        assert not (tmp_path / "src" / "shim.rs").exists()
+        assert "mod shim;" not in (tmp_path / "src" / "main.rs").read_text()
+
+
+class TestHprintlnReturnsUnit:
+    """cortex-m-semihosting 0.5's hprintln! returns (), not Result — a
+    trailing .ok() is a compile error on the scaffolded crate (caught by
+    run_embedded_build.sh the first time the cortex-m case was built)."""
+
+    def test_write_lowering_has_no_ok_call(self):
+        from resnik import Lexer, Parser
+        from resnik.backend.codegen import RustCodeGenerator
+        src = "T: PROGRAM;\n  WRITE(6) 'HI', 42;\n  WRITE(6);\nCLOSE T;\n"
+        ast = Parser().parse(Lexer().tokenize(src, "<t>"))
+        code = RustCodeGenerator(target="cortex-m").generate(ast)
+        assert 'hprintln!("{} {}", ' in code
+        assert 'hprintln!("");' in code
+        assert ".ok()" not in code

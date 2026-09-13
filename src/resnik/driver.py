@@ -152,6 +152,7 @@ class CompileOptions:
     link_obj: List[Path] = field(default_factory=list)
     emit_cargo: Optional[Path] = None
     build: bool = False
+    force_scaffold: bool = False
     target: str = "host"
     gen_tpl: Optional[Path] = None
     templib: List[Path] = field(default_factory=list)
@@ -205,6 +206,8 @@ class CompileOptions:
             args += ["--emit-cargo", str(self.emit_cargo)]
         if self.build:
             args.append("--build")
+        if self.force_scaffold:
+            args.append("--force-scaffold")
         if self.target != "host":
             args += ["--target", self.target]
         if self.gen_tpl:
@@ -405,6 +408,7 @@ def generate(
                     opt_level=opts.opt_level,
                     build=opts.build,
                     target=cross_triple,
+                    force_scaffold=opts.force_scaffold,
                 )
             except RuntimeError as exc:
                 result.diagnostics.append(Diagnostic("build", str(exc)))
@@ -414,6 +418,8 @@ def generate(
         rep.success(f"Scaffolded Cargo project: {cargo_result.project_dir}")
         rep.info(f"Cargo.toml:  {cargo_result.cargo_toml}")
         rep.info(f"src/main.rs: {cargo_result.main_rs}")
+        for kept in cargo_result.kept_files:
+            rep.info(f"kept existing {kept} (yours to edit; --force-scaffold regenerates)")
         if cargo_result.built:
             if cargo_result.success:
                 rep.success(f"Built executable: {cargo_result.executable}")

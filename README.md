@@ -260,8 +260,9 @@ docs/         specifications, guides, examples
 ```
 
 ```bash
-python -m pytest                         # unit tests (no rustc needed)
-./tests/regression/run_regression.sh     # compile + run every example (needs rustc)
+python -m pytest                            # unit tests (no rustc needed)
+./tests/regression/run_regression.sh        # compile + run every example (needs rustc)
+./tests/regression/run_embedded_build.sh    # cargo-build examples for esp32-c3 (no board)
 ```
 
 The full project layout, test-suite details, coverage and regression notes

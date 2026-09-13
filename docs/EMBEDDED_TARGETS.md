@@ -158,6 +158,22 @@ resnik compile hello_world.hal --emit-exe
 ./hello_world
 ```
 
+## The scaffold is yours after the first compile
+
+`--emit-cargo` generates only `src/main.rs` on every compile. Every other
+scaffold file — `Cargo.toml`, `.cargo/config.toml`, `rust-toolchain.toml`,
+`memory.x`, `build.rs` — is created **once** and then left alone, so
+dependencies you add and settings you change survive recompiles (the
+compiler logs `kept existing …` for each). Pass `--force-scaffold` to
+regenerate them from scratch.
+
+The scaffold also creates `src/shim.rs` once (and never overwrites it, not
+even with `--force-scaffold`); the generated `main.rs` imports it with
+`mod shim;`. That is the home for your I/O code: HAL/S `EXTERNAL`
+procedures and variables link against `#[no_mangle] pub extern "C"` items
+you define there — sensor reads, radio I/O, delays — with no C toolchain
+involved.
+
 ## Troubleshooting
 
 Field notes from bringing up a real ESP32-C3 DevKit (2026-09-12); each of

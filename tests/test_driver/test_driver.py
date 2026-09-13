@@ -401,3 +401,27 @@ class TestCliArgsRoundTrip:
         assert r.templib == [base / "T1", base / "T2", Path("/abs/T3")]
         assert r.link_lib == ["m"] and r.input_file == o.input_file
         assert o.rust == Path("o.rs")  # original untouched
+
+
+class TestForceScaffoldOption:
+    def test_cli_round_trip(self, tmp_path):
+        from resnik.cli import parse_compile_args
+
+        src = _write(tmp_path, "p.hal", VALID)
+        o = CompileOptions(input_file=src, emit_cargo=Path("fw"), force_scaffold=True)
+        assert "--force-scaffold" in o.to_cli_args()
+        assert parse_compile_args(o.to_cli_args()) == o
+        o2 = CompileOptions(input_file=src, emit_cargo=Path("fw"))
+        assert "--force-scaffold" not in o2.to_cli_args()
+
+    def test_generate_reports_kept_files(self, tmp_path):
+        src = _write(tmp_path, "p.hal", VALID)
+        proj = tmp_path / "fw"
+        generate(CompileOptions(input_file=src, emit_cargo=proj, target="esp32-c3"))
+        (proj / "Cargo.toml").write_text("# mine\n", encoding="utf-8")
+        rep = RecordingReporter()
+        r = generate(CompileOptions(input_file=src, emit_cargo=proj, target="esp32-c3"), rep)
+        assert r.ok and (proj / "Cargo.toml").read_text() == "# mine\n"
+        infos = [m for k, m in rep.events if k == "info"]
+        assert any(m.startswith("kept existing") and "Cargo.toml" in m for m in infos)
+        assert any("--force-scaffold regenerates" in m for m in infos)
