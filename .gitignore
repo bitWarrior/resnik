@@ -84,3 +84,7 @@ tests/test_driver/__init__.py
 # can be removed — they exist so a fresh clone doesn't reintroduce them.
 /firmware_main.rs
 /work_to_go.md
+
+# Cargo projects generated next to the HAL/S examples by the IDE's
+# Flash & Run (resnik --emit-cargo output; regenerable, holds target/).
+docs/HAL-S-Source-Code-Examples/*/firmware/
