@@ -1073,3 +1073,60 @@ class TestNameNull:
         assert isinstance(cond.left, NameRefNode)
         assert isinstance(cond.right, NullNode)
 
+
+
+class TestModXorFunctionForm:
+    """USA003088 spells MOD and XOR as built-in functions too: MOD(A, B) /
+    XOR(A, B) must parse everywhere an expression does, producing the same
+    AST as the infix forms (the backend lowering is shared)."""
+
+    def _parse(self, src: str):
+        p = Parser()
+        ast = p.parse(Lexer().tokenize(src, "<t>"))
+        return p, ast
+
+    def _wrap(self, stmt: str) -> str:
+        return f"T: PROGRAM;\n  DECLARE X INTEGER;\n  DECLARE Y INTEGER;\n  {stmt}\nCLOSE T;\n"
+
+    @staticmethod
+    def _scrub(node):
+        """AST dict with source positions removed (the two spellings place
+        tokens at different columns; the structure must be identical)."""
+        if isinstance(node, dict):
+            return {k: TestModXorFunctionForm._scrub(v) for k, v in node.items()
+                    if k not in ("line", "column")}
+        if isinstance(node, list):
+            return [TestModXorFunctionForm._scrub(v) for v in node]
+        return node
+
+    def test_mod_call_in_assignment(self) -> None:
+        p, ast = self._parse(self._wrap("X = MOD(7, 3);"))
+        assert not p.errors and ast is not None
+
+    def test_xor_call_in_assignment(self) -> None:
+        p, ast = self._parse(self._wrap("X = XOR(X, 5);"))
+        assert not p.errors and ast is not None
+
+    def test_mod_call_at_start_of_if_condition(self) -> None:
+        p, ast = self._parse(self._wrap("IF MOD(X, 5) = 0 THEN X = 0;"))
+        assert not p.errors and ast is not None
+
+    def test_xor_call_at_start_of_if_condition(self) -> None:
+        p, ast = self._parse(self._wrap("IF XOR(X, Y) = 0 THEN X = 0;"))
+        assert not p.errors and ast is not None
+
+    def test_call_form_builds_same_ast_as_infix(self) -> None:
+        p1, ast1 = self._parse(self._wrap("X = MOD(Y, 3);"))
+        p2, ast2 = self._parse(self._wrap("X = Y MOD 3;"))
+        assert not p1.errors and not p2.errors
+        assert self._scrub(ast1.to_dict()) == self._scrub(ast2.to_dict())
+
+    def test_nested_calls(self) -> None:
+        p, ast = self._parse(self._wrap("X = MOD(MOD(X, 7), XOR(Y, 3));"))
+        assert not p.errors and ast is not None
+
+    def test_infix_with_parenthesized_operand_still_infix(self) -> None:
+        p1, ast1 = self._parse(self._wrap("X = Y MOD (3);"))
+        p2, ast2 = self._parse(self._wrap("X = Y MOD 3;"))
+        assert not p1.errors and not p2.errors
+        assert self._scrub(ast1.to_dict()) == self._scrub(ast2.to_dict())

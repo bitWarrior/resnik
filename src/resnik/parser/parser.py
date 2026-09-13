@@ -2211,6 +2211,22 @@ class Parser:
                 column=getattr(p[1], "column", 0),
             )
 
+        # Official HAL/S also spells these as built-in functions: MOD(A, B)
+        # and XOR(A, B) (USA003088). Same AST as the infix forms, so the
+        # backend lowering is shared.
+        @self.pg.production(
+            "expression : KEYWORD_MOD LPAREN expression COMMA expression RPAREN")
+        @self.pg.production(
+            "expression : KEYWORD_XOR LPAREN expression COMMA expression RPAREN")
+        def expr_builtin_binop_call(p: List[Any]) -> BinaryOpNode:
+            return BinaryOpNode(
+                operator=p[0].value,
+                left=p[2],
+                right=p[4],
+                line=getattr(p[0], "line", 0),
+                column=getattr(p[0], "column", 0),
+            )
+
         # CAT is the linear-form spelling of || (USA003088 <CAT> ::= || | CAT).
         # Normalize to || so bit/character concat lowering is unchanged.
         @self.pg.production("expression : expression KEYWORD_CAT expression")
