@@ -202,7 +202,25 @@ class TestEmbeddedCompileError:
         assert "SCHEDULE/TASK" in code
 
     @pytest.mark.parametrize("target", ["cortex-m", "esp32-c3"])
-    def test_compool_emits_compile_error(self, target: str) -> None:
+    def test_compool_no_longer_guarded(self, target: str) -> None:
+        # no_std roadmap item 2a: COMPOOL lowers to a critical-section-backed
+        # CsMutex on embedded targets instead of tripping compile_error!.
+        ast = CompoolNode(
+            name="SHARED",
+            declarations=[
+                DeclareNode(
+                    identifiers=["X"],
+                    type_spec=TypeSpec(data_type=DataType.INTEGER),
+                )
+            ],
+        )
+        code = RustCodeGenerator(target=target).generate(ast)
+        assert "compile_error!" not in code
+        assert "mod hal_cs" in code
+        assert "static X: hal_cs::CsMutex<i32> = hal_cs::CsMutex::new(0);" in code
+
+    @pytest.mark.parametrize("target", ["cortex-m", "esp32-c3"])
+    def _retired_test_compool_emits_compile_error(self, target: str) -> None:
         ast = CompoolNode(
             name="SHARED",
             declarations=[
@@ -385,3 +403,67 @@ class TestEmbeddedFloatMath:
             RustCodeGenerator(target=target).emit_cargo_project(
                 "#![no_std]\n#![no_main]\nfn b() {}\n", d, name="fw")
             assert 'libm = "0.2"' in (d / "Cargo.toml").read_text()
+
+
+class TestEmbeddedCompool:
+    """no_std roadmap item 2a: COMPOOL shared data on bare metal via a
+    critical-section-backed CsMutex whose API is shaped like
+    std::sync::Mutex, so the generated ACCESS code is identical on every
+    target — only the static declaration and the hal_cs module differ."""
+
+    SRC = (
+        "SHARED: COMPOOL;\n"
+        "  DECLARE COUNT INTEGER INITIAL(0);\n"
+        "  DECLARE RATE SCALAR INITIAL(1.5);\n"
+        "  DECLARE LIMIT CONSTANT(100);\n"
+        "CLOSE SHARED;\n"
+        "T: PROGRAM;\n"
+        "  DECLARE X SCALAR;\n"
+        "  COUNT = COUNT + 1;\n"
+        "  X = RATE * 2;\n"
+        "  RATE = X;\n"
+        "CLOSE T;\n"
+    )
+
+    def _code(self, target):
+        from resnik import Lexer, Parser
+        from resnik.backend.codegen import RustCodeGenerator
+        p = Parser()
+        ast = p.parse(Lexer().tokenize(self.SRC, "<t>"))
+        assert not p.errors, p.errors
+        return RustCodeGenerator(target=target).generate(ast)
+
+    def test_embedded_statics_are_cs_mutex_and_core_clean(self):
+        code = self._code("esp32-c3")
+        assert "compile_error" not in code
+        assert "mod hal_cs" in code and code.count("mod hal_cs") == 1
+        assert "static COUNT: hal_cs::CsMutex<i32> = hal_cs::CsMutex::new(0);" in code
+        assert "static RATE: hal_cs::CsMutex<f32> = hal_cs::CsMutex::new(1.5);" in code
+        assert "critical_section::acquire" in code and "critical_section::release" in code
+        assert "std::" not in code
+
+    def test_access_sites_identical_to_host(self):
+        emb = self._code("esp32-c3")
+        host = self._code("host")
+        acc = lambda c: sorted(ln.strip() for ln in c.splitlines() if "lock().unwrap" in ln)
+        assert acc(emb) == acc(host) and acc(emb)  # same, and non-empty
+
+    def test_host_lowering_unchanged(self):
+        host = self._code("host")
+        assert "static COUNT: std::sync::Mutex<i32>" in host
+        assert "hal_cs" not in host and "critical_section" not in host
+
+    def test_constants_stay_const_on_embedded(self):
+        code = self._code("esp32-c3")
+        assert "const LIMIT" in code and "CsMutex<" in code
+
+    def test_scaffolds_carry_critical_section(self, tmp_path):
+        from resnik.backend.codegen import RustCodeGenerator
+        for target in ("esp32-c3", "cortex-m"):
+            d = tmp_path / target
+            RustCodeGenerator(target=target).emit_cargo_project(
+                "#![no_std]\n#![no_main]\nfn b() {}\n", d, name="fw")
+            toml = (d / "Cargo.toml").read_text()
+            assert 'critical-section = "1.2"' in toml
+            if target == "cortex-m":
+                assert 'features = ["critical-section-single-core"]' in toml

@@ -22,9 +22,14 @@ runtime (the scaffold's `Cargo.toml` carries the dependency; a scaffold
 created before this needs `libm = "0.2"` added or `--force-scaffold`). The
 fault model unwinds via `Result` and panics on an unhandled fault
 (`panic-halt` on Cortex-M, `esp-backtrace` on ESP32-C3 so the fault is
-visible on the serial console). Features whose lowering still depends on
-`std` — `SCHEDULE`/`TASK`, `COMPOOL`, `READ`, and `CHARACTER` variables /
-concatenation (heap allocation) — emit a `compile_error!` naming the
+visible on the serial console). `COMPOOL` shared data works too: on bare
+metal it lowers to a critical-section-backed mutex (interrupt-safe on a
+single core; the scaffold carries the `critical-section` crate, with
+esp-hal providing the implementation on ESP32-C3 and the
+`critical-section-single-core` feature on Cortex-M). Features whose
+lowering still depends on `std` — `SCHEDULE`/`TASK`, `READ`, and
+`CHARACTER` variables / concatenation (heap allocation) — emit a
+`compile_error!` naming the
 feature rather than failing silently. These are on the embedded roadmap
 (`docs/NO_STD_ROADMAP.md`).
 

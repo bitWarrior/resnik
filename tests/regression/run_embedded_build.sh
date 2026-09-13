@@ -47,8 +47,9 @@ export CARGO_TERM_COLOR=never
 
 EXAMPLES_DIR="$GIT_ROOT/docs/HAL-S-Source-Code-Examples"
 
-# Curated: inside today's no_std subset (no SCHEDULE/TASK, COMPOOL, READ,
-# or CHARACTER variables — roadmap item 2 and the CHARACTER/alloc gap).
+# Curated: inside today's no_std subset (no SCHEDULE/TASK, READ,
+# or CHARACTER variables — roadmap item 2b and the CHARACTER/alloc gap).
+# COMPOOL builds via the critical-section CsMutex (item 2a).
 # VECTOR/MATRIX + math intrinsics build via the libm prelude (item 1).
 ESP32_CASES=(
     hello_word/hello_world
@@ -59,6 +60,7 @@ ESP32_CASES=(
     euler/euler
     orbital_kinematics/orbital_kinematics
     matrix_gen/matrix_gen
+    compool_fault/compool_fault
     bit_manipulation/bit_manipulation
     integer_arith/integer_arith
     until_loops/until_loops

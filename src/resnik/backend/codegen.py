@@ -466,6 +466,7 @@ class RustCodeGenerator:
         # up front wherever it appears -- a top-level unit OR nested inside a
         # PROGRAM -- and record it so it is not re-emitted inside a function.
         self._emitted_compools: set = set()
+        self._hal_cs_emitted = False
         # Optimization pass: fold compile-time-constant expressions to literals
         # before code generation, so no constant math runs on the flight CPU.
         ConstantFolder().run(ast)
@@ -1020,10 +1021,6 @@ class RustCodeGenerator:
             reasons.append(
                 "SCHEDULE/TASK lower to std::thread -- needs a superloop/RTIC "
                 "executor on bare metal -- backend step 5")
-        if any(isinstance(n, CompoolNode) for n in self._walk(ast)):
-            reasons.append(
-                "COMPOOL globals lower to std::sync::Mutex -- needs "
-                "critical-section on bare metal -- backend step 5")
         for r in reasons:
             self.emitter.emit_line(f'compile_error!("resnik: {r}");')
         if reasons:
@@ -1188,9 +1185,12 @@ class RustCodeGenerator:
         multiple scheduled task threads. References are resolved in
         _generate_identifier / _generate_assignment.
         """
+        if self.spec.embedded:
+            self._ensure_hal_cs()
         self.emitter.emit_comment(
             f"HAL/S Compool (shared global memory): {node.name}"
         )
+        mutex = "hal_cs::CsMutex" if self.spec.embedded else "std::sync::Mutex"
         for decl in node.declarations:
             ts = decl.type_spec
             # ARRAY-typed shared data -> Mutex<[T; n]> (nested for multi-dim).
@@ -1221,8 +1221,8 @@ class RustCodeGenerator:
                             f"const {name}: {rust_type} = {init};")
                     else:
                         self.emitter.emit_line(
-                            f"static {name}: std::sync::Mutex<{rust_type}> = "
-                            f"std::sync::Mutex::new({init});")
+                            f"static {name}: {mutex}<{rust_type}> = "
+                            f"{mutex}::new({init});")
                 continue
             rust_type = self.type_mapper.map_type(decl.type_spec)
             if decl.initial_value is not None:
@@ -1239,10 +1239,55 @@ class RustCodeGenerator:
                     )
                 else:
                     self.emitter.emit_line(
-                        f"static {name}: std::sync::Mutex<{rust_type}> = "
-                        f"std::sync::Mutex::new({init});"
+                        f"static {name}: {mutex}<{rust_type}> = "
+                        f"{mutex}::new({init});"
                     )
         self.emitter.emit_line()
+
+    # COMPOOL on bare metal: a critical-section-backed cell with a
+    # std::sync::Mutex-SHAPED api (lock() -> Result<guard, Infallible>,
+    # Deref/DerefMut, release on Drop), so every generated access site --
+    # `NAME.lock().unwrap()`, the per-statement guard bindings -- is
+    # byte-identical across targets. Nested lock() is safe here (RestoreState
+    # nests), unlike the host Mutex, so the existing single-guard-per-
+    # statement discipline is sufficient on both.
+    _HAL_CS = """mod hal_cs {
+    //! COMPOOL shared data for no_std targets (critical-section backed).
+    #![allow(dead_code)]
+    pub struct CsMutex<T>(core::cell::UnsafeCell<T>);
+    unsafe impl<T: Send> Sync for CsMutex<T> {}
+    impl<T> CsMutex<T> {
+        pub const fn new(v: T) -> Self { CsMutex(core::cell::UnsafeCell::new(v)) }
+        pub fn lock(&self) -> Result<CsGuard<'_, T>, core::convert::Infallible> {
+            let rs = unsafe { critical_section::acquire() };
+            Ok(CsGuard { m: self, rs })
+        }
+    }
+    pub struct CsGuard<'a, T> {
+        m: &'a CsMutex<T>,
+        rs: critical_section::RestoreState,
+    }
+    impl<T> core::ops::Deref for CsGuard<'_, T> {
+        type Target = T;
+        fn deref(&self) -> &T { unsafe { &*self.m.0.get() } }
+    }
+    impl<T> core::ops::DerefMut for CsGuard<'_, T> {
+        fn deref_mut(&mut self) -> &mut T { unsafe { &mut *self.m.0.get() } }
+    }
+    impl<T> Drop for CsGuard<'_, T> {
+        fn drop(&mut self) { unsafe { critical_section::release(self.rs) } }
+    }
+}
+"""
+
+    def _ensure_hal_cs(self) -> None:
+        """Emit the hal_cs module once per file (embedded compools)."""
+        if getattr(self, "_hal_cs_emitted", False):
+            return
+        self._hal_cs_emitted = True
+        for line in self._HAL_CS.split("\n"):
+            self.emitter.emit_line(line)
+
 
     def _generate_program(self, node: ProgramNode) -> None:
         """
@@ -4057,7 +4102,8 @@ class RustCodeGenerator:
             "\n"
             "[dependencies]\n"
             'libm = "0.2"\n'
-            'cortex-m = "0.7"\n'
+            'critical-section = "1.2"\n'
+            'cortex-m = { version = "0.7", features = ["critical-section-single-core"] }\n'
             'cortex-m-rt = "0.7"\n'
             'panic-halt = "1.0"\n'
             'cortex-m-semihosting = "0.5"\n'
@@ -4137,6 +4183,7 @@ class RustCodeGenerator:
             "[dependencies]\n"
             # Chip feature required; `rt` is on by default (#[main] + init).
             'libm = "0.2"\n'
+            'critical-section = "1.2"\n'
             'esp-hal = { version = "1.1", features = ["esp32c3"] }\n'
             "esp-backtrace = { version = \"0.19\", "
             'features = ["esp32c3", "panic-handler", "println"] }\n'

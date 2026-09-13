@@ -3,7 +3,7 @@
 Plan for resolving the four constraints that limit HAL/S programs on
 embedded targets (ESP32-C3 / Cortex-M), found while building the XIAO
 INS-over-Bluetooth project. Status (2026-09-12): **items 0 and 4 implemented** (embedded build tier +
-scaffold-once with `src/shim.rs`); items 1 and 3 implemented; item 2 (COMPOOL / cyclic executive) open.
+scaffold-once with `src/shim.rs`); items 1, 2a and 3 implemented; item 2b (cyclic executive — design doc first) open.
 
 Ordering is by leverage: item 4 unblocks project work immediately and is
 small; 3 is small; 1 is medium; 2 is the big one and is split.
@@ -114,7 +114,10 @@ codegen.py:856), `_uses_runtime` (codegen.py:457) trips the
 `std::sync::Mutex` — both guarded off on embedded. Two phases, because the
 first is mechanical and the second needs a design decision.
 
-**2a — COMPOOL via critical sections (medium).** Lower compool globals to
+**2a — COMPOOL via critical sections — ✓ done** (a CsMutex with a
+std::sync::Mutex-shaped API, so generated access sites are identical
+across targets; hardware-verified on the XIAO — shared TICKS counter
+bumped through a CALLed procedure). Original plan: Lower compool globals to
 `static X: critical_section::Mutex<RefCell<T>>` with the target's
 critical-section provider (esp-hal and cortex-m both ship one); accessors
 become `critical_section::with(|cs| …)`. Same observable semantics as the
