@@ -3056,6 +3056,50 @@ class Parser:
                 if isinstance(item, ASTNode):
                     self._collect_symbols(item)
 
+    def _check_external_ffi_types(self, node: ASTNode) -> None:
+        """Semantic check: CHARACTER cannot cross the EXTERNAL FFI boundary.
+
+        HAL/S CHARACTER lowers to an owned Rust string with no stable C ABI,
+        so an `extern "C"` signature carrying one is unsound. Rejected here
+        with a clear message instead of failing cryptically in rustc:
+          - `DECLARE X CHARACTER(n) EXTERNAL;`
+          - a CHARACTER parameter/ASSIGN declared inside an EXTERNAL
+            PROCEDURE/FUNCTION body
+          - an EXTERNAL FUNCTION returning CHARACTER
+        Supported FFI types are INTEGER, SCALAR, BOOLEAN and BIT.
+        """
+        if node is None:
+            return
+        _FFI_MSG = ("CHARACTER cannot cross the EXTERNAL FFI boundary "
+                    "(no C ABI for HAL/S character strings); use INTEGER, "
+                    "SCALAR, BOOLEAN or BIT")
+        if (isinstance(node, DeclareNode)
+                and (node.attributes or {}).get("external")
+                and node.type_spec is not None
+                and node.type_spec.data_type == DataType.CHARACTER):
+            self.errors.append(SemanticError(
+                f"Variable '{node.identifiers[0]}': {_FFI_MSG}",
+                node.line, node.column))
+        if isinstance(node, ProcedureNode) and node.is_external:
+            if (node.return_type is not None
+                    and node.return_type.data_type == DataType.CHARACTER):
+                self.errors.append(SemanticError(
+                    f"EXTERNAL FUNCTION '{node.name}' returns CHARACTER: "
+                    f"{_FFI_MSG}", node.line, node.column))
+            for decl in list(node.declarations) + list(node.statements):
+                if (isinstance(decl, DeclareNode)
+                        and decl.type_spec is not None
+                        and decl.type_spec.data_type == DataType.CHARACTER):
+                    self.errors.append(SemanticError(
+                        f"EXTERNAL '{node.name}' parameter "
+                        f"'{decl.identifiers[0]}': {_FFI_MSG}",
+                        decl.line, decl.column))
+        for value in vars(node).values():
+            items = value if isinstance(value, list) else [value]
+            for item in items:
+                if isinstance(item, ASTNode):
+                    self._check_external_ffi_types(item)
+
     def _check_exit_context(self, node: ASTNode, in_loop: bool,
                             labels: frozenset = frozenset()) -> None:
         """Semantic check: EXIT is only legal inside a loop body.
@@ -3225,6 +3269,7 @@ class Parser:
             if self.ast is not None:
                 self._collect_symbols(self.ast)
                 self._check_exit_context(self.ast, in_loop=False)
+                self._check_external_ffi_types(self.ast)
                 self._check_name_null(
                     self.ast, self._collect_name_vars(self.ast))
             return self.ast

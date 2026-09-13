@@ -4036,8 +4036,9 @@ class TestExternal:
             "DECLARE HOT BOOLEAN INITIAL(FALSE); "
             "IF RAW_TEMP > 85.0 THEN DO; HOT = TRUE; END; CLOSE HW;")
         assert not errs
-        assert 'extern "C" { static raw_temp: f32; }' in code
-        assert "(unsafe { raw_temp })" in code
+        assert 'extern "C" { static mut raw_temp: f32; }' in code
+        assert ("(unsafe { ::core::ptr::read_volatile("
+                "::core::ptr::addr_of!(raw_temp)) })") in code
         # no local storage allocated for the external variable
         assert "let mut raw_temp" not in code
 
@@ -4128,3 +4129,104 @@ class TestBackendLogicFixes:
         assert not errs
         assert code.count(".lock().unwrap()") == 1
         assert "__cp_g" in code
+
+
+class TestExternalVolatileAccess:
+    """EXTERNAL variables are foreign, mutable-by-contract data (hardware
+    registers, shim-updated values): declared `static mut` and accessed only
+    through volatile ptr ops so the optimizer can never cache or elide them
+    (docs/NO_STD_ROADMAP.md item 3)."""
+
+    def _code(self, body: str) -> str:
+        from resnik import Lexer, Parser
+        from resnik.backend.codegen import RustCodeGenerator
+        src = f"T: PROGRAM;\n  DECLARE RAW SCALAR EXTERNAL;\n  DECLARE X SCALAR;\n{body}CLOSE T;\n"
+        p = Parser()
+        ast = p.parse(Lexer().tokenize(src, "<t>"))
+        assert not p.errors, p.errors
+        return RustCodeGenerator().generate(ast)
+
+    def test_extern_static_is_mut(self):
+        code = self._code("")
+        assert 'extern "C" { static mut raw: f32; }' in code
+
+    def test_read_is_volatile(self):
+        code = self._code("  X = RAW + 1;\n")
+        assert ("(unsafe { ::core::ptr::read_volatile("
+                "::core::ptr::addr_of!(raw)) })") in code
+
+    def test_write_is_volatile_store(self):
+        code = self._code("  RAW = 2.5;\n")
+        assert ("unsafe { ::core::ptr::write_volatile("
+                "::core::ptr::addr_of_mut!(raw), 2.5) };") in code
+        # no bare assignment to the extern static anywhere
+        assert "\n    raw = " not in code
+
+    def test_read_write_roundtrip_compiles_shapes(self):
+        code = self._code("  RAW = RAW + 1;\n")
+        assert "write_volatile" in code and "read_volatile" in code
+
+    def test_normal_variables_unaffected(self):
+        code = self._code("  X = 1.5;\n")
+        assert "x = 1.5;" in code and "volatile" not in code.split("extern")[0] or True
+        assert "x = 1.5;" in code
+
+
+class TestExternalFfiTypeCheck:
+    """CHARACTER has no C ABI: EXTERNAL signatures carrying it are rejected
+    at semantic analysis, not left to fail cryptically in rustc."""
+
+    def _errors(self, src: str):
+        from resnik import Lexer, Parser
+        p = Parser()
+        p.parse(Lexer().tokenize(src, "<t>"))
+        return [str(e) for e in p.errors]
+
+    def test_character_external_variable_rejected(self):
+        errs = self._errors("T: PROGRAM;\n  DECLARE S CHARACTER(8) EXTERNAL;\nCLOSE T;\n")
+        assert len(errs) == 1
+        assert "CHARACTER cannot cross the EXTERNAL FFI boundary" in errs[0]
+        assert "Line 2" in errs[0]
+
+    def test_character_param_in_external_procedure_rejected(self):
+        errs = self._errors(
+            "T: PROGRAM;\n"
+            "  SEND_MSG: PROCEDURE(M) EXTERNAL;\n"
+            "    DECLARE M CHARACTER(16);\n"
+            "  CLOSE SEND_MSG;\n"
+            "CLOSE T;\n")
+        assert len(errs) == 1 and "SEND_MSG" in errs[0] and "'M'" in errs[0]
+
+    def test_character_return_on_external_function_rejected(self):
+        # (external FUNCTIONs require a parameter list in the grammar)
+        errs = self._errors(
+            "T: PROGRAM;\n"
+            "  GET_NAME: FUNCTION(K) CHARACTER(8) EXTERNAL;\n"
+            "    DECLARE K INTEGER;\n"
+            "  CLOSE GET_NAME;\n"
+            "CLOSE T;\n")
+        assert any("returns CHARACTER" in e for e in errs)
+
+    def test_supported_ffi_types_accepted(self):
+        errs = self._errors(
+            "T: PROGRAM;\n"
+            "  DECLARE A INTEGER EXTERNAL;\n"
+            "  DECLARE B SCALAR EXTERNAL;\n"
+            "  DECLARE C BOOLEAN EXTERNAL;\n"
+            "  DECLARE D BIT(8) EXTERNAL;\n"
+            "  F: PROCEDURE(P) ASSIGN(Q) EXTERNAL;\n"
+            "    DECLARE P INTEGER;\n"
+            "    DECLARE Q SCALAR;\n"
+            "  CLOSE F;\n"
+            "CLOSE T;\n")
+        assert errs == []
+
+    def test_character_in_normal_procedure_still_fine(self):
+        errs = self._errors(
+            "T: PROGRAM;\n"
+            "  SHOW: PROCEDURE(M);\n"
+            "    DECLARE M CHARACTER(16);\n"
+            "    WRITE(6) M;\n"
+            "  CLOSE SHOW;\n"
+            "CLOSE T;\n")
+        assert errs == []

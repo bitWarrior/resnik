@@ -520,8 +520,10 @@ class RustCodeGenerator:
                 for ident in node.identifiers:
                     self._extern_vars.add(ident.lower())
                     rty = self._full_rust_type(node.type_spec)
+                    # `static mut`: the definition is foreign and mutable by
+                    # contract; all access goes through volatile ptr ops.
                     self.emitter.emit_line(
-                        f'extern "C" {{ static {self._rust_ident(ident)}: {rty}; }}')
+                        f'extern "C" {{ static mut {self._rust_ident(ident)}: {rty}; }}')
         if self._extern_vars:
             self.emitter.emit_line()
 
@@ -2168,6 +2170,18 @@ use hal_rt::*;
                 rhs = self._name_ptr_rust(node.value)
                 self.emitter.emit_line(f"{ptr} = {rhs};")
                 return
+            # EXTERNAL variable target -> VOLATILE store through the foreign
+            # `static mut` (a plain assignment would not even compile, and a
+            # non-volatile store could be elided for a hardware register).
+            if (isinstance(node.target, IdentifierNode)
+                    and node.target.name.lower()
+                    in getattr(self, "_extern_vars", set())):
+                nm = self._rust_ident(node.target.name)
+                rhs = self._generate_expression(node.value)
+                self.emitter.emit_line(
+                    "unsafe { ::core::ptr::write_volatile("
+                    f"::core::ptr::addr_of_mut!({nm}), {rhs}) }};")
+                return
             # One MutexGuard per COMPOOL name for the whole statement so
             # `G$I = G$I + 1` cannot deadlock on a non-reentrant Mutex.
             if not getattr(self, "_compool_locked", False):
@@ -2558,12 +2572,16 @@ use hal_rt::*;
         if node.name.lower() in getattr(self, "_event_vars", set()):
             return (f"{node.name.upper()}"
                     ".load(std::sync::atomic::Ordering::SeqCst)")
-        # EXTERNAL variable -> read the foreign `extern "C"` static (unsafe).
+        # EXTERNAL variable -> VOLATILE read of the foreign `extern "C"`
+        # static: something outside this program writes it (hardware, an ISR,
+        # a shim), so the optimizer must not cache or elide the load.
         if node.name.lower() in getattr(self, "_extern_vars", set()):
             nm = self._rust_ident(node.name)
+            read = (f"::core::ptr::read_volatile("
+                    f"::core::ptr::addr_of!({nm}))")
             if getattr(self, "_unsafe_ctx", False):
-                return nm
-            return f"(unsafe {{ {nm} }})"
+                return read
+            return f"(unsafe {{ {read} }})"
         # `unsafe` the bare deref suffices; elsewhere use an inline unsafe block
         # so the expression is valid on its own.
         if node.name.lower() in getattr(self, "_name_vars", {}):

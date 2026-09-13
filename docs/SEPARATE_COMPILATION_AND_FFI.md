@@ -92,10 +92,10 @@ lowers to:
 
 ```rust
 extern "C" { fn read_i2c_bus(bus_id: i32); }
-extern "C" { static raw_temp: f32; }
+extern "C" { static mut raw_temp: f32; }
 ...
 unsafe { read_i2c_bus(2); }
-if (unsafe { raw_temp }) > 85.0 { ... }
+if (unsafe { ::core::ptr::read_volatile(::core::ptr::addr_of!(raw_temp)) }) > 85.0 { ... }
 ```
 
 Every use is `unsafe`, and the external variable allocates no local storage.
@@ -122,6 +122,9 @@ For larger builds, prefer `--emit-cargo` and let a `build.rs` (with the `cc`
 crate) compile and link the foreign sources — the idiomatic path for BSP objects
 and linker scripts.
 
-> **Note:** an external hardware register whose value changes underneath the
-> program is currently read as a plain (non-volatile) `static`; volatile-correct
-> reads for memory-mapped registers are on the roadmap.
+All access to an EXTERNAL *variable* is **volatile** (reads via
+`read_volatile`, assignments via `write_volatile` through the `static mut`)
+— the definition is foreign by contract, so the optimizer is never allowed
+to cache or elide it. CHARACTER cannot cross the EXTERNAL boundary (no C
+ABI for HAL/S strings) and is rejected at semantic analysis; use INTEGER,
+SCALAR, BOOLEAN or BIT.

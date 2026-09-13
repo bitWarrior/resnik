@@ -3,7 +3,7 @@
 Plan for resolving the four constraints that limit HAL/S programs on
 embedded targets (ESP32-C3 / Cortex-M), found while building the XIAO
 INS-over-Bluetooth project. Status (2026-09-12): **items 0 and 4 implemented** (embedded build tier +
-scaffold-once with `src/shim.rs`); items 3, 1, 2 open.
+scaffold-once with `src/shim.rs`); item 3 implemented (volatile EXTERNAL + CHARACTER FFI check); items 1, 2 open.
 
 Ordering is by leverage: item 4 unblocks project work immediately and is
 small; 3 is small; 1 is medium; 2 is the big one and is split.
@@ -53,7 +53,9 @@ lost on every compile.
 - Size: small. Non-goals: Cargo.toml *merging* (absent-or-keep only);
   workspace layouts.
 
-## Item 3 — `EXTERNAL` correctness: volatile variables, checked FFI types
+## Item 3 — `EXTERNAL` correctness — ✓ done (volatile `static mut` access —
+writes previously did not even compile; CHARACTER-over-FFI rejected at
+semantic analysis)
 
 **Today:** reads/writes of `DECLARE X … EXTERNAL` lower to plain static
 access (codegen.py:2559, `_extern_vars`), so a register or shim-updated
