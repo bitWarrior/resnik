@@ -54,3 +54,11 @@ implemented and are not listed here.
 | Literals | `TRUE`, `FALSE` | Reserved boolean literals. Resnik currently special-cases identifiers named `TRUE` / `FALSE` but does not reserve them, so `DECLARE TRUE INTEGER;` is accepted |
 | | `DEC` | Radix conversions `CHARACTER @DEC(...)` / `BIT @DEC(...)` (`DEC 'digits'` bit literals and infix `CAT` already parse) |
 | Other | `SYSTEM` | System / process attribute |
+
+## Comment cards
+
+`C` comment cards follow the official card rule: the `C` must be in
+**column 1** (followed by whitespace, end of line, or a banner character
+`* - =`), exactly like the `D` directive card. An indented line starting
+with `C ` is code — so a variable named `C` works (`C = C + 1;` is a
+statement, not a comment). Block comments `/* … */` work anywhere.

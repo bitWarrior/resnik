@@ -5,36 +5,36 @@ C ========================================================================
 
 PROGRAM ERROR_TEST;
    
-   C Valid declarations for context
+C Valid declarations for context
    DECLARE ALTITUDE SCALAR DOUBLE;
    DECLARE FLAGS BIT(8);
    DECLARE NAME CHARACTER(32);
    
-   C ====================================================================
-   C Error Test 1: Invalid Bit String
-   C Expected: Error - binary string contains non-binary digit
-   C ====================================================================
+C ====================================================================
+C Error Test 1: Invalid Bit String
+C Expected: Error - binary string contains non-binary digit
+C ====================================================================
    
    DECLARE BAD_BIN BIT(8) INITIAL(BIN '10201010');
    
-   C ====================================================================
-   C Error Test 2: Invalid Hex String
-   C Expected: Error - hex string contains invalid character
-   C ====================================================================
+C ====================================================================
+C Error Test 2: Invalid Hex String
+C Expected: Error - hex string contains invalid character
+C ====================================================================
    
    DECLARE BAD_HEX BIT(16) INITIAL(HEX 'GHIJ');
    
-   C ====================================================================
-   C Error Test 3: Unclosed String Literal
-   C Expected: Error - string not properly terminated
-   C ====================================================================
+C ====================================================================
+C Error Test 3: Unclosed String Literal
+C Expected: Error - string not properly terminated
+C ====================================================================
    
    NAME = 'APOLLO_MISSION;
    
-   C ====================================================================
-   C Error Test 4: Unclosed Block Comment
-   C Expected: Error - block comment not closed before EOF
-   C ====================================================================
+C ====================================================================
+C Error Test 4: Unclosed Block Comment
+C Expected: Error - block comment not closed before EOF
+C ====================================================================
    
    /* This block comment is never closed
       It continues for multiple lines

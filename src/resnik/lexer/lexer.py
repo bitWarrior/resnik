@@ -193,19 +193,20 @@ class Lexer:
         for line in lines:
             line_num += 1
 
-            # HAL/S 'C' comment card. Recognized when 'C' is the first
-            # non-blank character on the line (column 1 or indented) and is
-            # followed by whitespace, end-of-line, or a banner char (* - =).
-            # This keeps keywords (CLOSE, CONSTANT) and C-subscripts (C$1.M)
-            # as code, since those put a letter or '$' right after the C.
+            # HAL/S 'C' comment card: 'C' strictly in COLUMN 1 (the official
+            # card rule, same as the 'D' directive card), followed by
+            # whitespace, end-of-line, or a banner char (* - =). Column 1
+            # only: an indented "C = C + 1;" is a statement on a variable
+            # named C, and the earlier lenient (indented) rule silently
+            # swallowed such statements as comments. Keywords (CLOSE,
+            # CONSTANT) and C-subscripts (C$1.M) put a letter or '$' right
+            # after the C and are never cards.
             # Only consulted outside an open /* */ block.
-            if not in_block_comment:
-                stripped = line.lstrip()
-                if stripped[:1] == "C":
-                    after = stripped[1:2]
-                    if after == "" or after in " \t*-=":
-                        processed_lines.append("")
-                        continue
+            if not in_block_comment and line[:1] == "C":
+                after = line[1:2]
+                if after == "" or after in " \t*-=":
+                    processed_lines.append("")
+                    continue
 
             # Block comments /* */ and '...' strings.
             processed_line: List[str] = []

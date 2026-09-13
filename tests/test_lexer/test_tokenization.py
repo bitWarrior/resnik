@@ -180,3 +180,42 @@ class TestErrorDetection:
         types = [t.type for t in tokens]
         assert "KEYWORD_CAT" in types
         assert types == ["IDENTIFIER", "KEYWORD_CAT", "IDENTIFIER"]
+
+
+class TestCommentCardColumnOne:
+    """Comment cards are 'C' strictly in COLUMN 1 (official HAL/S card
+    rule). The earlier lenient rule also accepted indented cards, which
+    silently swallowed statements on a variable actually named C
+    (found on hardware: an indented `C = C + 1;` vanished and the
+    firmware span forever)."""
+
+    def _lex(self, src):
+        from resnik import Lexer
+        lx = Lexer()
+        return lx, lx.tokenize(src, "<t>")
+
+    def test_variable_named_c_is_code(self):
+        src = "T: PROGRAM;\n  DECLARE C INTEGER;\n  C = C + 1;\nCLOSE T;\n"
+        _lx, toks = self._lex(src)
+        assert [t.lexeme for t in toks if t.line == 3] == ["C", "=", "C", "+", "1", ";"]
+        from resnik import Parser
+        p = Parser()
+        ast = p.parse(toks)
+        assert not p.errors and ast is not None
+
+    def test_column_one_card_is_still_a_comment(self):
+        src = "C this is a comment card\nT: PROGRAM;\nC ===== banner =====\nCLOSE T;\n"
+        _lx, toks = self._lex(src)
+        assert [t.lexeme for t in toks if t.line in (1, 3)] == []
+
+    def test_indented_c_line_is_no_longer_a_comment(self):
+        # an indented "C blah" is now CODE (here: an identifier soup the
+        # parser will reject) — nothing is silently dropped any more
+        src = "T: PROGRAM;\n   C stray indented card\nCLOSE T;\n"
+        _lx, toks = self._lex(src)
+        assert [t.lexeme for t in toks if t.line == 2][:2] == ["C", "stray"]
+
+    def test_close_and_subscripts_never_cards(self):
+        src = "T: PROGRAM;\n  DECLARE C INTEGER;\nCLOSE T;\n"
+        _lx, toks = self._lex(src)
+        assert any(t.lexeme == "CLOSE" for t in toks)
