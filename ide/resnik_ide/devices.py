@@ -67,7 +67,9 @@ def list_probes(
     run=subprocess.run,
 ) -> List[str]:
     """Lines from ``probe-rs list`` (empty if probe-rs is missing / fails)."""
-    exe = which("probe-rs")
+    from resnik_ide.toolchain import find_tool
+
+    exe = find_tool("probe-rs", which)
     if not exe:
         return []
     try:

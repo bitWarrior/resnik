@@ -91,8 +91,8 @@ class TestRecentAndView:
         assert IdeSettings().theme == "light"
         assert IdeSettings().show_target_panel is True
         assert IdeSettings.from_dict({"show_target_panel": 0}).show_target_panel is False
-        assert IdeSettings().show_met is False
-        assert IdeSettings.from_dict({"show_met": 1}).show_met is True
+        # stale keys from older versions (e.g. show_met) are ignored
+        assert IdeSettings.from_dict({"show_met": True}).theme == "light"
         assert IdeSettings.from_dict({"log_height": "x"}).log_height == 0
         assert IdeSettings.from_dict({"log_height": 333}).log_height == 333
         assert IdeSettings.from_dict({"sash_target_panel": 640}).sash_target_panel == 640

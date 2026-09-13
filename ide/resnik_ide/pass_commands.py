@@ -32,6 +32,7 @@ ITEMS = {
     3: ("build_and_run", "ITEM 3 EXEC — Build and Run"),
     4: ("stop", "ITEM 4 EXEC — Stop the running process"),
     5: ("clear_log", "ITEM 5 EXEC — Clear the log"),
+    6: ("met", "ITEM 6 EXEC — Mission Elapsed Time"),
 }
 OPS_MODES = {
     9: ("about", "OPS 9 PRO — About Resnik"),

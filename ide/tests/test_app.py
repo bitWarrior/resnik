@@ -1047,28 +1047,54 @@ class TestDesktopIntegration:
 
 
 class TestShuttleFlavour:
-    def test_met_clock_toggle_and_format(self, app, settings_file):
-        import re
-        assert app.met_visible is False
-        assert re.fullmatch(r"MET \d{3}:\d{2}:\d{2}:\d{2}", app.met())
-        app.set_met_visible(True)
-        app.update()
-        assert app.met_visible and app.status_met.cget("text").startswith("MET 000:00:")
-        assert load_settings(settings_file)[0].show_met is True
-        app.set_met_visible(False)
-        assert not app.met_visible and app._met_after is None
-        assert load_settings(settings_file)[0].show_met is False
+    def test_met_holds_at_zero_before_launch(self, app):
+        import time
+        assert app.launched is False
+        time.sleep(1.1)
+        assert app.met() == "MET 000:00:00:00"  # pre-launch: clock not running
+        text = app.log_met()
+        assert "pre-launch" in text and text in app.log.get_text()
 
-    def test_met_restored_on_next_start(self, app, settings_file):
-        from resnik_ide.app import ResnikIDE
-        app.set_met_visible(True)
-        second = ResnikIDE()
-        try:
-            second.withdraw()
-            second.update()
-            assert second.met_visible and second.var_show_met.get() is True
-        finally:
-            second.shutdown()
+    def test_met_starts_at_flash_completion_and_reflash_resets(self, app):
+        import re
+        import time
+        app._met_line_hook("some other output line")
+        assert app.launched is False
+        app._met_line_hook("[2026-09-13T04:00:00Z INFO ] Flashing has completed!")
+        assert app.launched is True
+        assert "LIFTOFF — MET 000:00:00:00" in app.log.get_text()
+        time.sleep(1.1)
+        assert app.met() == "MET 000:00:00:01"
+        text = app.log_met()
+        assert "pre-launch" not in text and re.fullmatch(r"MET \d{3}:\d{2}:\d{2}:\d{2}", text)
+        app.met_launch()  # re-flash → T-0 again
+        assert app.met() == "MET 000:00:00:00"
+
+    def test_flash_run_wires_the_met_hook(self, app, fake_toolchain, tmp_path, monkeypatch):
+        fake_toolchain.status.espflash = Tool("espflash", "/x/espflash", "espflash 4.6.0")
+        fake_toolchain.status.installed_targets.append("riscv32imc-unknown-none-elf")
+        fake_toolchain.status.installed_components.append("rust-src")
+        app.refresh_toolchain()
+        pump(app, lambda: not app.probing and app.dispatcher.pending == 0)
+        src = _write(tmp_path, "hello.hal", VALID)
+        app.open_file(str(src))
+        app.apply_compile_settings(IdeCompileSettings(target="esp32-c3", emit_cargo="fw"))
+        app.compile()
+        _wait(app)
+        seen = {}
+        monkeypatch.setattr(app, "run_process",
+                            lambda argv, **kw: seen.update(kw) or True)
+        app.flash_run()
+        assert seen.get("line_hook") == app._met_line_hook
+
+    def test_menu_has_met_command(self, app):
+        m = app._menubar
+        for i in range(m.index("end") + 1):
+            if m.type(i) == "cascade" and m.entrycget(i, "label") == "View":
+                sub = m.nametowidget(m.entrycget(i, "menu"))
+                labels = [sub.entrycget(j, "label") for j in range(sub.index("end") + 1)
+                          if sub.type(j) == "command"]
+                assert "Mission Elapsed Time" in labels
 
     def test_fault_status_and_clear(self, app, tmp_path):
         bad = _write(tmp_path, "dup.hal", SEMANTIC_DUP)
@@ -1102,6 +1128,12 @@ class TestShuttleFlavour:
         assert "Semantic Check passed" in app.log.get_text()
         assert app.run_pass_command("item 5") == "clear_log"
         assert app.log.get_text() == ""
+        assert app.run_pass_command("ITEM 6 EXEC") == "met"
+        assert "MET 000:00:00:00 (pre-launch" in app.log.get_text()
+        app.met_launch()
+        app.run_pass_command("item 6")
+        lines = app.log.get_text().splitlines()
+        assert any("MET 000:00:00:0" in ln and "pre-launch" not in ln for ln in lines[-1:])
         assert app.run_pass_command("?") == "help"
         assert "ITEM 3 EXEC — Build and Run" in app.log.get_text()
         assert app.run_pass_command("SPEC 99 PRO") == pass_commands.ILLEGAL_ENTRY
@@ -1180,3 +1212,62 @@ class TestRustViewer:
         app._copy_viewer()
         assert "copied to the clipboard" in app.log.get_text()
         win.destroy()
+
+
+class TestEspflashNonInteractive:
+    def _ready_esp32(self, app, fake_toolchain, tmp_path):
+        fake_toolchain.status.espflash = Tool("espflash", "/x/espflash", "espflash 4.6.0")
+        fake_toolchain.status.installed_targets.append("riscv32imc-unknown-none-elf")
+        fake_toolchain.status.installed_components.append("rust-src")
+        app.refresh_toolchain()
+        pump(app, lambda: not app.probing and app.dispatcher.pending == 0)
+        src = _write(tmp_path, "hello.hal", VALID)
+        app.open_file(str(src))
+        app.apply_compile_settings(IdeCompileSettings(target="esp32-c3", emit_cargo="fw"))
+        app.compile()
+        _wait(app)
+        app.var_port.set("/dev/ttyACM0")
+
+    def test_flash_run_appends_non_interactive(self, app, fake_toolchain, tmp_path, monkeypatch):
+        self._ready_esp32(app, fake_toolchain, tmp_path)
+        calls = []
+        monkeypatch.setattr(app, "run_process", lambda argv, **kw: calls.append((argv, kw)) or True)
+        app.flash_run()
+        argv, kw = calls[0]
+        assert argv[:3] == ["/usr/bin/cargo", "run", "--release"]
+        assert argv[3:] == ["--", "--port", "/dev/ttyACM0", "--non-interactive"]
+        assert kw["header_suffix"] == "  MET 000:00:00:00"  # pre-launch at first flash
+
+    def test_monitor_appends_non_interactive(self, app, fake_toolchain, tmp_path, monkeypatch):
+        self._ready_esp32(app, fake_toolchain, tmp_path)
+        calls = []
+        monkeypatch.setattr(app, "run_process", lambda argv, **kw: calls.append(argv) or True)
+        app.monitor()
+        assert calls[0] == ["/x/espflash", "monitor", "--port", "/dev/ttyACM0", "--non-interactive"]
+
+    def test_old_espflash_gets_no_flag(self, app, fake_toolchain, tmp_path, monkeypatch):
+        self._ready_esp32(app, fake_toolchain, tmp_path)
+        fake_toolchain.status.espflash = Tool("espflash", "/x/espflash", "espflash 2.1.0")
+        app.refresh_toolchain()
+        pump(app, lambda: not app.probing and app.dispatcher.pending == 0)
+        calls = []
+        monkeypatch.setattr(app, "run_process", lambda argv, **kw: calls.append(argv) or True)
+        app.monitor()
+        assert calls[0] == ["/x/espflash", "monitor", "--port", "/dev/ttyACM0"]
+        assert app._espflash_extra(None) == ["--non-interactive"]  # unknown version → modern default
+
+
+class TestFlashHeaderMet:
+    def test_header_line_carries_mission_time(self, app):
+        import sys as _s
+        app.met_launch()
+        app.run_process([_s.executable, "-c", "print('x')"], what="Flash & Run (espflash)",
+                        header_suffix=f"  {app.met()}")
+        _wait(app)
+        assert "── Flash & Run (espflash) ──  MET 000:00:00:0" in app.log.get_text()
+
+    def test_plain_headers_are_unchanged(self, app):
+        import sys as _s
+        app.run_process([_s.executable, "-c", "print('x')"], what="Build")
+        _wait(app)
+        assert "── Build ──\n" in app.log.get_text() + "\n"

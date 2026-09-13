@@ -12,9 +12,11 @@ for tests.
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Callable, List, Optional, Sequence
 
 from resnik.backend.target_spec import SPECS
@@ -23,6 +25,7 @@ RunFn = Callable[..., "subprocess.CompletedProcess[str]"]
 WhichFn = Callable[[str], Optional[str]]
 
 RUSTUP_URL = "https://rustup.rs"
+CARGO_BIN = Path.home() / ".cargo" / "bin"
 
 
 @dataclass
@@ -129,8 +132,22 @@ def _run(run: RunFn, argv: Sequence[str], timeout: float = 20.0) -> "subprocess.
         return subprocess.CompletedProcess(list(argv), 127, "", str(exc))
 
 
-def _tool(name: str, which: WhichFn, run: RunFn, version_args=("--version",)) -> Tool:
+def find_tool(name: str, which: WhichFn = shutil.which,
+              cargo_bin: Optional[Path] = None) -> Optional[str]:
+    """PATH lookup with a fallback to ``~/.cargo/bin`` — where ``cargo
+    install`` puts binaries, which is often not on PATH when rustup/cargo
+    come from the distro."""
     path = which(name)
+    if path:
+        return path
+    cand = (cargo_bin if cargo_bin is not None else CARGO_BIN) / name
+    if cand.is_file() and os.access(cand, os.X_OK):
+        return str(cand)
+    return None
+
+
+def _tool(name: str, which: WhichFn, run: RunFn, version_args=("--version",)) -> Tool:
+    path = find_tool(name, which)
     if not path:
         return Tool(name)
     cp = _run(run, [path, *version_args])

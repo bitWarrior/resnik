@@ -150,3 +150,35 @@ class TestRequirements:
         reqs = requirements("nope", self._status())
         assert [r.key for r in reqs] == ["rustc", "cargo"]
         assert isinstance(reqs[0], Requirement)
+
+
+class TestFindTool:
+    def test_path_hit_wins(self, tmp_path):
+        from resnik_ide.toolchain import find_tool
+        assert find_tool("x", which=lambda n: "/usr/bin/x", cargo_bin=tmp_path) == "/usr/bin/x"
+
+    def test_falls_back_to_cargo_bin(self, tmp_path):
+        import os
+        from resnik_ide.toolchain import find_tool
+        exe = tmp_path / "espflash"
+        exe.write_text("#!/bin/sh\n")
+        exe.chmod(0o755)
+        assert find_tool("espflash", which=lambda n: None, cargo_bin=tmp_path) == str(exe)
+        assert find_tool("missing", which=lambda n: None, cargo_bin=tmp_path) is None
+        exe.chmod(0o644)  # not executable → not found
+        assert find_tool("espflash", which=lambda n: None, cargo_bin=tmp_path) is None
+
+    def test_probe_uses_fallback(self, tmp_path, monkeypatch):
+        import subprocess
+        from resnik_ide import toolchain
+        exe = tmp_path / "espflash"
+        exe.write_text("#!/bin/sh\necho espflash 9.9.9\n")
+        exe.chmod(0o755)
+        monkeypatch.setattr(toolchain, "CARGO_BIN", tmp_path)
+
+        def run(argv, **kw):
+            return subprocess.CompletedProcess(argv, 0, "espflash 9.9.9\n", "")
+
+        st = toolchain.probe(which=lambda n: None, run=run)
+        assert st.espflash.present and st.espflash.path == str(exe)
+        assert st.rustup.present is False  # no fake rustup in cargo_bin

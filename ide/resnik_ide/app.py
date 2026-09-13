@@ -89,6 +89,7 @@ class ResnikIDE(tk.Tk):
         self._syncing = False  # guard: toolbar vars <-> settings
 
         theme.apply(self, self.settings.theme)
+        theme.enable_dark_file_dialogs(self)
         fonts.apply_ui_font(self, self.settings.ui_font_family, self.settings.ui_font_size)
         self.dispatcher = Dispatcher(self)
         self.runner = ProcessRunner(self.dispatcher)
@@ -131,7 +132,6 @@ class ResnikIDE(tk.Tk):
         if not self.settings.show_target_panel:
             self.set_target_panel_visible(False, save=False)
         self._fault = False  # "GPC FAULT" latched until the next clean check/compile
-        self.set_met_visible(self.settings.show_met, save=False)
         self._paned.bind("<ButtonRelease-1>", self._on_sash_release)
         self._outer.bind("<ButtonRelease-1>", self._on_sash_release)
         # Keep re-applying the saved split while the window manager is still
@@ -200,9 +200,7 @@ class ResnikIDE(tk.Tk):
         self.var_show_target = tk.BooleanVar(value=self.settings.show_target_panel)
         m_view.add_checkbutton(label="Target Panel", accelerator="Ctrl+Shift+T",
                                variable=self.var_show_target, command=self._toggle_target_panel)
-        self.var_show_met = tk.BooleanVar(value=self.settings.show_met)
-        m_view.add_checkbutton(label="Mission Elapsed Time", variable=self.var_show_met,
-                               command=lambda: self.set_met_visible(bool(self.var_show_met.get())))
+        m_view.add_command(label="Mission Elapsed Time", command=self.log_met)
         m_view.add_separator()
         m_view.add_command(label="Fonts…", command=self.open_fonts)
         menubar.add_cascade(label="View", menu=m_view)
@@ -305,10 +303,7 @@ class ResnikIDE(tk.Tk):
         self.status_file.pack(side="left", fill="x", expand=True)
         self.status_pos = ttk.Label(bar, text="Ln 1, Col 1", width=16, anchor="center")
         self.status_pos.pack(side="left")
-        self._t0 = time.monotonic()
-        self._met_after: Optional[str] = None
-        self.status_met = ttk.Label(bar, text="", width=18, anchor="center", style="Muted.TLabel")
-        # packed by set_met_visible()
+        self._met_launch: Optional[float] = None  # T-0: firmware started on the board
         self.status_remember = ttk.Label(bar, text="", anchor="center", style="Muted.TLabel")
         self.status_remember.pack(side="left", fill="x", expand=True)
         self.status_msg = ttk.Label(bar, text="", width=36, anchor="e")
@@ -598,39 +593,37 @@ class ResnikIDE(tk.Tk):
 
     # -- Shuttle flavour: MET clock, GPC fault, PASS keyboard ----------------------
 
+    @property
+    def launched(self) -> bool:
+        return self._met_launch is not None
+
     def met(self) -> str:
-        """Mission Elapsed Time since the IDE started, ``ddd:hh:mm:ss``."""
-        s = int(time.monotonic() - self._t0)
+        """Mission Elapsed Time, ``ddd:hh:mm:ss``.  T-0 is the moment firmware
+        last started on the board (flash completed); zero before that."""
+        s = 0 if self._met_launch is None else int(time.monotonic() - self._met_launch)
         d, s = divmod(s, 86400)
         h, s = divmod(s, 3600)
         m, s = divmod(s, 60)
         return f"MET {d:03d}:{h:02d}:{m:02d}:{s:02d}"
 
-    @property
-    def met_visible(self) -> bool:
-        return bool(self.status_met.winfo_manager())
+    def met_launch(self) -> None:
+        """T-0: called when a flash completes and the board starts running.
+        A re-flash restarts the clock."""
+        self._met_launch = time.monotonic()
+        self.log.log("LIFTOFF — MET 000:00:00:00", "ok")
 
-    def set_met_visible(self, visible: bool, *, save: bool = True) -> None:
-        visible = bool(visible)
-        if visible and not self.met_visible:
-            self.status_met.pack(side="left", after=self.status_pos)
-            self._tick_met()
-        elif not visible and self.met_visible:
-            self.status_met.pack_forget()
-            if self._met_after is not None:
-                self.after_cancel(self._met_after)
-                self._met_after = None
-        self.var_show_met.set(visible)
-        if save and self.settings.show_met != visible:
-            self.settings.show_met = visible
-            self._save_settings()
+    def _met_line_hook(self, line: str) -> None:
+        """Watches Flash & Run output for the moment the firmware starts."""
+        if "Flashing has completed" in line or "Finished in" in line:
+            self.met_launch()
 
-    def _tick_met(self) -> None:
-        if not self.met_visible:
-            self._met_after = None
-            return
-        self.status_met.configure(text=self.met())
-        self._met_after = self.after(1000, self._tick_met)
+    def log_met(self) -> str:
+        """View → Mission Elapsed Time: one MET line into the log."""
+        text = self.met()
+        if not self.launched:
+            text += " (pre-launch — no firmware started on the board yet)"
+        self.log.log(text, "cmd")
+        return text
 
     def refresh_remembrance(self, today=None) -> Optional[str]:
         """Date-gated quiet remembrance in the status bar (re-checked hourly
@@ -699,6 +692,8 @@ class ResnikIDE(tk.Tk):
             self.stop()
         elif action == "clear_log":
             self.log.clear()
+        elif action == "met":
+            self.log_met()
         elif action == "about":
             self.about()
         return action
@@ -1169,18 +1164,22 @@ class ResnikIDE(tk.Tk):
     # ------------------------------------------------------------ processes --
 
     def run_process(self, argv, *, cwd=None, env=None, what: str = "Process",
-                    on_done: Optional[Callable[[ProcessResult], None]] = None) -> bool:
+                    on_done: Optional[Callable[[ProcessResult], None]] = None,
+                    line_hook: Optional[Callable[[str], None]] = None,
+                    header_suffix: str = "") -> bool:
         """Stream an external command into the log.  One at a time; Stop cancels."""
         if self.busy:
             self.log.log("Another job is running — Stop it first.", "warn")
             return False
         import shlex
         shown = " ".join(shlex.quote(str(a)) for a in argv)
-        self.log.log(f"── {what} ──", "cmd")
+        self.log.log(f"── {what} ──{header_suffix}", "cmd")
         self.log.log(("$ " if not cwd else f"$ (cd {cwd}) ") + shown, "cmd")
 
         def on_line(line: str) -> None:
             self.log.log(line, "raw", timestamp=False)
+            if line_hook is not None:
+                line_hook(line)
 
         def on_exit(res: ProcessResult) -> None:
             self._set_busy(False)
@@ -1246,6 +1245,18 @@ class ResnikIDE(tk.Tk):
             return None
         return proj
 
+    @staticmethod
+    def _espflash_extra(st: Optional[ToolchainStatus]) -> list:
+        """espflash's interactive monitor needs a real stdin; the IDE runs it
+        with stdin=/dev/null, so ask for --non-interactive (espflash >= 3;
+        output still streams, only the CTRL+R/CTRL+C key reader is skipped)."""
+        import re
+        version = (st.espflash.version or "") if st else ""
+        m = re.search(r"(\d+)\.", version)
+        if m and int(m.group(1)) < 3:
+            return []
+        return ["--non-interactive"]
+
     def _preflight(self) -> bool:
         """Toolchain requirements for the current target; log what is missing."""
         st = self.toolchain_status
@@ -1281,11 +1292,17 @@ class ResnikIDE(tk.Tk):
         if target == "esp32-c3":
             argv = [st.cargo.path or "cargo", "run", "--release"]
             port = self.var_port.get().strip()
+            extra = []
             if port:
-                argv += ["--", "--port", port]
+                extra += ["--port", port]
             else:
                 self.log.log("No serial port selected — espflash will auto-detect / ask.", "warn")
-            self.run_process(argv, cwd=proj, what="Flash & Run (espflash)")
+            extra += self._espflash_extra(st)
+            if extra:
+                argv += ["--", *extra]
+            self.run_process(argv, cwd=proj, what="Flash & Run (espflash)",
+                             line_hook=self._met_line_hook,
+                             header_suffix=f"  {self.met()}")
         elif target == "cortex-m":
             chip = self.var_chip.get().strip()
             if not chip:
@@ -1298,7 +1315,9 @@ class ResnikIDE(tk.Tk):
             def after_build(res: ProcessResult) -> None:
                 if res.ok:
                     self.run_process([probe, "run", "--chip", chip, str(elf)], cwd=proj,
-                                     what="Flash & Run (probe-rs)")
+                                     what="Flash & Run (probe-rs)",
+                                     line_hook=self._met_line_hook,
+                                     header_suffix=f"  {self.met()}")
 
             self.run_process([st.cargo.path or "cargo", "build", "--release"], cwd=proj,
                              what="Build", on_done=after_build)
@@ -1318,6 +1337,7 @@ class ResnikIDE(tk.Tk):
             port = self.var_port.get().strip()
             if port:
                 argv += ["--port", port]
+            argv += self._espflash_extra(st)
             self.run_process(argv, what="Monitor (espflash)")
         elif target == "cortex-m":
             if st is None or not st.probe_rs.present:
@@ -1514,7 +1534,7 @@ class ResnikIDE(tk.Tk):
         except tk.TclError:  # pragma: no cover
             pass
         self.dispatcher.stop()
-        for aid in (self._met_after, getattr(self, "_remember_after", None),
+        for aid in (getattr(self, "_remember_after", None),
                     getattr(self, "_sash_restore_after", None)):
             if aid is not None:
                 try:

@@ -34,6 +34,8 @@ QUIET_ENV: Dict[str, str] = {
 
 GRACE_SECONDS = 3.0  # SIGTERM → SIGKILL
 
+CARGO_BIN = os.path.join(os.path.expanduser("~"), ".cargo", "bin")
+
 
 def strip_ansi(s: str) -> str:
     return _ANSI.sub("", s)
@@ -61,6 +63,7 @@ class _Active:
     on_exit: Callable[[ProcessResult], None]
     cancelled: bool = False
     killer: Optional[threading.Timer] = None
+    delivered: bool = False  # on_exit has run on the main thread
 
 
 class ProcessRunner:
@@ -76,8 +79,12 @@ class ProcessRunner:
 
     @property
     def running(self) -> bool:
+        """True until the exit result has been DELIVERED on the main thread —
+        the process may already be dead while its final output lines are
+        still queued; callers polling ``running`` must not observe an empty
+        log in that window."""
         a = self._active
-        return a is not None and a.proc.poll() is None
+        return a is not None and (a.proc.poll() is None or not a.delivered)
 
     @property
     def current_argv(self) -> Optional[List[str]]:
@@ -105,6 +112,11 @@ class ProcessRunner:
                 return False
             full_env = dict(os.environ)
             full_env.update(QUIET_ENV)
+            # cargo-installed tools (espflash, probe-rs) live in ~/.cargo/bin,
+            # which is often missing from PATH; the scaffold's `cargo run`
+            # runner must be able to find them.
+            if os.path.isdir(CARGO_BIN) and CARGO_BIN not in                     full_env.get("PATH", "").split(os.pathsep):
+                full_env["PATH"] = full_env.get("PATH", "") + os.pathsep + CARGO_BIN
             if env:
                 full_env.update(env)
             kwargs: Dict[str, object] = {}
@@ -177,4 +189,9 @@ class ProcessRunner:
             result = ProcessResult(a.argv, rc, cancelled=a.cancelled,
                                    duration=time.monotonic() - a.started)
             self.history.append(result)
-            self._dispatcher.post(lambda: a.on_exit(result))
+
+            def deliver() -> None:
+                a.delivered = True
+                a.on_exit(result)
+
+            self._dispatcher.post(deliver)

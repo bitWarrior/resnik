@@ -52,3 +52,63 @@ class TestApply:
         assert str(m.cget("background")) == theme.DARK["bg"]
         assert theme.all_menus(m) == [m, sub]
         theme.apply(tk_root, "light")
+
+
+class TestDarkFileDialogs:
+    def _fake_dialog(self, tk_root):
+        import tkinter as tk
+        top = tk.Toplevel(tk_root, class_="TkFDialog")
+        canvas = tk.Canvas(top, background="white")
+        canvas.pack()
+        item = canvas.create_text(10, 10, text="hello_world.hal", fill="black")
+        menu = tk.Menu(top, tearoff=False)
+        return top, canvas, item, menu
+
+    def test_apply_dialog_colors_darkens_canvas_and_text(self, tk_root):
+        theme.apply(tk_root, "dark")
+        try:
+            top, canvas, item, menu = self._fake_dialog(tk_root)
+            assert theme._apply_dialog_colors(tk_root, str(top)) is True
+            assert canvas.cget("background") == theme.DARK["field_bg"]
+            assert canvas.itemcget(item, "fill") == theme.DARK["field_fg"]
+            assert str(menu.cget("background")) == theme.DARK["bg"]
+            # a text item the dialog draws later gets caught by a re-apply
+            item2 = canvas.create_text(10, 30, text="new.hal", fill="black")
+            theme._apply_dialog_colors(tk_root, str(top))
+            assert canvas.itemcget(item2, "fill") == theme.DARK["field_fg"]
+            # non-black fills (selection highlight) are left alone
+            sel = canvas.create_text(10, 50, text="sel", fill="#ffffff")
+            theme._apply_dialog_colors(tk_root, str(top))
+            assert canvas.itemcget(sel, "fill") == "#ffffff"
+            top.destroy()
+        finally:
+            theme.apply(tk_root, "light")
+
+    def test_map_binding_restyles_on_open(self, tk_root):
+        import time
+        theme.apply(tk_root, "dark")
+        try:
+            theme.enable_dark_file_dialogs(tk_root)
+            top, canvas, item, _menu = self._fake_dialog(tk_root)
+            top.geometry("+80+80")
+            top.deiconify()
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline and \
+                    canvas.cget("background") != theme.DARK["field_bg"]:
+                tk_root.update()
+                time.sleep(0.02)
+            assert canvas.cget("background") == theme.DARK["field_bg"]
+            assert canvas.itemcget(item, "fill") == theme.DARK["field_fg"]
+            top.destroy()
+        finally:
+            theme.apply(tk_root, "light")
+
+    def test_light_mode_leaves_dialogs_alone(self, tk_root):
+        theme.apply(tk_root, "light")
+        theme.enable_dark_file_dialogs(tk_root)
+        top, canvas, item, _menu = self._fake_dialog(tk_root)
+        top.deiconify()
+        tk_root.update()
+        assert canvas.cget("background") == "white"
+        assert canvas.itemcget(item, "fill") == "black"
+        top.destroy()

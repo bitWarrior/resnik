@@ -197,6 +197,87 @@ def style_text(widget: tk.Text, p: Optional[Palette] = None, *, kind: str = "edi
                      highlightbackground=p["border"], highlightcolor=p["select_bg"])
 
 
+# ---------------------------------------------------------------------------
+# Tk's built-in file dialogs (tk_getOpenFile / tk_getSaveFile / chooseDirectory)
+# are classic-Tk widgets whose icon list hardcodes a white canvas and black
+# text (iconlist.tcl), so the option database cannot darken them.  We restyle
+# the live widget tree whenever such a dialog maps, and keep re-applying while
+# it is open (navigating to another directory redraws the black text).
+# ---------------------------------------------------------------------------
+
+_DIALOG_CLASSES = ("TkFDialog", "TkChooseDir", "TkMotifFDialog")
+
+
+def enable_dark_file_dialogs(root: tk.Misc) -> None:
+    """Bind once on ``root``: dark-restyle Tk file dialogs as they open."""
+    root.bind_all("<Map>", lambda e: _on_map(root, e), add="+")
+
+
+def _on_map(root: tk.Misc, event) -> None:
+    if not is_dark():
+        return
+    try:
+        path = str(event.widget)
+        top = root.tk.call("winfo", "toplevel", path)
+        if root.tk.call("winfo", "class", top) in _DIALOG_CLASSES:
+            _restyle_dialog(root, str(top))
+    except tk.TclError:  # pragma: no cover - widget vanished mid-event
+        pass
+
+
+def _restyle_dialog(root: tk.Misc, top: str, repeats: int = 40) -> None:
+    """Recolour one dialog toplevel now, then keep watching it (~250 ms)
+    while it stays mapped, so newly drawn items are caught too."""
+    if not _apply_dialog_colors(root, top):
+        return
+    if repeats > 0:
+        root.after(250, lambda: _still_open(root, top) and
+                   _restyle_dialog(root, top, repeats - 1))
+
+
+def _still_open(root: tk.Misc, top: str) -> bool:
+    try:
+        return bool(int(root.tk.call("winfo", "exists", top))) and             bool(int(root.tk.call("winfo", "ismapped", top))) and is_dark()
+    except tk.TclError:  # pragma: no cover
+        return False
+
+
+def _apply_dialog_colors(root: tk.Misc, top: str) -> bool:
+    """Walk the dialog's widget tree with raw Tcl calls (its widgets are not
+    tkinter objects) and recolour the classic-Tk pieces."""
+    p = _current
+    call = root.tk.call
+    try:
+        stack = [top]
+        while stack:
+            w = stack.pop()
+            stack.extend(str(c) for c in root.tk.splitlist(call("winfo", "children", w)))
+            cls = call("winfo", "class", w)
+            if cls == "Canvas":
+                call(w, "configure", "-background", p["field_bg"],
+                     "-highlightbackground", p["bg"], "-highlightcolor", p["select_bg"])
+                for item in root.tk.splitlist(call(w, "find", "all")):
+                    if call(w, "type", item) == "text":
+                        fill = str(call(w, "itemcget", item, "-fill"))
+                        if fill in ("black", "#000000", ""):
+                            call(w, "itemconfigure", item, "-fill", p["field_fg"])
+            elif cls in ("Listbox",):
+                call(w, "configure", "-background", p["field_bg"], "-foreground",
+                     p["field_fg"], "-selectbackground", p["select_bg"],
+                     "-selectforeground", p["select_fg"])
+            elif cls in ("Menu",):
+                call(w, "configure", "-background", p["bg"], "-foreground", p["fg"],
+                     "-activebackground", p["select_bg"],
+                     "-activeforeground", p["select_fg"])
+            elif cls in ("Toplevel", "Frame", "Label", "Message"):
+                call(w, "configure", "-background", p["bg"])
+                if cls in ("Label", "Message"):
+                    call(w, "configure", "-foreground", p["fg"])
+        return True
+    except tk.TclError:  # pragma: no cover - dialog torn down mid-walk
+        return False
+
+
 def all_menus(menubar: tk.Menu) -> List[tk.Menu]:
     """The menubar plus every cascade reachable from it."""
     out: List[tk.Menu] = []

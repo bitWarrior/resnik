@@ -137,3 +137,39 @@ class TestRunner:
                 on_line=lines.append, on_exit=done.append)
         _drive(d, lambda: bool(done))
         assert lines == ["green done"]
+
+
+class TestCargoBinOnPath:
+    def test_cargo_bin_appended_to_child_path(self, tmp_path, monkeypatch):
+        import os
+        from resnik_ide import runner as runner_mod
+        monkeypatch.setattr(runner_mod, "CARGO_BIN", str(tmp_path))
+        d = Dispatcher(root=None)
+        r = ProcessRunner(d)
+        lines, done = [], []
+        r.start([PY, "-c", "import os; print(os.environ['PATH'].split(os.pathsep)[-1])"],
+                on_line=lines.append, on_exit=done.append)
+        _drive(d, lambda: bool(done))
+        assert lines == [str(tmp_path)]
+        assert done[0].ok
+
+
+class TestRunningUntilDelivered:
+    def test_running_stays_true_until_exit_delivered(self):
+        d = Dispatcher(root=None)
+        r = ProcessRunner(d)
+        lines, done = [], []
+        r.start([PY, "-u", "-c", "print('tail line')"], on_line=lines.append,
+                on_exit=done.append)
+        # wait for the OS process to die without draining the dispatcher
+        deadline = time.monotonic() + 10
+        while r._active.proc.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert r._active.proc.poll() is not None
+        # dead process, undelivered callbacks → still "running"
+        while not done:
+            assert r.running is True
+            d.drain()
+            time.sleep(0.01)
+        assert lines == ["tail line"]  # lines always precede the exit result
+        assert r.running is False
