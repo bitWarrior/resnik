@@ -937,8 +937,9 @@ window geometry, are remembered between sessions.
   (declarations, scopes, dimension/arity checks, `EXIT` placement, template
   signatures …) lives in the parser, so a clean check means a semantically
   valid unit. With an embedded target selected it also warns about features
-  that are not yet supported on `no_std` (VECTOR/MATRIX, SCHEDULE/TASK,
-  COMPOOL).
+  that are not yet supported on `no_std` (`WAIT`, `READ`, `CHARACTER`
+  variables/concatenation; `VECTOR`/`MATRIX`, `SCHEDULE`/`TASK` and
+  `COMPOOL` all lower to bare metal now).
 - **Compile** runs the full `resnik compile` pipeline with the options from
   **Options…** and writes `<file>.rs` next to the source (plus `--emit-cargo`
   scaffold, `--gen-tpl` templates, `--emit-exe` executable if set).

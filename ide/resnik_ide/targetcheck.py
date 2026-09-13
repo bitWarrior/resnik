@@ -3,7 +3,7 @@ Target-aware check: which HAL/S features of a parsed unit would make the
 generated firmware fail on a ``no_std`` target?
 
 The backend already emits ``compile_error!("resnik: …")`` for those
-(VECTOR/MATRIX & math intrinsics, SCHEDULE/TASK, COMPOOL — see
+(WAIT, READ, CHARACTER variables/concatenation — see
 ``RustCodeGenerator._emit_embedded_guard``).  Generating the code in memory
 and collecting those messages surfaces them at Semantic Check time instead
 of at ``cargo build`` time.

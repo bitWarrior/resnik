@@ -2,9 +2,11 @@
 
 Plan for resolving the four constraints that limit HAL/S programs on
 embedded targets (ESP32-C3 / Cortex-M), found while building the XIAO
-INS-over-Bluetooth project. Status (2026-09-12): **items 0 and 4 implemented** (embedded build tier +
-scaffold-once with `src/shim.rs`); items 1, 2a and 3 implemented; item 2b (cyclic executive)
-implemented per `docs/CYCLIC_EXECUTIVE_DESIGN.md` — **all roadmap items done**.
+INS-over-Bluetooth project. Status (2026-09-13): **all roadmap items done** —
+0 (embedded build tier), 4 (scaffold-once + `src/shim.rs`), 3 (volatile
+EXTERNAL), 1 (libm math), 2a (COMPOOL via critical sections) and 2b
+(cyclic executive per `docs/CYCLIC_EXECUTIVE_DESIGN.md`). The per-item
+"Today:" paragraphs below describe the state *before* each item landed.
 
 Ordering is by leverage: item 4 unblocks project work immediately and is
 small; 3 is small; 1 is medium; 2 is the big one and is split.
@@ -17,7 +19,8 @@ the XIAO ESP32-C3 where behavior changes.
 ---
 
 ## Item 0 (enabler) — build-only embedded regression tier — ✓ done
-(`tests/regression/run_embedded_build.sh`: 15 esp32-c3 cases + 1 cortex-m)
+(`tests/regression/run_embedded_build.sh`: 28 esp32-c3 cases + 1 cortex-m,
+grown as later items landed)
 
 There is no automated check that generated firmware *compiles* for embedded
 targets; the guard rails are emission-string tests only.
@@ -111,9 +114,9 @@ codegen.py:856), `_uses_runtime` (codegen.py:457) trips the
 
 ## Item 2 — SCHEDULE / TASK / COMPOOL on bare metal
 
-**Today:** SCHEDULE/TASK lower to `std::thread`, COMPOOL to
+**Today (pre-item-2):** SCHEDULE/TASK lowered to `std::thread`, COMPOOL to
 `std::sync::Mutex` — both guarded off on embedded. Two phases, because the
-first is mechanical and the second needs a design decision.
+first was mechanical and the second needed a design decision. Both done.
 
 **2a — COMPOOL via critical sections — ✓ done** (a CsMutex with a
 std::sync::Mutex-shaped API, so generated access sites are identical
@@ -125,8 +128,15 @@ become `critical_section::with(|cs| …)`. Same observable semantics as the
 host Mutex for a single-core superloop. Tests: emission + embedded build +
 hardware smoke (two "processes" — see 2b — sharing a compool).
 
-**2b — cyclic-executive scheduler (large, own design doc first).** HAL/S's
-real-time model on a chip with no OS:
+**2b — cyclic-executive scheduler — ✓ done** (implemented per
+`docs/CYCLIC_EXECUTIVE_DESIGN.md`: generated `mod hal_exec` superloop,
+µs ticks, no-drift periods, declaration-order ties, overrun debug line;
+TERMINATE and CANCEL idle the slot; `WAIT` became a `compile_error!` on
+embedded — the design review rejected v1's "blocking wait" idea because a
+blocking wait would stall every task, violating HAL/S §8.6. Verified by
+`tests/regression/run_exec_semantics.sh`, the embedded build tier's
+`exec_*` examples, and two-rate + priority-chain runs on the XIAO).
+Original plan — HAL/S's real-time model on a chip with no OS:
 - Generate a **superloop executive**: a static task table (fn pointer,
   period, priority, next-due tick) from `SCHEDULE T EVERY n PRIORITY(p)`;
   the main loop picks the highest-priority due task each tick — cooperative,
@@ -156,7 +166,7 @@ real-time model on a chip with no OS:
 | 3 | 3 volatile EXTERNAL + FFI type checks | S–M | trustworthy shims |
 | 4 | 1 libm-backed VECTOR/MATRIX | M | real INS math in HAL/S |
 | 5 | 2a COMPOOL via critical-section | M | shared state between loops |
-| 6 | 2b cyclic executive (design doc → impl) | L | SCHEDULE/TASK on hardware |
+| 6 | 2b cyclic executive (design doc → impl) — ✓ done | L | SCHEDULE/TASK on hardware |
 
 Steps 1–4 are each a normal work-item with the usual pytest +
 mutation-kill + regression + hardware-smoke proof; 2b starts with a design

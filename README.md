@@ -263,7 +263,7 @@ docs/         specifications, guides, examples
 
 ```bash
 python -m pytest                            # unit tests (no rustc needed)
-./tests/regression/run_regression.sh        # compile + run every example (needs rustc)
+./tests/regression/run_regression.sh        # compile + run the registered examples (needs rustc)
 ./tests/regression/run_embedded_build.sh    # cargo-build examples for esp32-c3 (no board)
 ./tests/regression/run_exec_semantics.sh    # cyclic-executive semantics (fake clock, needs rustc)
 ```

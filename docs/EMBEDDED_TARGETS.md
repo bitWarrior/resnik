@@ -34,13 +34,16 @@ priority-picked superloop instead of `loop {}` — see
 `esp32-c3` the time base is the esp-hal system timer; on `cortex-m` your
 `src/shim.rs` must export `extern "C" fn hal_exec_now_us() -> u64` (the
 stub's header shows the signature) or the link fails with
-`undefined symbol: hal_exec_now_us`. Features whose
+`undefined symbol: hal_exec_now_us`. `TERMINATE` (named and bare, HAL/S
+§8.5) and `CANCEL` idle the task's executive slot, and `EVENT` variables
+with `SIGNAL`/`SET`/`RESET` lower to `core::sync::atomic::AtomicBool`.
+Features whose
 lowering still depends on `std` — `WAIT` (a blocking wait would stall
-every task in the superloop, violating HAL/S §8.6), `READ`, and
+every task in the superloop, violating HAL/S §8.6; a design-v2 topic in
+`docs/CYCLIC_EXECUTIVE_DESIGN.md`), `READ`, and
 `CHARACTER` variables / concatenation (heap allocation) — emit a
 `compile_error!` naming the
-feature rather than failing silently. These are on the embedded roadmap
-(`docs/NO_STD_ROADMAP.md`).
+feature rather than failing silently.
 
 ## Cortex-M stub
 

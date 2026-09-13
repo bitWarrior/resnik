@@ -13,9 +13,11 @@ below is identity, legal, hygiene, then flipping visibility.
 
 1. Pick one GitHub home (`bitWarrior/resnik` or an org) and fix URLs/email.
 2. Untrack `__pycache__` + `coverage.xml`; gitignore `.claude/`.
-3. Commit the ESP32-C3 / `TargetSpec` work or revert it so `main` is clean.
-4. Write `CODE_OF_CONDUCT.md`, `CONTRIBUTING.md`, `SECURITY.md`, `CHANGELOG.md`.
-5. Stop claiming CI that is not there — or add the pytest workflow.
+3. ~~Commit the ESP32-C3 / `TargetSpec` work~~ — done; `main` is clean.
+4. Write `CODE_OF_CONDUCT.md`, `SECURITY.md`, `CHANGELOG.md`
+   (`CONTRIBUTING.md` is done).
+5. Decide on CI: add the pytest workflow, or ship without one (the docs no
+   longer claim it exists).
 6. Note HAL/S PDF provenance (`docs/THIRD_PARTY.md` or a README note).
 7. Flip the GitHub repo to **public**, tag `v1.0.0`.
 
@@ -103,8 +105,8 @@ These are in git today and should not ship:
 
 - `coverage.xml`
 - `tests/**/__pycache__/*.pyc`
-- empty `CONTRIBUTING.md` and `CODE_OF_CONDUCT.md` (fill them; do not leave
-  zero-byte files)
+- empty `CODE_OF_CONDUCT.md` (fill it; do not leave a zero-byte file —
+  `CONTRIBUTING.md` has since been written)
 
 `resnik-venv/` is already in `.gitignore`. Keep it that way.
 
@@ -128,14 +130,9 @@ git add .gitignore
 
 ### Clean `main`
 
-Uncommitted ESP32-C3 / `TargetSpec` work is sitting on disk:
-
-- `src/resnik/backend/target_spec.py` (untracked)
-- `tests/test_backend/test_targets.py` (untracked)
-- `src/resnik/backend/codegen.py`, `src/resnik/backend/__init__.py`,
-  `src/resnik/cli.py`, `README.md` (modified)
-
-Commit it, or revert it, so the public `main` is one coherent snapshot.
+Done — the ESP32-C3 / `TargetSpec` work (and everything since: the no_std
+roadmap items, the cyclic executive, the IDE) is committed and pushed;
+keep `main` a coherent snapshot before the public flip.
 
 ### Last scan
 
@@ -151,22 +148,15 @@ git ls-files | grep -E 'venv|__pycache__|\.pyc$|coverage.xml|\.claude'
 | ---- | ------ | ------- |
 | `LICENSE.md` | Present (GPLv3) | License text |
 | `CODE_OF_CONDUCT.md` | Empty | Contributor Covenant (or any CoC you will enforce) |
-| `CONTRIBUTING.md` | Empty | venv, `python -m pytest`, `./tests/regression/run_regression.sh`, PR style |
+| `CONTRIBUTING.md` | **Done** | Setup, project layout, and all four test layers |
 | `SECURITY.md` | Missing | Where to report vulnerabilities (email is enough) |
 | `CHANGELOG.md` | Missing | First entry for the tag you are about to cut (`pyproject.toml` already links this path) |
 
-`CONTRIBUTING.md` should point at the Testing section of `README.md` rather
-than duplicating it.
-
 ### CI honesty
 
-The README project tree currently claims these exist; they do not:
-
-- `.pre-commit-config.yaml`
-- `.github/workflows/`
-
-Either add a minimal pytest workflow, or delete those two lines from the
-README so a clone does not look unfinished.
+The docs no longer claim `.pre-commit-config.yaml` or `.github/workflows/`
+exist (that stale project-tree listing has been fixed). The remaining
+decision is whether to add a minimal pytest workflow before going public.
 
 A one-job Actions file is enough for v1:
 
@@ -200,9 +190,12 @@ The package is already **1.0.0** (`pyproject.toml`, `src/resnik/__init__.py`).
 That is fine if it means “usable compiler,” but say so plainly in the README:
 
 - Hosted `std` path works (lexer, parser, Rust backend, regression).
-- `--target cortex-m` is a **stub**.
-- `--target esp32-c3` is the first silicon profile; `VECTOR` / `MATRIX`,
-  `SCHEDULE` / `TASK`, and `COMPOOL` still emit `compile_error!`.
+- `--target cortex-m` is a **stub** (crate shape, semihosting WRITE; a
+  SCHEDULE program additionally needs a `hal_exec_now_us` shim).
+- `--target esp32-c3` is the first silicon profile; `VECTOR`/`MATRIX`,
+  `COMPOOL` and `SCHEDULE`/`TASK` (cyclic executive) all lower — the
+  remaining `compile_error!` gaps are `WAIT`, `READ` and `CHARACTER`
+  variables.
 - Many Appendix B keywords are still future work (already listed in the
   README).
 

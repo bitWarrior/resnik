@@ -1,7 +1,7 @@
 # Contributing to Resnik
 
 Thanks for helping with an open-source HAL/S compiler. This page covers the
-development setup, the repository layout, and how to run the two test
+development setup, the repository layout, and how to run the four test
 layers. Install first as described in the [README](README.md#installation)
 (use `pip install -e ".[dev]"` for pytest, coverage, xdist and the linters).
 Issues and pull requests are welcome on GitHub.
@@ -40,16 +40,14 @@ resnik/
 │   ├── fixtures/           # HAL/S snippets used by unit tests
 │   └── regression/         # End-to-end compile of example .hal programs
 │
-├── docs/                   # Documentation (MkDocs ready)
-├── examples/               # Usage examples
-├── pyproject.toml          # Single source of truth!
-├── .pre-commit-config.yaml # Automated code quality
-└── .github/workflows/      # CI/CD pipelines
+├── docs/                   # Specifications, guides, HAL/S examples
+├── examples/               # Symlink to docs/HAL-S-Source-Code-Examples
+└── pyproject.toml          # Single source of truth!
 ```
 
 ## Testing
 
-Resnik has two test layers:
+Resnik has four test layers:
 
 | Layer | Command | What it covers | Needs `rustc`? |
 | ----- | ------- | -------------- | -------------- |
@@ -137,10 +135,15 @@ pytest --cov=resnik --cov-report=html
 ### Regression tests
 
 `./tests/regression/run_regression.sh` is the end-to-end HAL/S suite. It
-compiles each program under `docs/HAL-S-Source-Code-Examples/` with
-`--emit-exe`, runs the resulting binary, and also exercises the template
+compiles each registered example under `docs/HAL-S-Source-Code-Examples/`
+with `--emit-exe`, runs the resulting binary (with a 120 s timeout per
+run), and also exercises the template
 library (`--gen-tpl` / `--templib`) and `EXTERNAL` C-object (`--link-obj`)
 pipelines. Unlike the pytest unit tests, this **does** need `rustc`.
+Cases are registered by hand — a new example directory is not picked up
+until you add a `run_regression_case` line for it in the script (and, if
+it builds on `no_std`, an `ESP32_CASES` entry in
+`run_embedded_build.sh`).
 
 **Prerequisites.** See [Installation](README.md#installation) for `rustc` / `cc` and the
 script’s sanitized `PATH`. You also need a git checkout (`git rev-parse` finds
