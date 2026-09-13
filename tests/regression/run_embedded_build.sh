@@ -47,10 +47,18 @@ export CARGO_TERM_COLOR=never
 
 EXAMPLES_DIR="$GIT_ROOT/docs/HAL-S-Source-Code-Examples"
 
-# Curated: inside today's no_std subset (no VECTOR/MATRIX, SCHEDULE/TASK,
-# COMPOOL, or CHARACTER formatting — those are roadmap items 1/2).
+# Curated: inside today's no_std subset (no SCHEDULE/TASK, COMPOOL, READ,
+# or CHARACTER variables — roadmap item 2 and the CHARACTER/alloc gap).
+# VECTOR/MATRIX + math intrinsics build via the libm prelude (item 1).
 ESP32_CASES=(
     hello_word/hello_world
+    kalman_filter/kalman_filter
+    linear_algebra_test/linear_algebra_test
+    tensor_math/tensor_math
+    attitude_math/attitude_math
+    euler/euler
+    orbital_kinematics/orbital_kinematics
+    matrix_gen/matrix_gen
     bit_manipulation/bit_manipulation
     integer_arith/integer_arith
     until_loops/until_loops

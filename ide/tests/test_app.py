@@ -636,8 +636,10 @@ class TestPhase4Polish:
         assert app.open_project_folder() is True and calls[-1] == tmp_path.resolve() / "fw"
 
     def test_target_aware_semantic_check_warns_on_embedded(self, app, tmp_path):
-        src = _write(tmp_path, "vec.hal",
-                     "T: PROGRAM;\n  DECLARE V VECTOR(3);\n  V = V * 2;\nCLOSE T;\n")
+        # CHARACTER variables are the still-unsupported no_std feature
+        # (VECTOR/MATRIX lower via libm since roadmap item 1).
+        src = _write(tmp_path, "chars.hal",
+                     "T: PROGRAM;\n  DECLARE S CHARACTER(8);\n  S = 'HI';\nCLOSE T;\n")
         app.open_file(str(src))
         app.var_target.set("esp32-c3")
         app.update()
@@ -645,7 +647,7 @@ class TestPhase4Polish:
         _wait(app)
         log = app.log.get_text()
         assert "(target esp32-c3)" in log
-        assert "not yet supported on the 'esp32-c3'" in log and "VECTOR/MATRIX" in log
+        assert "not yet supported on the 'esp32-c3'" in log and "CHARACTER" in log
         assert app.status_msg.cget("text") == "Semantic Check: OK; 1 target issue(s)"
         assert app.last_result.ok is True
         # host: clean

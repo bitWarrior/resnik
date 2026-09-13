@@ -3,7 +3,7 @@
 Plan for resolving the four constraints that limit HAL/S programs on
 embedded targets (ESP32-C3 / Cortex-M), found while building the XIAO
 INS-over-Bluetooth project. Status (2026-09-12): **items 0 and 4 implemented** (embedded build tier +
-scaffold-once with `src/shim.rs`); item 3 implemented (volatile EXTERNAL + CHARACTER FFI check); items 1, 2 open.
+scaffold-once with `src/shim.rs`); items 1 and 3 implemented; item 2 (COMPOOL / cyclic executive) open.
 
 Ordering is by leverage: item 4 unblocks project work immediately and is
 small; 3 is small; 1 is medium; 2 is the big one and is split.
@@ -76,7 +76,10 @@ value can be cached by the optimizer — the README already flags this.
 - Size: small-medium. Non-goals: memory-mapped-address syntax (`AT 0x…`),
   DMA fences/ordering guarantees beyond volatile.
 
-## Item 1 — VECTOR/MATRIX and math intrinsics on no_std
+## Item 1 — VECTOR/MATRIX and math intrinsics on no_std — ✓ done
+(core-only shared math prelude + libm-backed FloatExt on embedded; host
+keeps the std stubs; guards narrowed to SCHEDULE/TASK, COMPOOL, READ and
+CHARACTER with precise messages; 7 math examples added to the build tier)
 
 **Today:** the generated `hal_rt` prelude (codegen.py:549) implements
 `Vector<const N>([f32; N])` / matrices with core-only arrays — but float

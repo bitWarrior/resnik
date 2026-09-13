@@ -453,9 +453,12 @@ class RustCodeGenerator:
             and n.type_spec.element_type.type_name
         }
 
-        # Emit the dependency-free runtime prelude only if the program uses
-        # vectors/matrices, function calls, or real-time statements.
-        if self._uses_runtime(ast):
+        # Emit the runtime prelude if the program uses vectors/matrices,
+        # runtime intrinsics, or real-time statements. Embedded targets also
+        # need it for plain scalar float math (FloatExt via libm), which is
+        # inherent-on-f32 (std) everywhere else.
+        if self._uses_runtime(ast) or (
+                self.spec.embedded and self._uses_float_math(ast)):
             self._emit_prelude()
 
         # COMPOOL shared data lowers to module-level statics so every generated
@@ -549,10 +552,14 @@ class RustCodeGenerator:
     # Self-contained, no external crates. f32 element type; host (std) stubs
     # for the real-time statements. The element type and the SCHEDULE/TERMINATE
     # behavior are the pieces that would change for a no_std / embedded target.
-    _PRELUDE = """mod hal_rt {
-    //! Minimal dependency-free runtime for generated HAL/S code (host target).
+    # The prelude is assembled per target: a shared, core-only math
+    # section (Vector/Matrix/intrinsics), plus EITHER the hosted std
+    # stubs (SCHEDULE/TERMINATE threads, stdin READ) OR the no_std
+    # FloatExt trait that routes f32 math through libm.
+    _PRELUDE_MATH = """mod hal_rt {
+    //! Minimal dependency-free runtime for generated HAL/S code (shared math core).
     #![allow(dead_code)]
-    use std::ops::{Add, Sub, Mul, Div, Neg};
+    use core::ops::{Add, Sub, Mul, Div, Neg};
 
     #[derive(Clone, Copy, Debug)]
     pub struct Vector<const N: usize>(pub [f32; N]);
@@ -606,8 +613,8 @@ class RustCodeGenerator:
         }
     }
 
-    impl<const N: usize> std::fmt::Display for Vector<N> {
-        fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+    impl<const N: usize> core::fmt::Display for Vector<N> {
+        fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
             write!(f, "[")?;
             for i in 0..N {
                 if i > 0 { write!(f, ", ")?; }
@@ -670,8 +677,8 @@ class RustCodeGenerator:
         }
     }
 
-    impl<const R: usize, const C: usize> std::fmt::Display for Matrix<R, C> {
-        fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+    impl<const R: usize, const C: usize> core::fmt::Display for Matrix<R, C> {
+        fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
             write!(f, "[")?;
             for r in 0..R {
                 if r > 0 { write!(f, "; ")?; }
@@ -779,8 +786,9 @@ class RustCodeGenerator:
             }
         }
         Matrix(inv)
-    }
+    }"""
 
+    _PRELUDE_HOST_RT = """
     pub fn schedule(task: &str, priority: i32, body: fn()) -> std::thread::JoinHandle<()> {
         // OS-thread model: spawn the task body. priority is advisory --
         // std::thread has no portable priority control.
@@ -832,15 +840,53 @@ class RustCodeGenerator:
             }
             out
         })
-    }
-}
+    }"""
 
-use hal_rt::*;
-"""
+    _PRELUDE_FLOATEXT = """
+    // ---- no_std float math --------------------------------------------
+    // core has no sqrt/sin/powf/... on f32, so on embedded targets these
+    // route through libm (pure-Rust, no_std). Hosted builds do not emit
+    // this trait -- the inherent std methods apply -- so generated call
+    // sites like `(x).sqrt()` are identical on every target.
+    pub trait FloatExt {
+        fn sqrt(self) -> f32; fn sin(self) -> f32; fn cos(self) -> f32;
+        fn tan(self) -> f32; fn asin(self) -> f32; fn acos(self) -> f32;
+        fn atan(self) -> f32; fn sinh(self) -> f32; fn cosh(self) -> f32;
+        fn tanh(self) -> f32; fn exp(self) -> f32; fn ln(self) -> f32;
+        fn abs(self) -> f32; fn floor(self) -> f32; fn ceil(self) -> f32;
+        fn round(self) -> f32; fn trunc(self) -> f32;
+        fn powi(self, n: i32) -> f32; fn powf(self, e: f32) -> f32;
+    }
+    impl FloatExt for f32 {
+        #[inline] fn sqrt(self) -> f32 { libm::sqrtf(self) }
+        #[inline] fn sin(self) -> f32 { libm::sinf(self) }
+        #[inline] fn cos(self) -> f32 { libm::cosf(self) }
+        #[inline] fn tan(self) -> f32 { libm::tanf(self) }
+        #[inline] fn asin(self) -> f32 { libm::asinf(self) }
+        #[inline] fn acos(self) -> f32 { libm::acosf(self) }
+        #[inline] fn atan(self) -> f32 { libm::atanf(self) }
+        #[inline] fn sinh(self) -> f32 { libm::sinhf(self) }
+        #[inline] fn cosh(self) -> f32 { libm::coshf(self) }
+        #[inline] fn tanh(self) -> f32 { libm::tanhf(self) }
+        #[inline] fn exp(self) -> f32 { libm::expf(self) }
+        #[inline] fn ln(self) -> f32 { libm::logf(self) }
+        #[inline] fn abs(self) -> f32 { libm::fabsf(self) }
+        #[inline] fn floor(self) -> f32 { libm::floorf(self) }
+        #[inline] fn ceil(self) -> f32 { libm::ceilf(self) }
+        #[inline] fn round(self) -> f32 { libm::roundf(self) }
+        #[inline] fn trunc(self) -> f32 { libm::truncf(self) }
+        #[inline] fn powi(self, n: i32) -> f32 { libm::powf(self, n as f32) }
+        #[inline] fn powf(self, e: f32) -> f32 { libm::powf(self, e) }
+    }"""
+
+    _PRELUDE_TAIL = "}\n\nuse hal_rt::*;"
 
     def _emit_prelude(self) -> None:
-        """Emit the dependency-free runtime support module."""
-        for line in self._PRELUDE.split("\n"):
+        """Emit the runtime support module for the current target."""
+        extra = (self._PRELUDE_FLOATEXT if self.spec.embedded
+                 else self._PRELUDE_HOST_RT)
+        text = self._PRELUDE_MATH + "\n" + extra + "\n" + self._PRELUDE_TAIL
+        for line in text.split("\n"):
             self.emitter.emit_line(line)
         self.emitter.emit_line()
 
@@ -863,6 +909,17 @@ use hal_rt::*;
         "FLOOR": "floor", "CEILING": "ceil", "ROUND": "round",
         "TRUNCATE": "trunc",
     }
+
+    def _uses_float_math(self, node: ASTNode) -> bool:
+        """True if the tree calls a scalar math built-in or uses ** — the
+        f32 methods behind them need FloatExt/libm on no_std targets."""
+        for n in self._walk(node):
+            if (isinstance(n, FunctionCallNode)
+                    and n.name.upper() in self._MATH_METHODS):
+                return True
+            if isinstance(n, BinaryOpNode) and n.operator == "**":
+                return True
+        return False
 
     def _uses_runtime(self, node: ASTNode) -> bool:
         """True if any node in the tree needs the hal_rt prelude."""
@@ -943,10 +1000,22 @@ use hal_rt::*;
         instead of a cryptic linker error). These are the follow-up steps of
         the embedded port."""
         reasons = []
-        if self._uses_runtime(ast):
+        if any(isinstance(n, ReadNode) for n in self._walk(ast)):
             reasons.append(
-                "VECTOR/MATRIX or math intrinsics need a no_std hal_rt runtime "
-                "(libm) -- backend step 2")
+                "READ needs a console (std stdin) -- no input channel on "
+                "this target")
+        if any(isinstance(n, DeclareNode)
+               and n.type_spec is not None
+               and n.type_spec.data_type == DataType.CHARACTER
+               for n in self._walk(ast)):
+            reasons.append(
+                "CHARACTER variables need heap allocation (String) -- not "
+                "yet lowered for no_std")
+        if any(isinstance(n, BinaryOpNode) and n.operator == "||"
+               for n in self._walk(ast)):
+            reasons.append(
+                "character concatenation (CAT / ||) allocates a String -- "
+                "not yet lowered for no_std")
         if any(isinstance(n, (ScheduleNode, TaskNode)) for n in self._walk(ast)):
             reasons.append(
                 "SCHEDULE/TASK lower to std::thread -- needs a superloop/RTIC "
@@ -3987,6 +4056,7 @@ use hal_rt::*;
             f'edition = "{edition}"\n'
             "\n"
             "[dependencies]\n"
+            'libm = "0.2"\n'
             'cortex-m = "0.7"\n'
             'cortex-m-rt = "0.7"\n'
             'panic-halt = "1.0"\n'
@@ -4066,6 +4136,7 @@ use hal_rt::*;
             "\n"
             "[dependencies]\n"
             # Chip feature required; `rt` is on by default (#[main] + init).
+            'libm = "0.2"\n'
             'esp-hal = { version = "1.1", features = ["esp32c3"] }\n'
             "esp-backtrace = { version = \"0.19\", "
             'features = ["esp32c3", "panic-handler", "println"] }\n'

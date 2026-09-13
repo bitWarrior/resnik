@@ -14,13 +14,19 @@ This is **not** classic Xtensa ESP32 (`ESP32` / S2 / S3). Those chips need the
 Do not treat ESP-IDF / `std` as this target.
 
 **Feature support on `no_std` targets.** Core control flow, arithmetic, `BIT`
-operations, `IF`/`DO`, procedures, and the `ON ERROR` fault model all lower
-cleanly to bare metal — the fault model unwinds via `Result` and panics on an
-unhandled fault (`panic-halt` on Cortex-M, `esp-backtrace` on ESP32-C3 so the
-fault is visible on the serial console). Features whose lowering still depends
-on `std` — `VECTOR`/`MATRIX` and math intrinsics, `SCHEDULE`/`TASK`, and
-`COMPOOL` — emit a `compile_error!` rather than failing silently. These are on
-the embedded roadmap.
+operations, `IF`/`DO`, procedures, the `ON ERROR` fault model, **and
+`VECTOR`/`MATRIX` with the scalar math built-ins (`SQRT`, `SIN`, …, `**`)**
+all lower cleanly to bare metal — float math routes through a
+[`libm`](https://crates.io/crates/libm)-backed trait in the generated
+runtime (the scaffold's `Cargo.toml` carries the dependency; a scaffold
+created before this needs `libm = "0.2"` added or `--force-scaffold`). The
+fault model unwinds via `Result` and panics on an unhandled fault
+(`panic-halt` on Cortex-M, `esp-backtrace` on ESP32-C3 so the fault is
+visible on the serial console). Features whose lowering still depends on
+`std` — `SCHEDULE`/`TASK`, `COMPOOL`, `READ`, and `CHARACTER` variables /
+concatenation (heap allocation) — emit a `compile_error!` naming the
+feature rather than failing silently. These are on the embedded roadmap
+(`docs/NO_STD_ROADMAP.md`).
 
 ## Cortex-M stub
 

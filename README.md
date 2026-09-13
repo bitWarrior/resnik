@@ -47,8 +47,9 @@ the [desktop IDE](#ide). The same source flashes to an ESP32-C3 with
   `LOCK`/`LATCHED`, `READALL`/`FILE`, `WRITE` format controls, `SUBBIT`, and
   others — the full keyword-by-keyword table is in
   [docs/LANGUAGE_SUPPORT.md](docs/LANGUAGE_SUPPORT.md). On `no_std` targets,
-  `VECTOR`/`MATRIX`, `SCHEDULE`/`TASK` and `COMPOOL` still need `std` and emit
-  a `compile_error!`.
+  `VECTOR`/`MATRIX` and the math built-ins work (via `libm`);
+  `SCHEDULE`/`TASK`, `COMPOOL`, `READ` and `CHARACTER` variables still need
+  `std` and emit a `compile_error!`.
 
 ## Installation
 

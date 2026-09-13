@@ -1972,7 +1972,7 @@ class TestConstantsAndScalarVector:
         assert "impl<const N: usize> Mul<Vector<N>> for f32" in code
         assert "impl<const N: usize> Mul<f32> for Vector<N>" in code
         assert "impl<const N: usize> Div<f32> for Vector<N>" in code
-        assert "use std::ops::{Add, Sub, Mul, Div, Neg};" in code
+        assert "use core::ops::{Add, Sub, Mul, Div, Neg};" in code
 
 
 class TestHalsSemanticsNavUpdate:
@@ -2038,7 +2038,7 @@ class TestHalsSemanticsNavUpdate:
         ast, _ = self._parse(
             "T: PROGRAM; DECLARE V VECTOR(3); WRITE(6) V; CLOSE T;")
         code = RustCodeGenerator().generate(ast)
-        assert "impl<const N: usize> std::fmt::Display for Vector<N>" in code
+        assert "impl<const N: usize> core::fmt::Display for Vector<N>" in code
 
 
 class TestReadSharedCursor:
