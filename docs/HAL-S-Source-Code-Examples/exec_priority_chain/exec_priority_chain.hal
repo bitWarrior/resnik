@@ -1,0 +1,36 @@
+C =====================================================================
+C EXEC_PRIORITY_CHAIN - one-shot SCHEDULE at four priorities
+C
+C Four tasks share a COMPOOL sequence counter. On an embedded target
+C the cyclic executive picks strictly by priority (HIGH=3 first,
+C LOW=1 last) and breaks the MID_A/MID_B tie by declaration order,
+C so SEQ stamps 1..4 in that order. On the host the tasks are OS
+C threads: the printed set is the same but the order may race
+C (priority is advisory under std::thread).
+C =====================================================================
+CHAIN_POOL: COMPOOL;
+  DECLARE SEQ INTEGER INITIAL(0);
+CLOSE CHAIN_POOL;
+EXEC_PRIORITY_CHAIN: PROGRAM;
+  HIGH: TASK;
+    SEQ = SEQ + 1;
+    WRITE(6) 'HIGH RAN AT SEQ', SEQ;
+  CLOSE HIGH;
+  MID_A: TASK;
+    SEQ = SEQ + 1;
+    WRITE(6) 'MID_A RAN AT SEQ', SEQ;
+  CLOSE MID_A;
+  MID_B: TASK;
+    SEQ = SEQ + 1;
+    WRITE(6) 'MID_B RAN AT SEQ', SEQ;
+  CLOSE MID_B;
+  LOW: TASK;
+    SEQ = SEQ + 1;
+    WRITE(6) 'LOW RAN AT SEQ', SEQ;
+  CLOSE LOW;
+  WRITE(6) 'CHAIN START';
+  SCHEDULE LOW PRIORITY(1);
+  SCHEDULE MID_A PRIORITY(2);
+  SCHEDULE MID_B PRIORITY(2);
+  SCHEDULE HIGH PRIORITY(3);
+CLOSE EXEC_PRIORITY_CHAIN;

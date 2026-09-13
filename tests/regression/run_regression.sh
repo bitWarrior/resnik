@@ -206,8 +206,8 @@ run_link_obj_pipeline_case() {
         echo "  Linked object: $obj_file"
         echo "  Built executable: $exe_file"
         echo "+++++++++++++++++++++++++++++++++++++++++++++++++++++++++"
-        if ! "$exe_file"; then
-            step_failed="execution failed"
+        if ! timeout 120 "$exe_file"; then
+            step_failed="execution failed or timed out"
         fi
         echo "+++++++++++++++++++++++++++++++++++++++++++++++++++++++++"
     fi
@@ -280,17 +280,25 @@ run_test() {
         # Step 2: Verify the executable was created and is runnable
         elif [[ -n "$exe_file" ]] && [[ -x "$exe_file" ]]; then
 
-            # Step 3: Execute the compiled binary
+            # Step 3: Execute the compiled binary. The timeout keeps one
+            # wedged program (e.g. a WAIT UNTIL whose predicate never
+            # becomes true) from hanging the whole suite.
             echo "+++++++++++++++++++++++++++++++++++++++++++++++++++++++++"
-            if "$exe_file"; then
+            if timeout 120 "$exe_file"; then
                 echo "+++++++++++++++++++++++++++++++++++++++++++++++++++++++++"
                 echo "[✓ PASS] $test_name"
                 PASSED=$((PASSED + 1))
             else
+                rc=$?
                 echo "+++++++++++++++++++++++++++++++++++++++++++++++++++++++++"
-                echo "[✗ FAIL] $test_name (Execution Failed)"
+                if [[ "$rc" -eq 124 ]]; then
+                    echo "[✗ FAIL] $test_name (Timed out after 120s)"
+                    FAILED_TESTS+=("$test_name (Timed Out)")
+                else
+                    echo "[✗ FAIL] $test_name (Execution Failed)"
+                    FAILED_TESTS+=("$test_name (Execution Failed)")
+                fi
                 FAILED=$((FAILED + 1))
-                FAILED_TESTS+=("$test_name (Execution Failed)")
             fi
         else
             echo "[✗ FAIL] $test_name (Executable not found or not executable)"
@@ -501,7 +509,7 @@ run_regression_case "Sensor Init" \
     "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/sensor_init/sensor_init.hal --emit-exe
 
 run_regression_case "SpaceWire Mon" \
-    "Verify Resnik's processing of HAL/S process synchronization using EVENT variables and WAIT commands." \
+    "Verify REPLACE macros, BIT(16) with HEX literals, MSB-first bit slicing (\$), and bitwise XOR on a link-status register." \
     "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/spacewire_mon/spacewire_mon.hal --emit-exe
 
 run_regression_case "Spw Security" \
@@ -595,6 +603,30 @@ run_regression_case "Compool Fault" \
 run_regression_case "Aldrin Sys Exec" \
     "Verify cyclic SCHEDULE ... REPEAT EVERY, WAIT UNTIL on a COMPOOL flag, and CANCEL of the cyclic task." \
     "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/aldrin_sys_exec/aldrin_sys_exec.hal --emit-exe
+
+run_regression_case "Exec Two Rates" \
+    "Verify two SCHEDULE ... PRIORITY REPEAT EVERY tasks sharing a COMPOOL counter (host: one representative cycle each; embedded: the hal_exec cyclic executive)." \
+    "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/exec_two_rates/exec_two_rates.hal --emit-exe
+
+run_regression_case "Exec Priority Chain" \
+    "Verify one-shot SCHEDULE ... PRIORITY at four priorities including a declaration-order tie, all bumping a shared COMPOOL sequence counter." \
+    "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/exec_priority_chain/exec_priority_chain.hal --emit-exe
+
+run_regression_case "Exec Event Latch" \
+    "Verify the EVENT lifecycle: event-form SET and RESET, SIGNAL, EVENT read as a boolean in IF, and a task observing the latched state." \
+    "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/exec_event_latch/exec_event_latch.hal --emit-exe
+
+run_regression_case "Exec Terminate Forms" \
+    "Verify bare TERMINATE self-termination inside a task (statements after it never run) and named TERMINATE of another task." \
+    "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/exec_terminate_forms/exec_terminate_forms.hal --emit-exe
+
+run_regression_case "Exec Oneshot Delay" \
+    "Verify one-shot SCHEDULE ... IN d rendezvousing with the program via a COMPOOL flag and WAIT UNTIL." \
+    "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/exec_oneshot_delay/exec_oneshot_delay.hal --emit-exe
+
+run_regression_case "Exec Cancel Cycle" \
+    "Verify periodic SCHEDULE ... IN d REPEAT EVERY stopped by CANCEL after bounded foreground work (the mandatory stop/join pair for the delay form)." \
+    "$_RESNIK" compile "$GIT_ROOT"/docs/HAL-S-Source-Code-Examples/exec_cancel_cycle/exec_cancel_cycle.hal --emit-exe
 
 run_regression_case "Until Loops" \
     "Verify DO UNTIL (first cycle unguarded, stop when TRUE) and DO FOR ... UNTIL (guard after bound check, empty range never enters)." \

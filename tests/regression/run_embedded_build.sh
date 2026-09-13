@@ -51,10 +51,15 @@ EXAMPLES_DIR="$GIT_ROOT/docs/HAL-S-Source-Code-Examples"
 # variables — the CHARACTER/alloc gap).
 # COMPOOL builds via the critical-section CsMutex (item 2a).
 # VECTOR/MATRIX + math intrinsics build via the libm prelude (item 1).
-# SCHEDULE/TASK builds via the hal_exec cyclic executive (item 2b).
+# SCHEDULE/TASK, TERMINATE and CANCEL build via the hal_exec cyclic
+# executive (item 2b); EVENT lowers to core atomics.
 ESP32_CASES=(
     hello_word/hello_world
     exec_two_rates/exec_two_rates
+    exec_priority_chain/exec_priority_chain
+    exec_event_latch/exec_event_latch
+    exec_terminate_forms/exec_terminate_forms
+    exec_cancel_cycle/exec_cancel_cycle
     kalman_filter/kalman_filter
     linear_algebra_test/linear_algebra_test
     tensor_math/tensor_math

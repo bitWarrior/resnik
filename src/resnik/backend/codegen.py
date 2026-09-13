@@ -991,7 +991,7 @@ class RustCodeGenerator:
     def _uses_exec(self, node: ASTNode) -> bool:
         """True if the tree needs the cyclic executive on an embedded target."""
         for n in self._walk(node):
-            if isinstance(n, (ScheduleNode, TaskNode, TerminateNode)):
+            if isinstance(n, (ScheduleNode, TaskNode, TerminateNode, CancelNode)):
                 return True
         return False
 
@@ -3954,7 +3954,19 @@ class RustCodeGenerator:
                     self.emitter.emit_line(f"{var} &= !{mask_expr};")
 
     def _generate_cancel(self, node: CancelNode) -> None:
-        """CANCEL <task>; -> set the task's cancel flag and join its thread."""
+        """CANCEL <task>; -> host: set the task's cancel flag and join its
+        thread. Embedded: idle the task's executive slot (no more cycles),
+        same lowering as a named TERMINATE."""
+        if self.spec.embedded:
+            known = {n.lower() for n in getattr(self, "_exec_tasks", [])}
+            self.emitter.emit_comment(f"CANCEL {node.task_name}")
+            if node.task_name.lower() in known:
+                self.emitter.emit_line(
+                    f"hal_exec::idle(&__SLOT_{node.task_name.upper()});")
+            else:
+                self._emit_debug_print(
+                    f"[hal_exec] CANCEL {node.task_name} (task undefined here)")
+            return
         task_fn = node.task_name.lower()
         cflag = f"__cancel_{task_fn}"
         handle = f"__h_{task_fn}"

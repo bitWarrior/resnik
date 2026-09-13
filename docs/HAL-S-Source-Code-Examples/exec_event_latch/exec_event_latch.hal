@@ -1,0 +1,29 @@
+C =====================================================================
+C EXEC_EVENT_LATCH - EVENT lifecycle: SET / RESET / SIGNAL / read
+C
+C Exercises the event form of SET and RESET (latched flag writes),
+C EVENT used as a boolean in IF, and a task observing the latched
+C state. On embedded targets the EVENT lowers to a
+C core::sync::atomic::AtomicBool static.
+C =====================================================================
+EXEC_EVENT_LATCH: PROGRAM;
+  DECLARE PING EVENT;
+  CHECKER: TASK;
+    IF PING THEN
+      WRITE(6) 'CHECKER SAW PING LATCHED';
+    ELSE
+      WRITE(6) 'CHECKER SAW PING CLEAR';
+  CLOSE CHECKER;
+  SET PING;
+  IF PING THEN
+    WRITE(6) 'AFTER SET: LATCHED';
+  ELSE
+    WRITE(6) 'AFTER SET: CLEAR';
+  RESET PING;
+  IF PING THEN
+    WRITE(6) 'AFTER RESET: LATCHED';
+  ELSE
+    WRITE(6) 'AFTER RESET: CLEAR';
+  SIGNAL PING;
+  SCHEDULE CHECKER PRIORITY(1);
+CLOSE EXEC_EVENT_LATCH;

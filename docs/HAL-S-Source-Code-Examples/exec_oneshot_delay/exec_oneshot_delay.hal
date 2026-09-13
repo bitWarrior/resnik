@@ -1,0 +1,22 @@
+C =====================================================================
+C EXEC_ONESHOT_DELAY - one-shot SCHEDULE ... IN d with a rendezvous
+C
+C WORKER fires once after a 0.1 s delay and raises a COMPOOL flag;
+C the program WAITs UNTIL the flag is up, so the host run is a real
+C cross-thread rendezvous and terminates deterministically.
+C Host-only: WAIT is a compile_error on embedded targets (a blocking
+C wait would stall every task in the superloop, HAL/S spec 8.6).
+C =====================================================================
+DELAY_POOL: COMPOOL;
+  DECLARE DONE BOOLEAN INITIAL(FALSE);
+CLOSE DELAY_POOL;
+EXEC_ONESHOT_DELAY: PROGRAM;
+  WORKER: TASK;
+    WRITE(6) 'WORKER FIRED';
+    DONE = TRUE;
+  CLOSE WORKER;
+  WRITE(6) 'ARMING ONE-SHOT';
+  SCHEDULE WORKER IN 0.1;
+  WAIT UNTIL DONE = TRUE;
+  WRITE(6) 'RENDEZVOUS COMPLETE';
+CLOSE EXEC_ONESHOT_DELAY;

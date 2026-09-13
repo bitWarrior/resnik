@@ -580,3 +580,24 @@ class TestCyclicExecutive:
         RustCodeGenerator(target="cortex-m").emit_cargo_project(
             "#![no_std]\n#![no_main]\nfn b() {}\n", d, name="fw")
         assert "hal_exec_now_us" in (d / "src" / "shim.rs").read_text()
+
+    def test_cancel_idles_slot_on_embedded(self):
+        # CANCEL on bare metal idles the executive slot (same as a named
+        # TERMINATE); the host keeps its cancel-flag + join lowering.
+        src = ("T: PROGRAM;\n"
+               "  M: TASK;\n    WRITE(6) 'M';\n  CLOSE M;\n"
+               "  SCHEDULE M IN 0.05 REPEAT EVERY 0.05;\n"
+               "  CANCEL M;\n"
+               "CLOSE T;\n")
+        emb = self._code(src, "esp32-c3")
+        assert "hal_exec::idle(&__SLOT_M);" in emb
+        assert "__cancel_" not in emb and "std::" not in emb
+        assert "compile_error" not in emb
+        host = self._code(src, "host")
+        assert "__cancel_m.store(true" in host and "__h_m.join()" in host
+
+    def test_cancel_of_unknown_task_prints_debug_on_embedded(self):
+        src = "T: PROGRAM;\n  CANCEL GHOST;\nCLOSE T;\n"
+        code = self._code(src, "esp32-c3")
+        assert "[hal_exec] CANCEL GHOST (task undefined here)" in code
+        assert "compile_error" not in code and "__cancel_" not in code

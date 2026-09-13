@@ -1,0 +1,25 @@
+C =====================================================================
+C EXEC_TERMINATE_FORMS - bare and named TERMINATE
+C
+C ALPHA self-terminates mid-body (HAL/S spec 8.5): its second WRITE
+C must never print on any target. BETA is scheduled and then named-
+C TERMINATEd from the program: on an embedded target that idles
+C BETA's executive slot before the superloop starts, so BETA never
+C runs; on the host a named TERMINATE is an advisory stub
+C (std::thread has no cancellation) and BETA's single cycle still
+C prints. Both are valid - the regression contract is exit status.
+C =====================================================================
+EXEC_TERMINATE_FORMS: PROGRAM;
+  ALPHA: TASK;
+    WRITE(6) 'ALPHA PHASE ONE';
+    IF TRUE THEN TERMINATE;
+    WRITE(6) 'ALPHA PHASE TWO (MUST NOT PRINT)';
+  CLOSE ALPHA;
+  BETA: TASK;
+    WRITE(6) 'BETA RAN';
+  CLOSE BETA;
+  WRITE(6) 'TERMINATE FORMS START';
+  SCHEDULE ALPHA PRIORITY(2);
+  SCHEDULE BETA PRIORITY(1);
+  TERMINATE BETA;
+CLOSE EXEC_TERMINATE_FORMS;

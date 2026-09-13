@@ -1,0 +1,26 @@
+C =====================================================================
+C EXEC_CANCEL_CYCLE - periodic SCHEDULE ... IN d REPEAT EVERY + CANCEL
+C
+C MONITOR cycles every 0.05 s counting into a COMPOOL; the program
+C does bounded foreground work and then CANCELs it. On the host the
+C delay-form schedule owns its thread and CANCEL is the mandatory
+C stop/join (the cycle count is timing-dependent; termination is
+C not). On an embedded target CANCEL idles MONITOR's executive slot,
+C the same lowering as a named TERMINATE.
+C =====================================================================
+CYCLE_POOL: COMPOOL;
+  DECLARE CYCLES INTEGER INITIAL(0);
+CLOSE CYCLE_POOL;
+EXEC_CANCEL_CYCLE: PROGRAM;
+  DECLARE I INTEGER;
+  MONITOR: TASK;
+    CYCLES = CYCLES + 1;
+  CLOSE MONITOR;
+  WRITE(6) 'CANCEL CYCLE START';
+  SCHEDULE MONITOR IN 0.05 REPEAT EVERY 0.05;
+  DO FOR I = 1 TO 3;
+    WRITE(6) 'MAIN WORK STEP', I;
+  END;
+  CANCEL MONITOR;
+  WRITE(6) 'MONITOR CANCELLED';
+CLOSE EXEC_CANCEL_CYCLE;
