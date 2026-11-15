@@ -21,7 +21,8 @@ if ! GIT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null); then
     echo "Error: run from within the git repository." >&2
     exit 1
 fi
-readonly _RESNIK="$GIT_ROOT/resnik-venv/bin/resnik"
+# RESNIK_BIN overrides the default virtual environment.
+readonly _RESNIK="${RESNIK_BIN:-$GIT_ROOT/resnik-venv/bin/resnik}"
 if [[ ! -x "$_RESNIK" ]]; then
     echo "Error: $_RESNIK not found — create the venv per README Installation." >&2
     exit 1

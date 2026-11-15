@@ -34,14 +34,53 @@ jobs:
       - run: python -m pip install -e ".[test]"
       - run: python -m pytest
 
+  # Everything that needs a Rust toolchain: the rustc-dependent pytest cases
+  # and the host regression scripts, which compile and run the generated Rust.
+  rust:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # The Rust version is pinned so a runner image update cannot change the
+      # result. Dependabot does not update it: bump it by hand.
+      RUST_TOOLCHAIN: "1.96.1"
+      # Makes a missing toolchain an error in the regression scripts.
+      RESNIK_REQUIRE_RUST: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - name: Install the pinned Rust toolchain
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --no-self-update
+          rustup default "$RUST_TOOLCHAIN"
+          rustc --version
+          cargo --version
+      - run: python -m pip install -e ".[test]"
+      - name: Run pytest and require the rustc-dependent tests to run
+        run: |
+          set -o pipefail
+          python -m pytest -rs | tee pytest.log
+          if grep -q "rustc not on PATH" pytest.log; then
+            echo "::error::rustc-dependent tests were skipped"
+            exit 1
+          fi
+      - name: Host regression (compile and run the HAL/S examples)
+        run: RESNIK_BIN="$(command -v resnik)" tests/regression/run_regression.sh
+      - name: Cyclic executive semantics
+        run: RESNIK_PYTHON="$(command -v python)" tests/regression/run_exec_semantics.sh
+
   # Single stable check name for the branch ruleset's required status check.
   ci:
     if: always()
-    needs: test
+    needs: [test, rust]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Require the test matrix to have passed
+      - name: Require the test matrix and the Rust job to have passed
         env:
-          RESULT: ${{ needs.test.result }}
-        run: test "$RESULT" = "success"
+          TEST_RESULT: ${{ needs.test.result }}
+          RUST_RESULT: ${{ needs.rust.result }}
+        run: test "$TEST_RESULT" = "success" && test "$RUST_RESULT" = "success"
