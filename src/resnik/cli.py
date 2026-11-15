@@ -420,9 +420,9 @@ A modern compiler for the HAL/S aerospace programming language.
 Translates legacy Space Shuttle code to safe, modern Rust.
 
 [bold]Components:[/bold]
-  ✓ Lexer    - Tokenization (Production Ready)
-  ✓ Parser   - AST Generation (Foundation)
-  → Backend  - Rust Code Generation (Planned)
+  ✓ Lexer    - Tokenization
+  ✓ Parser   - AST generation and semantic checks
+  ✓ Backend  - Rust code generation (std, Cortex-M stub, ESP32-C3)
 
 [bold]Repository:[/bold] https://github.com/bitWarrior/resnik
 [bold]Documentation:[/bold] https://github.com/bitWarrior/resnik/tree/main/docs
