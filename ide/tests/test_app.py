@@ -995,7 +995,10 @@ class TestWindowIcon:
         sizes = sorted(img.width() for img in app._icon_images)
         assert sizes == [32, 64, 200]
 
-    def test_missing_icons_are_tolerated(self, settings_file, fake_toolchain, monkeypatch, tmp_path):
+    def test_missing_icons_are_tolerated(self, tk_root, settings_file, fake_toolchain, monkeypatch, tmp_path):
+        # tk_root skips the test on a machine with no display (it builds its
+        # own ResnikIDE instead of using the ``app`` fixture, which skips).
+        tk_root.destroy()
         from resnik_ide.app import ResnikIDE
         monkeypatch.setattr(ResnikIDE, "IMAGES_DIR", tmp_path / "nope")
         app = ResnikIDE()

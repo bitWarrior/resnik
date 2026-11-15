@@ -70,7 +70,10 @@ class TestProbe:
         assert st.default_toolchain == "stable-x86_64-unknown-linux-gnu"
         assert any("installed targets:" in ln for ln in st.summary_lines())
 
-    def test_bare_machine(self):
+    def test_bare_machine(self, monkeypatch, tmp_path):
+        # probe() falls back to the real ~/.cargo/bin; point that at an
+        # empty directory so a machine with rustup installed stays "bare".
+        monkeypatch.setattr("resnik_ide.toolchain.CARGO_BIN", tmp_path / "no-cargo-bin")
         which, run = _fake_env(set())
         st = probe(which=which, run=run)
         assert not st.rustup.present and not st.cargo.present
