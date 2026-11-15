@@ -5,7 +5,7 @@ An open-source compiler for the HAL/S aerospace programming language, translatin
 [![License: GPL-3.0-or-later](https://img.shields.io/badge/license-GPL--3.0--or--later-blue.svg)](LICENSE.md)
 ![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue.svg)
 ![Emits Rust](https://img.shields.io/badge/emits-Rust-orange.svg)
-![Version 1.0.1](https://img.shields.io/badge/version-1.0.1-green.svg)
+[![PyPI](https://img.shields.io/pypi/v/resnik.svg)](https://pypi.org/project/resnik/)
 
 **Version:** 1.0.1 (Modern Edition)  
 **Status:** Lexer ✓ | Parser ✓ | Backend ✓ | Cross-compilation (ARM Cortex-M stub, ESP32-C3) ✓ | Separate compilation (TEMPLIB) ✓
@@ -58,12 +58,30 @@ the [desktop IDE](#ide). The same source flashes to an ESP32-C3 with
 | ----------- | ----- |
 | OS | **Linux** — the supported, tested deployment. Native Windows/macOS are untested; on Windows use [WSL](https://learn.microsoft.com/windows/wsl/) (unverified on this project). |
 | Python | 3.9 or newer, with `venv` and `pip` |
-| Git | To clone the repository |
+| Git | Only for installing from source |
 | Rust toolchain (optional) | Only for `--emit-exe`, `--emit-cargo`, embedded targets, or the regression suite. Install from [rustup.rs](https://rustup.rs/): `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \| sh` then `. "$HOME/.cargo/env"`. The `HW_INTERFACE` example also needs `cc` (`sudo apt install build-essential`). |
 | Tk (IDE only) | `sudo apt install python3-tk` on Debian/Ubuntu; bundled with python.org builds |
 
-You do **not** need Rust to run Resnik or to emit `.rs` files. Python
-dependencies (`rply`, `click`, `rich`) are installed by `pip install -e .`:
+You do **not** need Rust to run Resnik or to emit `.rs` files.
+
+### From PyPI
+
+Resnik is published on PyPI as
+[`resnik`](https://pypi.org/project/resnik/):
+
+```bash
+python3 -m venv resnik-venv
+. resnik-venv/bin/activate
+pip install resnik
+resnik --version
+```
+
+This installs the `resnik` compiler and the `resnik-ide` desktop IDE with
+their Python dependencies (`rply`, `click`, `rich`). The HAL/S example
+programs, the test suites and `start_ide.sh` are only in the repository, so
+install from source if you want those.
+
+### From source
 
 ```bash
 # Clone the repository
