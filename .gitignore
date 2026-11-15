@@ -72,10 +72,7 @@ Thumbs.db
 # Local agent / assistant settings (machine-specific paths and permissions)
 .claude/
 
-# Backend package init (kept local; not part of the published tree)
-src/resnik/backend/__init__.py
-
-# IDE / driver package markers (kept local, same policy as the backend init).
+# IDE / driver package markers (kept local; pytest collects without them).
 # resnik_ide/__init__.py and __main__.py are tracked: the IDE needs
 # __version__ and python -m resnik_ide.
 ide/__init__.py
