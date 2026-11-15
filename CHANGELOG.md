@@ -6,6 +6,29 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.0.1]
+
+First release on PyPI. No compiler or IDE behaviour changes from 1.0.0.
+
+### Packaging
+
+- Publish to PyPI from a GitHub Actions workflow using trusted publishing.
+- The source distribution no longer bundles the two third-party HAL/S
+  reference PDFs (see [docs/THIRD_PARTY.md](docs/THIRD_PARTY.md)); it
+  shrinks from 23 MB to under 1 MB. The PDFs remain in the repository.
+- The source distribution now includes `CHANGELOG.md` and `SECURITY.md`.
+
+### Fixed
+
+- `resnik.backend` was missing its package `__init__` in a fresh clone, so
+  `from resnik.backend import RustCodeGenerator` failed.
+- Two IDE tests no longer depend on a display or on the developer's
+  `~/.cargo/bin`.
+
+### Removed
+
+- The pre-release maintainer checklist `OPEN-SOURCE-RELEASE.md`.
+
 ## [1.0.0]
 
 First public release.
@@ -47,5 +70,6 @@ First public release.
   `LATCHED`, `READALL` / `FILE`, `WRITE` format controls, `SUBBIT` and
   others listed in [docs/LANGUAGE_SUPPORT.md](docs/LANGUAGE_SUPPORT.md).
 
-[Unreleased]: https://github.com/bitWarrior/resnik/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/bitWarrior/resnik/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/bitWarrior/resnik/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/bitWarrior/resnik/releases/tag/v1.0.0

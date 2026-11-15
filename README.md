@@ -5,9 +5,9 @@ An open-source compiler for the HAL/S aerospace programming language, translatin
 [![License: GPL-3.0-or-later](https://img.shields.io/badge/license-GPL--3.0--or--later-blue.svg)](LICENSE.md)
 ![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue.svg)
 ![Emits Rust](https://img.shields.io/badge/emits-Rust-orange.svg)
-![Version 1.0.0](https://img.shields.io/badge/version-1.0.0-green.svg)
+![Version 1.0.1](https://img.shields.io/badge/version-1.0.1-green.svg)
 
-**Version:** 1.0.0 (Modern Edition)  
+**Version:** 1.0.1 (Modern Edition)  
 **Status:** Lexer ✓ | Parser ✓ | Backend ✓ | Cross-compilation (ARM Cortex-M stub, ESP32-C3) ✓ | Separate compilation (TEMPLIB) ✓
 
 ## Hello, World
