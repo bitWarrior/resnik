@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "resnik"
-version = "1.0.1"
+version = "1.0.2"
 description = "A modern compiler for the HAL/S aerospace programming language"
 readme = "README.md"
 requires-python = ">=3.9"

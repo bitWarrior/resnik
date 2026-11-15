@@ -1,3 +1,8 @@
+<p align="center">
+  <img src="https://raw.githubusercontent.com/bitWarrior/resnik/main/images/resnik_logo-v2.jpg"
+       alt="Resnik logo" width="400">
+</p>
+
 # Resnik HAL/S Compiler 🚀
 
 An open-source compiler for the HAL/S aerospace programming language, translating legacy NASA HAL/S source code to safe, modern Rust.
@@ -7,7 +12,7 @@ An open-source compiler for the HAL/S aerospace programming language, translatin
 ![Emits Rust](https://img.shields.io/badge/emits-Rust-orange.svg)
 [![PyPI](https://img.shields.io/pypi/v/resnik.svg)](https://pypi.org/project/resnik/)
 
-**Version:** 1.0.1 (Modern Edition)  
+**Version:** 1.0.2 (Modern Edition)  
 **Status:** Lexer ✓ | Parser ✓ | Backend ✓ | Cross-compilation (ARM Cortex-M stub, ESP32-C3) ✓ | Separate compilation (TEMPLIB) ✓
 
 ## Hello, World
