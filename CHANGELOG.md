@@ -8,9 +8,10 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Testing
 
-- CI has a `rust` job with a pinned Rust toolchain. It runs the
-  rustc-dependent tests (failing if any is skipped) and the host regression
-  scripts `run_regression.sh` and `run_exec_semantics.sh`.
+- CI has a `rust` job with a pinned Rust toolchain and a virtual display.
+  It runs the rustc-dependent and IDE (Tk) tests, failing if any is skipped,
+  and the host regression scripts `run_regression.sh` and
+  `run_exec_semantics.sh`.
 - The regression scripts accept `RESNIK_BIN` / `RESNIK_PYTHON` in place of
   `resnik-venv`, and `RESNIK_REQUIRE_RUST=1` makes a missing `rustc` an error.
 
