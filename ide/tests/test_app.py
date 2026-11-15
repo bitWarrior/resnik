@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2025-2026 Steven Doran
 """End-to-end tests of the IDE window against the real compiler (need a
 display).  Jobs run on worker threads exactly as in the app; tests pump the
 Tk loop until the job reports back."""

@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2025-2026 Steven Doran
 """Regenerate the IDE's PNG logo/icon renditions from images/resnik_logo.jpg.
 
 Tk cannot decode JPEG, so the IDE ships PNGs (About window logo, window

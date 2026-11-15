@@ -1,0 +1,51 @@
+# Changelog
+
+All notable changes to Resnik are recorded here. The format follows
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
+uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+## [1.0.0]
+
+First public release.
+
+### Compiler
+
+- Lexer and parser, with HAL/S semantic checks, for a working subset of the
+  USA003088 Appendix B keyword set. The keyword-by-keyword status is in
+  [docs/LANGUAGE_SUPPORT.md](docs/LANGUAGE_SUPPORT.md).
+- Resnik extensions to the language: one-token `GOTO`, `DOWNTO`, optional
+  `OF` in array declarations, infix `XOR` / `MOD`, parameterized
+  `MACRO` / `MEND`, `TEMPLATE`, and `RESUME` in `ON ERROR` handlers.
+- Rust back end for hosted (`std`) programs; `ON ERROR` lowers onto
+  `Result`. `--emit-exe` builds the binary with `rustc`.
+- Separate compilation with TEMPLIB-style templates (`--gen-tpl`,
+  `--templib`) and cross-unit type checking.
+- `EXTERNAL` foreign-function interface to C and assembly.
+
+### Embedded targets
+
+- `--target esp32-c3`: `no_std` firmware as a Cargo project
+  (`--emit-cargo`), verified on hardware. `VECTOR` / `MATRIX` and the math
+  built-ins (via `libm`), `COMPOOL` (via `critical-section`) and
+  `SCHEDULE` / `TASK` (via a generated cyclic executive) are supported.
+- `--target cortex-m`: crate scaffold with semihosting `WRITE`. This target
+  is a stub and has not been verified on hardware.
+- `WAIT`, `READ` and `CHARACTER` variables are not available on `no_std`
+  targets and produce a `compile_error!`.
+
+### IDE
+
+- Desktop IDE (`resnik-ide`, `./start_ide.sh`) with HAL/S and Rust
+  highlighting, toolchain and device probing, and Compile / Run /
+  Flash & Run.
+
+### Not yet implemented
+
+- `UPDATE` blocks, `SCHEDULE … AFTER/AT/ON/UNTIL/WHILE`, `LOCK` /
+  `LATCHED`, `READALL` / `FILE`, `WRITE` format controls, `SUBBIT` and
+  others listed in [docs/LANGUAGE_SUPPORT.md](docs/LANGUAGE_SUPPORT.md).
+
+[Unreleased]: https://github.com/bitWarrior/resnik/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/bitWarrior/resnik/releases/tag/v1.0.0

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2025-2026 Steven Doran
 """Shared fixtures for the IDE tests.
 
 Tk tests need a display.  ``tk_root`` skips the test when one is not

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2025-2026 Steven Doran
 """pass_commands.parse — pure parser for the PASS keyboard vocabulary."""
 
 from resnik_ide import pass_commands as pc

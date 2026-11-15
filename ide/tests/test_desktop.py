@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2025-2026 Steven Doran
 """desktop.py — .desktop entry generation/installation (no display needed)."""
 
 import sys

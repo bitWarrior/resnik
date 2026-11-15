@@ -6,6 +6,22 @@ layers. Install first as described in the [README](README.md#installation)
 (use `pip install -e ".[dev]"` for pytest, coverage, xdist and the linters).
 Issues and pull requests are welcome on GitHub.
 
+## Ground rules
+
+- Participation is covered by the [Code of Conduct](CODE_OF_CONDUCT.md).
+- Report security problems privately as described in
+  [SECURITY.md](SECURITY.md), not in a public issue.
+- Contributions are accepted under the project license, GPL-3.0-or-later.
+  New source files start with the same two-line header as the existing
+  ones (`SPDX-License-Identifier` and a copyright line).
+- Sign off every commit (`git commit -s`). The `Signed-off-by:` line
+  certifies the [Developer Certificate of Origin](https://developercertificate.org/):
+  that you wrote the change or otherwise have the right to submit it under
+  the project license.
+- Pull requests must pass the `ci` check (pytest on Python 3.9 and 3.12).
+  Changes under `.github/` or to the scripts in `tests/regression/` get
+  extra scrutiny because they execute code.
+
 ## Project structure
 ```
 resnik/

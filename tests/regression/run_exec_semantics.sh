@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2025-2026 Steven Doran
 
 # Host-side semantics check for the hal_exec cyclic executive
 # (docs/NO_STD_ROADMAP.md item 2b, docs/CYCLIC_EXECUTIVE_DESIGN.md §5).

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2025-2026 Steven Doran
 """View → Fonts… dialog: every font setting in one place — UI font family/size,
 the editor/log monospace family, and the editor and log sizes."""
 

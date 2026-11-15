@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2025-2026 Steven Doran
 # Launch the Resnik IDE.
 #
 #   ./start_ide.sh                 # empty editor

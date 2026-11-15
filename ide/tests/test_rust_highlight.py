@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2025-2026 Steven Doran
 """rust_highlight.compute_spans — pure Rust tokenizer for the viewer."""
 
 from resnik_ide.rust_highlight import compute_spans

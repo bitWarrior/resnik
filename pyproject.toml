@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.9"
 license = {text = "GPL-3.0-or-later"}
 authors = [
-    {name = "Resnik Compiler Project", email = "resnik@example.com"}
+    {name = "Steven Doran", email = "contact.bitWarrior@proton.me"}
 ]
 keywords = ["compiler", "hal-s", "aerospace", "nasa", "rust", "space-shuttle"]
 classifiers = [
@@ -60,11 +60,11 @@ resnik-parse = "resnik.cli:parse_command"
 resnik-ide = "resnik_ide.app:main"
 
 [project.urls]
-Homepage = "https://github.com/resnik-compiler/resnik"
-Documentation = "https://resnik.readthedocs.io"
-Repository = "https://github.com/resnik-compiler/resnik"
-Issues = "https://github.com/resnik-compiler/resnik/issues"
-Changelog = "https://github.com/resnik-compiler/resnik/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/bitWarrior/resnik"
+Documentation = "https://github.com/bitWarrior/resnik/tree/main/docs"
+Repository = "https://github.com/bitWarrior/resnik"
+Issues = "https://github.com/bitWarrior/resnik/issues"
+Changelog = "https://github.com/bitWarrior/resnik/blob/main/CHANGELOG.md"
 
 [tool.hatch.version]
 path = "src/resnik/__init__.py"

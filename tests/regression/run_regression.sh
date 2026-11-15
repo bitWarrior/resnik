@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2025-2026 Steven Doran
 
 # -e: Exit immediately if a command exits with a non-zero status.
 # -E: Ensure 'trap' inherits the ERR signal (works with -e).

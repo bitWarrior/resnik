@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2025-2026 Steven Doran
 """
 HAL/S source editor: a ``tk.Text`` with undo, a line-number gutter, dirty
 tracking, error-line marks and goto-line.

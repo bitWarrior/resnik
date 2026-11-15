@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2025-2026 Steven Doran
 """Tests for resnik.driver — the reusable compile pipeline behind the CLI
 and the IDE.  No GUI, no Rich; rustc only where marked."""
 

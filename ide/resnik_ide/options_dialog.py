@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2025-2026 Steven Doran
 """
 Compiler Options dialog — every ``resnik compile`` flag, plus a free-form
 extra-arguments field, with a live "equivalent command" preview.

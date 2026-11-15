@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2025-2026 Steven Doran
 """
 Target-aware check: which HAL/S features of a parsed unit would make the
 generated firmware fail on a ``no_std`` target?

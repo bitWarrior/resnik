@@ -299,6 +299,20 @@ PASS flight software and its history, and the namesake:
 [docs/BACKGROUND.md](docs/BACKGROUND.md) and
 [docs/Space_Shuttle_Flight_Software_History/](docs/Space_Shuttle_Flight_Software_History/).
 
+## Contributing and security
+
+- [CONTRIBUTING.md](CONTRIBUTING.md) — development setup, test layers, and
+  how to submit changes.
+- [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) — expected behaviour in project
+  spaces.
+- [SECURITY.md](SECURITY.md) — how to report a vulnerability privately, and
+  what Resnik executes when it compiles and runs a program.
+- [CHANGELOG.md](CHANGELOG.md) — release history.
+
 ## License
 
-This project is licensed under the GNU General Public License v3.0 or later — see the [LICENSE.md](LICENSE.md) file for details.
+Copyright (C) 2025-2026 Steven Doran.
+
+This project is licensed under the GNU General Public License v3.0 or later — see the [LICENSE.md](LICENSE.md) file for details. It comes with no warranty and is not qualified for flight or safety-critical use.
+
+The two HAL/S reference PDFs under `docs/` are third-party documents and are not covered by this license; see [docs/THIRD_PARTY.md](docs/THIRD_PARTY.md).

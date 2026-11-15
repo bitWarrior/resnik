@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2025-2026 Steven Doran
 """
 Log pane: a read-only, tagged, timestamped transcript of everything the IDE
 does — user actions, compiler phases, diagnostics, tool output.

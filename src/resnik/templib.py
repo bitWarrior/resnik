@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2025-2026 Steven Doran
 """Template-library (.tpl) generation for HAL/S units.
 
 Mimics the original HAL/S compiler's TEMPLIB behavior: on a successful compile,

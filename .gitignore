@@ -69,6 +69,9 @@ Thumbs.db
 .env
 .env.local
 
+# Local agent / assistant settings (machine-specific paths and permissions)
+.claude/
+
 # Backend package init (kept local; not part of the published tree)
 src/resnik/backend/__init__.py
 

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2025-2026 Steven Doran
 """IdeCompileSettings: serialisation, CLI-argument generation and the
 round-trip through the real Click parser.  No display needed."""
 

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2025-2026 Steven Doran
 """theme.py — palettes and ttk restyling (apply needs a display)."""
 
 from tkinter import ttk

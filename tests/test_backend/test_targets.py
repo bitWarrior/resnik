@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2025-2026 Steven Doran
 """TargetSpec / --target profile tests.
 
 Cortex-M output must stay the stub. ESP32-C3 is the first silicon profile

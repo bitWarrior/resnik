@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2025-2026 Steven Doran
 """
 Modern CLI for the Resnik HAL/S compiler.
 
@@ -422,8 +424,8 @@ Translates legacy Space Shuttle code to safe, modern Rust.
   ✓ Parser   - AST Generation (Foundation)
   → Backend  - Rust Code Generation (Planned)
 
-[bold]Repository:[/bold] https://github.com/resnik-compiler/resnik
-[bold]Documentation:[/bold] https://resnik.readthedocs.io
+[bold]Repository:[/bold] https://github.com/bitWarrior/resnik
+[bold]Documentation:[/bold] https://github.com/bitWarrior/resnik/tree/main/docs
     """
     console.print(Panel(info_panel, title="[bold]Resnik Compiler[/bold]"))
 

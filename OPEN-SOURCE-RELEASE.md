@@ -11,14 +11,14 @@ below is identity, legal, hygiene, then flipping visibility.
 
 ## Minimum path (public this week)
 
-1. Pick one GitHub home (`bitWarrior/resnik` or an org) and fix URLs/email.
-2. Untrack `__pycache__` + `coverage.xml`; gitignore `.claude/`.
+1. ~~Pick one GitHub home and fix URLs/email~~ — done: `bitWarrior/resnik`,
+   `contact.bitWarrior@proton.me`, copyright Steven Doran.
+2. ~~Untrack `__pycache__` + `coverage.xml`; gitignore `.claude/`~~ — done.
 3. ~~Commit the ESP32-C3 / `TargetSpec` work~~ — done; `main` is clean.
-4. Write `CODE_OF_CONDUCT.md`, `SECURITY.md`, `CHANGELOG.md`
-   (`CONTRIBUTING.md` is done).
-5. Decide on CI: add the pytest workflow, or ship without one (the docs no
-   longer claim it exists).
-6. Note HAL/S PDF provenance (`docs/THIRD_PARTY.md` or a README note).
+4. ~~Write `CODE_OF_CONDUCT.md`, `SECURITY.md`, `CHANGELOG.md`~~ — done.
+5. ~~Decide on CI~~ — done: `.github/workflows/ci.yml` (pytest, SHA-pinned
+   actions, read-only token) plus `.github/dependabot.yml`.
+6. ~~Note HAL/S PDF provenance~~ — done: `docs/THIRD_PARTY.md`.
 7. Flip the GitHub repo to **public**, tag `v1.0.0`.
 
 ## 1. Decide identity
@@ -62,8 +62,8 @@ decide before the first public tag.
 
 GPLv3 also asks you to:
 
-- Put a short copyright + GPL pointer at the top of source files (none of the
-  `.py` files have this yet).
+- Put a short copyright + GPL pointer at the top of source files (done: every
+  `.py` and `.sh` file carries an SPDX line and a copyright line).
 - Name a copyright holder and year, for example
   `Copyright (C) 2025–2026 Steven Doran`.
 - Get a copyright disclaimer from an employer or school if they might claim
@@ -147,10 +147,10 @@ git ls-files | grep -E 'venv|__pycache__|\.pyc$|coverage.xml|\.claude'
 | File | Status | Purpose |
 | ---- | ------ | ------- |
 | `LICENSE.md` | Present (GPLv3) | License text |
-| `CODE_OF_CONDUCT.md` | Empty | Contributor Covenant (or any CoC you will enforce) |
+| `CODE_OF_CONDUCT.md` | **Done** | Contributor Covenant (or any CoC you will enforce) |
 | `CONTRIBUTING.md` | **Done** | Setup, project layout, and all four test layers |
-| `SECURITY.md` | Missing | Where to report vulnerabilities (email is enough) |
-| `CHANGELOG.md` | Missing | First entry for the tag you are about to cut (`pyproject.toml` already links this path) |
+| `SECURITY.md` | **Done** | Where to report vulnerabilities (email is enough) |
+| `CHANGELOG.md` | **Done** | First entry for the tag you are about to cut (`pyproject.toml` already links this path) |
 
 ### CI honesty
 
