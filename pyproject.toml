@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "resnik"
-version = "1.0.0"
+version = "1.0.1"
 description = "A modern compiler for the HAL/S aerospace programming language"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -78,6 +78,16 @@ include = [
     "/examples",
     "/README.md",
     "/LICENSE.md",
+    "/CHANGELOG.md",
+    "/SECURITY.md",
+]
+# The two HAL/S reference PDFs are third-party documents (docs/THIRD_PARTY.md)
+# and 24 MB; they stay in the repository but are not redistributed on PyPI.
+exclude = [
+    "/docs/**/*.pdf",
+    # Maintainer-local notes that are not tracked in git; a build from a
+    # maintainer checkout must not pick them up.
+    "/docs/RELEASE_SECURITY_PLAN.md",
 ]
 
 [tool.hatch.build.targets.wheel]
