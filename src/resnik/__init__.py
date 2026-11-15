@@ -14,7 +14,7 @@ Example usage:
     >>> ast = parser.parse(tokens)
 """
 
-__version__ = "1.0.1"
+__version__ = "1.0.2"
 __author__ = "Resnik Compiler Project"
 
 from resnik.lexer import Lexer, Token, LexerError

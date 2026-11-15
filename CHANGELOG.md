@@ -6,6 +6,14 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.0.2]
+
+### Documentation
+
+- The README shows the Resnik logo, loaded from an absolute URL so that it
+  also appears on the PyPI project page. No compiler or IDE behaviour
+  changes from 1.0.1.
+
 ## [1.0.1]
 
 First release on PyPI. No compiler or IDE behaviour changes from 1.0.0.
@@ -70,6 +78,7 @@ First public release.
   `LATCHED`, `READALL` / `FILE`, `WRITE` format controls, `SUBBIT` and
   others listed in [docs/LANGUAGE_SUPPORT.md](docs/LANGUAGE_SUPPORT.md).
 
-[Unreleased]: https://github.com/bitWarrior/resnik/compare/v1.0.1...HEAD
+[Unreleased]: https://github.com/bitWarrior/resnik/compare/v1.0.2...HEAD
+[1.0.2]: https://github.com/bitWarrior/resnik/compare/v1.0.1...v1.0.2
 [1.0.1]: https://github.com/bitWarrior/resnik/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/bitWarrior/resnik/releases/tag/v1.0.0
