@@ -13,7 +13,7 @@ set -Eeuo pipefail
 # ==============================================================================
 # Hardcode the PATH to prevent PATH-injection attacks. Do not trust the 
 # environment the script was launched from.
-export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${HOME}/.cargo/bin"
 
 # Clear the internal field separator to prevent strange word-splitting issues
 # with user input.
@@ -25,14 +25,22 @@ if ! GIT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null); then
     exit 1
 fi
 
-# Determine Resnik path
-readonly _RESNIK="$GIT_ROOT/resnik-venv/bin/resnik"
+# Determine Resnik path. RESNIK_BIN overrides the default virtual environment,
+# for example in CI, where Resnik is installed into the runner's Python.
+readonly _RESNIK="${RESNIK_BIN:-$GIT_ROOT/resnik-venv/bin/resnik}"
 
 # Verify Resnik exists and is executable
 if [[ ! -x "$_RESNIK" ]]; then
     echo "Error: Resnik executable not found or not executable." >&2
     echo "Path checked: $_RESNIK" >&2
     echo "Did you forget to build the virtual environment?" >&2
+    exit 1
+fi
+
+# RESNIK_REQUIRE_RUST=1 (set in CI) turns a missing Rust toolchain into an
+# immediate error instead of one compilation failure per test case.
+if [[ "${RESNIK_REQUIRE_RUST:-}" == "1" ]] && ! command -v rustc >/dev/null 2>&1; then
+    echo "Error: RESNIK_REQUIRE_RUST=1 but rustc was not found on PATH." >&2
     exit 1
 fi
 

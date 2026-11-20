@@ -14,7 +14,8 @@
 #   Scenario B — overrun detection reports the right task and the
 #                executive keeps running the other tasks afterwards.
 #
-# Skips cleanly (exit 0 with a notice) when rustc is not installed.
+# Skips cleanly (exit 0 with a notice) when rustc is not installed, unless
+# RESNIK_REQUIRE_RUST=1, which makes that an error (CI sets it).
 
 set -Eeuo pipefail
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${HOME}/.cargo/bin"
@@ -24,12 +25,17 @@ if ! GIT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null); then
     echo "Error: run from within the git repository." >&2
     exit 1
 fi
-readonly _PY="$GIT_ROOT/resnik-venv/bin/python"
+# RESNIK_PYTHON overrides the default virtual environment (used in CI).
+readonly _PY="${RESNIK_PYTHON:-$GIT_ROOT/resnik-venv/bin/python}"
 if [[ ! -x "$_PY" ]]; then
     echo "Error: $_PY not found — create the venv per README Installation." >&2
     exit 1
 fi
 if ! command -v rustc >/dev/null 2>&1; then
+    if [[ "${RESNIK_REQUIRE_RUST:-}" == "1" ]]; then
+        echo "Error: RESNIK_REQUIRE_RUST=1 but rustc was not found on PATH." >&2
+        exit 1
+    fi
     echo "SKIP: rustc not found — install Rust via rustup to run this tier."
     exit 0
 fi
